@@ -77,7 +77,17 @@ test.each([32, 64] as const)("strict scalar reads check dense storage inline (%i
 
 test("reference reads retain inline and keep a cold +1 runtime fallback", () => {
   const read: IrExpr = { kind: "arrayGet", arr: ref("s", words), index, type: STRING, loc };
-  const llvm = emitLlvmModule(module("word", STRING, [{ kind: "return", value: read, loc }]));
+  // An element removal in the body keeps the read from being lent as a
+  // borrowed return: the result must own its reference.
+  const truncate: IrStmt = {
+    kind: "arraySetLength",
+    arr: ref("s", words),
+    length: { kind: "numLit", value: 1, type: F64, loc },
+    loc,
+  };
+  const llvm = emitLlvmModule(
+    module("word", STRING, [truncate, { kind: "return", value: read, loc }]),
+  );
   const fn = body(llvm, "word");
   expect(fn).toMatch(/icmp ne ptr .*, null/);
   expect(fn).toContain("@scr_str_retain_v(");

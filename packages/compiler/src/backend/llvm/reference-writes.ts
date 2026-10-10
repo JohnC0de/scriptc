@@ -201,7 +201,7 @@ export class ReferenceWrites {
     } = {},
     /** Fields no code writes once their object is constructed
      * (immutability.ts, from cycle-mutability's construction-only facts). */
-    private readonly immutable: Pick<ImmutableFields, "classField" | "recordField"> | null = null,
+    private readonly immutable: ImmutableFields | null = null,
   ) {
     this.key(HEAP_KEY);
     this.unions = new Map((types.unions ?? []).map((u) => [u.id, u]));
@@ -372,17 +372,16 @@ export class ReferenceWrites {
         const inComponent = new Set(members);
         for (const m of members) {
           const node = nodes.get(m)!;
-          for (const id of node.local) bits[id >>> 5]! |= 1 << (id & 31);
+          for (const id of node.local) setBit(bits, id);
           for (const callee of node.edges) {
             if (inComponent.has(callee)) continue;
             const s = this.summaries.get(callee);
             if (s === undefined || s === null) continue;
-            for (let w = 0; w < this.words; w++) bits[w]! |= s[w]!;
+            orInto(bits, s);
           }
         }
         // An unknown heap write subsumes the precise heap keys.
-        const summary: Writes =
-          (bits[0]! & 1) !== 0 ? this.heapAll : bits.some((w) => w !== 0) ? bits : null;
+        const summary: Writes = (bits[0]! & 1) !== 0 ? this.heapAll : anyBit(bits) ? bits : null;
         for (const m of members) this.summaries.set(m, summary);
       }
     }
@@ -787,7 +786,7 @@ export class ReferenceWrites {
     for (const p of parts) {
       if (p === null) continue;
       if (out === null) out = new Uint32Array(this.words);
-      for (let w = 0; w < this.words; w++) out[w]! |= p[w]!;
+      orInto(out, p);
     }
     return out;
   }
@@ -799,7 +798,7 @@ export class ReferenceWrites {
       const id = this.keys.get(k);
       if (id === undefined || id >= this.words * 32) continue;
       if (out === null) out = new Uint32Array(this.words);
-      out[id >>> 5]! |= 1 << (id & 31);
+      setBit(out, id);
     }
     return out;
   }
@@ -1079,4 +1078,18 @@ class CallTargets {
     const defs = this.definitions.get(fn)!;
     return defs.has(id);
   }
+}
+
+function setBit(bits: Uint32Array, id: number): void {
+  const w = id >>> 5;
+  bits[w] = bits[w]! | (1 << (id & 31));
+}
+
+function orInto(bits: Uint32Array, other: Uint32Array): void {
+  for (let w = 0; w < bits.length; w++) bits[w] = bits[w]! | other[w]!;
+}
+
+function anyBit(bits: Uint32Array): boolean {
+  for (let w = 0; w < bits.length; w++) if (bits[w] !== 0) return true;
+  return false;
 }

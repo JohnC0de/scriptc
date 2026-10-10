@@ -5553,8 +5553,10 @@ export class LlEmitter {
         stmt: () => true,
         expr: (e) => {
           if (e.kind === "fieldGet") keys.add(rw.fieldKey(e.className, e.field));
-          else if (e.kind === "recordGet") keys.add(`r:${e.field}`).add("r:*");
-          else if (e.kind === "arrayGet") keys.add("a");
+          else if (e.kind === "recordGet") {
+            keys.add(`r:${e.field}`);
+            keys.add("r:*");
+          } else if (e.kind === "arrayGet") keys.add("a");
           else if (e.kind === "call" && this.borrowedReturns.has(e.callee) && !seen.has(e.callee)) {
             seen.add(e.callee);
             pending.push(e.callee);
