@@ -25,7 +25,13 @@ import { f64Lit, ffiNativeTypeLl, ffiNativeParamLl, ffiNativeReturnLl } from "./
 import { canStackUnion, emitStackUnion } from "./stack-unions.js";
 import { emitCallArrayRead } from "./local-array-reads.js";
 import { emitStackMapRead } from "./map-read-lifetimes.js";
-import { borrowableInputs, emitBorrowedInput, emitBorrowedInputs } from "./borrowed-inputs.js";
+import {
+  borrowableInputs,
+  emitBorrowedInput,
+  emitBorrowedInputs,
+  inputSuffixWrites,
+} from "./borrowed-inputs.js";
+import type { Writes } from "./reference-writes.js";
 
 export function emitCallExpr(
   host: LlvmEmitterContext,
@@ -58,12 +64,18 @@ export function emitCallExpr(
       const borrowed = host.callLifetimes.borrowed.get(e.callee);
       const projected = host.callLifetimes.parameters.get(e.callee);
       const inputs = borrowed
-        ? borrowableInputs(host, e.args, host.referenceEffects.functions.has(e.callee))
+        ? borrowableInputs(
+            host,
+            e.args,
+            host.referenceEffects.functions.has(e.callee),
+            host.referenceWrites?.summary(e.callee),
+          )
         : [];
       // Borrowed snapshots live through this call, not through the whole
       // enclosing expression. Otherwise a large initializer accumulates
       // owners and repeats their cleanup at every later throwing call.
       if (borrowed) host.frames.push([]);
+      let suffixes: Writes[] | undefined;
       const args = e.args.map((a, index) => {
         if (borrowed?.has(index)) {
           // A heap-borrowing helper may retain or return its argument.
@@ -73,7 +85,18 @@ export function emitCallExpr(
             const callback = host.stackCallbacks.emit(host, a);
             if (callback) return callback;
             const read = host.callArrayReads.get(a);
-            if (read) return emitCallArrayRead(host, read);
+            if (read) {
+              suffixes ??= inputSuffixWrites(
+                host,
+                e.args,
+                host.referenceWrites?.summary(e.callee) ?? null,
+              );
+              const lend =
+                !read.borrow &&
+                index < suffixes.length &&
+                host.unwrittenCallArrayRead(read, suffixes[index]!);
+              return emitCallArrayRead(host, lend ? { ...read, borrow: true } : read);
+            }
             const mapRead = host.mapReadLifetimes.arguments.get(a);
             if (mapRead) {
               const result = emitStackMapRead(host, mapRead);
@@ -739,6 +762,7 @@ export function emitCallExpr(
           host,
           e.args,
           host.referenceEffects.functions.has(ctorName),
+          host.referenceWrites?.constructWrites(e.className),
         );
         host.frames.push([]);
         const args = e.args.map((a, i) => {
@@ -951,7 +975,15 @@ export function emitCallExpr(
       // (LlEmitter.computeVirtualBorrowing): those are passed like borrowed
       // arguments of a direct call, owned snapshots living in this frame.
       const borrowed = host.virtualSlotBorrowed(meta.root.def.name, slotIdx);
-      const inputs = borrowed.size > 0 ? borrowableInputs(host, e.args, false) : [];
+      const inputs =
+        borrowed.size > 0
+          ? borrowableInputs(
+              host,
+              e.args,
+              false,
+              host.referenceWrites?.virtualWrites(e.className, e.method),
+            )
+          : [];
       if (borrowed.size > 0) host.frames.push([]);
       const args = e.args.map((a, index) =>
         borrowed.has(index) && inputs[index] ? host.emitReadReceiver(a) : host.emitExpr(a),
