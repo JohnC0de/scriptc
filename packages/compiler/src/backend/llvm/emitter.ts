@@ -5448,6 +5448,27 @@ export class LlEmitter {
     return !rw.conflicts(["a", ...keys], writes);
   }
 
+  /** `return x` of a local whose slot is an owned scope entry of the same
+   * type: the return can take over the local's reference. */
+  private movableReturn(
+    value: IrExpr | null,
+  ): { scope: LlScopeEntry[]; entry: LlScopeEntry; index: number } | null {
+    if (value === null || value.kind !== "varRef" || !isRefCounted(value.type)) return null;
+    if (this.currentBorrowedReturn || this.currentWasiCoro !== null) return null;
+    const binding = this.binding(value.localId);
+    if (binding.kind !== "local" || binding.local === undefined || binding.local.boxed) return null;
+    if (!typeEquals(binding.type, value.type) || !typeEquals(this.currentReturnType, value.type))
+      return null;
+    for (const scope of this.scopes) {
+      const index = scope.findIndex((entry) => entry.slot === binding.slot);
+      if (index < 0) continue;
+      const entry = scope[index]!;
+      if (entry.boxed || entry.lazy || !typeEquals(entry.type, value.type)) return null;
+      return { scope, entry, index };
+    }
+    return null;
+  }
+
   /** A walk host for a body that may write the heap: each walk must read
    * only locations the whole body (with its callees) never writes;
    * rebinding the walk locals themselves releases nothing. */
@@ -6597,7 +6618,17 @@ export class LlEmitter {
         // the actual ret. The parked value owns a synthetic slot-backed
         // scope entry during each copy so a throwing finally releases it.
         let v: LlValue | null = null;
-        if (s.value !== null && this.currentBorrowedReturn) {
+        const moved = this.finallyStack.length === 0 ? this.movableReturn(s.value) : null;
+        if (moved !== null) {
+          // Returning an owned local hands its reference to the caller: no
+          // retain now and no release of the local below.
+          const t = B.tmp();
+          B.line(`${t} = load ptr, ptr ${moved.entry.slot}`);
+          v = { name: t, type: s.value!.type };
+          moved.scope.splice(moved.scope.indexOf(moved.entry), 1);
+          this.releaseForJump(0, 0);
+          moved.scope.splice(moved.index, 0, moved.entry);
+        } else if (s.value !== null && this.currentBorrowedReturn) {
           // A borrowed-return body hands back its walk without a reference
           // (it has no try statements, so no finally can intervene).
           v = this.emitReadReceiver(s.value);
@@ -6632,7 +6663,7 @@ export class LlEmitter {
           this.scopes = savedScopes;
           this.finallyStack = savedFinally;
           this.tryStack = savedTry;
-        } else {
+        } else if (moved === null) {
           this.releaseForJump(0, 0);
         }
         if (!B.isTerminated()) {
