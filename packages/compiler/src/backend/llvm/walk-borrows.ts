@@ -140,6 +140,10 @@ export function analyzeWalks(fn: IrFunction, host: WalkBorrowHost): WalkFacts {
       case "fieldGet":
       case "recordGet":
         return host.borrowsWithoutOwning(e) && walk(e.obj);
+      // A required element of a walked array (the read still traps when the
+      // element is missing).
+      case "arrayGet":
+        return host.borrowsWithoutOwning(e) && walk(e.arr);
       case "unionNarrow":
       case "downcast":
       case "upcast":

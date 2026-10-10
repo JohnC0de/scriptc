@@ -6630,8 +6630,17 @@ export class LlEmitter {
           moved.scope.splice(moved.index, 0, moved.entry);
         } else if (s.value !== null && this.currentBorrowedReturn) {
           // A borrowed-return body hands back its walk without a reference
-          // (it has no try statements, so no finally can intervene).
-          v = this.emitReadReceiver(s.value);
+          // (it has no try statements, so no finally can intervene). An
+          // optional element read lends the element its array keeps alive.
+          const read = this.optionalArrayReads.get(s.value);
+          if (read) {
+            const slot = B.slot();
+            B.entryAllocas.push(`${slot} = alloca ptr`);
+            emitLocalArrayRead(this, { ...read, borrow: true }, slot);
+            const t = B.tmp();
+            B.line(`${t} = load ptr, ptr ${slot}`);
+            v = { name: t, type: s.value.type };
+          } else v = this.emitReadReceiver(s.value);
         } else if (s.value !== null) {
           v = this.emitExpr(s.value);
           this.moveTemp(v);
@@ -7527,6 +7536,10 @@ export class LlEmitter {
       if (result.owner) this.ownSlot(result.owner.slot, result.owner.type);
       return result.value;
     }
+    // A borrowed-return helper (such as an optional element read) lends its
+    // result like any borrowed-return call.
+    if (e.kind === "call" && this.borrowedReturns.has(e.callee) && this.canBorrowReceiver(e))
+      return emitBorrowedResultCall(this, e);
     const arrayRead = this.optionalArrayReads.get(e);
     if (arrayRead) return emitProjectedArrayRead(this, arrayRead);
     const narrow = this.checkedNarrows.get(e);
@@ -7907,6 +7920,14 @@ export class LlEmitter {
         return this.nullableFieldGet(e) === null;
       case "recordGet":
         return true;
+      // emitReadReceiver lends a required element of a borrowed array when
+      // computing the index removes no edge.
+      case "arrayGet":
+        return (
+          e.arr.type.kind === "array" &&
+          this.optionalArrayReads.get(e) === null &&
+          this.referenceEffects.preserves(e.index)
+        );
       case "unionNarrow":
         return this.nullableUnions.has(e.unionId);
       case "downcast":
