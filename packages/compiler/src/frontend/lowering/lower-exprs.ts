@@ -20,6 +20,7 @@ import { dirname } from "node:path";
 import * as posix from "node:path/posix";
 import type { Lowerer } from "./lowerer.js";
 import { checkedClassAssertion, checkedClassUnionAssertion } from "./class-assertions.js";
+import { checkedArmExtraction } from "./coercions/unions.js";
 import { narrowClassUnion, narrowStoredClassValue } from "./class-unions.js";
 import { lowerUnionFieldRead, lowerUnionFieldWrite } from "./expressions/union-fields.js";
 import { captureContextArguments } from "./function-context.js";
@@ -1044,6 +1045,13 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     // tests, so only side-effect-free reads compose — and when every arm
     // agrees the whole expression folds to that one string (dropping only
     // the pure read, the trust-the-checker bet lowerUnitComparison makes).
+    // An effectful producer (a getter) evaluates once into a hidden local.
+    const prelude: IrStmt[] = [];
+    if (operand.type.kind === "union" && !isSafeToRepeat(operand)) {
+      const local = lowerer.declareHiddenLocal("%typeofOperand", operand.type);
+      prelude.push({ kind: "varDecl", localId: local.id, init: operand, loc });
+      operand = varRef(local.id, operand.type, loc);
+    }
     if (operand.type.kind === "union" && isSafeToRepeat(operand)) {
       const def = lowerer.unions.get(operand.type.unionId);
       const answers = def?.arms.map(typeofAnswer);
@@ -1094,7 +1102,9 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
             loc,
           };
         }
-        return result;
+        return prelude.length > 0
+          ? { kind: "seqExpr", stmts: prelude, result, type: STRING, loc }
+          : result;
       }
     }
     if (operand.type.kind === "dyn") {
@@ -3629,6 +3639,10 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
       narrowed.className !== expr.type.className &&
       lowerer.isSubclassOf(narrowed.className, expr.type.className)
     ) {
+      if (lowerer.narrowing.untrusted(node, narrowed)) {
+        const checked = checkedClassAssertion(lowerer, expr, narrowed, expr.loc);
+        if (checked) return checked;
+      }
       return { kind: "downcast", value: expr, type: narrowed, loc: expr.loc };
     }
     return expr;
@@ -3675,6 +3689,8 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
     const arrayTags = lowerer.arrayValueTags(expr.type.unionId);
     if (arrayTags.length === 1) {
       const arm = def!.arms[arrayTags[0]!]!;
+      const checked = checkedStaleArm(lowerer, node, expr, arrayTags[0]!, arm);
+      if (checked) return checked;
       return {
         kind: "unionNarrow",
         unionId: expr.type.unionId,
@@ -3712,6 +3728,14 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
         const values = literalValues(lowerer.checker.getTypeOfSymbol(property));
         const arm = values && literalUnionArm(def, values, (id) => lowerer.shapes.get(id));
         if (arm) {
+          const checked = checkedStaleArm(
+            lowerer,
+            node,
+            expr,
+            lowerer.armTag(expr.type.unionId, arm),
+            arm,
+          );
+          if (checked) return checked;
           return {
             kind: "unionNarrow",
             unionId: expr.type.unionId,
@@ -3746,6 +3770,10 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
       ) &&
       lowerer.isSubclassOf(narrowed.className, valueType.className)
     ) {
+      const checked = checkedStaleArm(lowerer, node, expr, valueTag, valueType, narrowed);
+      if (checked) {
+        return checkedClassAssertion(lowerer, checked, narrowed, expr.loc) ?? checked;
+      }
       return {
         kind: "downcast",
         value: {
@@ -3762,6 +3790,8 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
     }
     return expr;
   }
+  const checked = checkedStaleArm(lowerer, node, expr, tag, narrowed);
+  if (checked) return checked;
   return {
     kind: "unionNarrow",
     unionId: expr.type.unionId,
@@ -3770,6 +3800,66 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
     type: narrowed,
     loc: expr.loc,
   };
+}
+
+/** The checked form of maybeNarrow's arm extraction for a narrowing the
+ * checker may hold past code that replaced the value (a call clearing the
+ * property; see NarrowingStability). Every other arm throws the TypeError
+ * Node raises for the operation consuming the read (`Cannot read
+ * properties of undefined (reading 'x')`, `o.f is not a function`), or the
+ * stranded-value TypeError where Node would carry the value on. Null when
+ * the narrowing is provably current. `narrowed` is the checker's type when
+ * it refines the arm (a subclass view). */
+function checkedStaleArm(
+  lowerer: Lowerer,
+  node: ts.Node,
+  value: IrExpr,
+  tag: number,
+  arm: IrType,
+  narrowed: IrType = arm,
+): IrExpr | null {
+  if (value.type.kind !== "union" || tag < 0) return null;
+  if (!lowerer.narrowing.untrusted(node, narrowed)) return null;
+  const inPlace = checkedArmExtraction(lowerer, value, tag, arm, (found) =>
+    staleReadMessage(node, found),
+  );
+  if (inPlace) return inPlace;
+  const helper = lowerer.narrowedArmHelper(value.type.unionId, arm, value.loc);
+  return helper ? lowerer.checkedNarrowCall(helper, value, arm, value.loc) : null;
+}
+
+/** Node's TypeError for the operation consuming `node` when it holds a
+ * value of type `found`, or null where Node would not throw. */
+function staleReadMessage(node: ts.Node, found: IrType): string | null {
+  let child: ts.Node = node;
+  let parent = node.parent;
+  while (ts.isParenthesizedExpression(parent)) {
+    child = parent;
+    parent = parent.parent;
+  }
+  if (ts.isCallExpression(parent) && parent.expression === child && !parent.questionDotToken) {
+    return found.kind === "func" ? null : `${node.getText()} is not a function`;
+  }
+  const unit = found.kind === "undefinedT" ? "undefined" : found.kind === "nullT" ? "null" : null;
+  if (unit === null) return null;
+  if (
+    !(ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) ||
+    parent.expression !== child ||
+    parent.questionDotToken
+  )
+    return null;
+  let key: string | null = null;
+  if (ts.isPropertyAccessExpression(parent)) key = parent.name.text;
+  else if (ts.isStringLiteral(parent.argumentExpression)) key = parent.argumentExpression.text;
+  else if (ts.isNumericLiteral(parent.argumentExpression))
+    key = String(Number(parent.argumentExpression.text));
+  if (key === null) return null;
+  const store = parent.parent;
+  return ts.isBinaryExpression(store) &&
+    store.left === parent &&
+    store.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ? `Cannot set properties of ${unit} (setting '${key}')`
+    : `Cannot read properties of ${unit} (reading '${key}')`;
 }
 
 /** A runtime-optional slot can be assigned while a truthy guard is in
