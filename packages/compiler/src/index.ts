@@ -103,7 +103,8 @@ import {
 } from "./library/sidecar.js";
 import { type IrModule, type SrcLoc } from "./ir/ir.js";
 import { moduleRuntimeFeatures } from "./ir/runtime-features.js";
-import { serializeModule } from "./ir/serialize.js";
+import { serializeModuleParts } from "./ir/serialize.js";
+import { writeTextParts } from "./text-parts.js";
 import { validateModule } from "./ir/validate.js";
 import { loadProgram } from "./frontend/program-node.js";
 import { runFrontend, type FrontendFactory } from "./frontend/pipeline.js";
@@ -206,7 +207,13 @@ export {
 } from "./compat/fetch-profile.js";
 export { LIB_FN_SIGS } from "./ir/builtin-signatures.js";
 export { validateModule } from "./ir/validate.js";
-export { deserializeModule, IR_VERSION, serializeModule } from "./ir/serialize.js";
+export {
+  deserializeModule,
+  deserializeModuleBytes,
+  IR_VERSION,
+  serializeModule,
+  serializeModuleParts,
+} from "./ir/serialize.js";
 export {
   resolveLibraryFences,
   type LibraryFenceDecl,
@@ -670,7 +677,7 @@ async function prepareExecutableInput(
 
   if (outputKind === "ir") {
     await mkdir(dirname(opts.outPath), { recursive: true });
-    await writeFile(opts.outPath, serializeModule(mod, true));
+    await writeTextParts(opts.outPath, serializeModuleParts(mod));
     return { ok: true, artifact: { kind: "ir", path: opts.outPath } };
   }
 
@@ -692,7 +699,7 @@ async function prepareExecutableInput(
     }
     if (outputKind === "llvm") {
       await mkdir(dirname(opts.outPath), { recursive: true });
-      await writeFile(opts.outPath, llvm);
+      await writeTextParts(opts.outPath, llvm);
     } else {
       try {
         await emitNativeArtifact({
@@ -766,7 +773,7 @@ async function prepareExecutableInput(
   let irPath: string | undefined;
   if (opts.emitIr) {
     irPath = defaultSourcePaths.ir;
-    await writeFile(irPath, serializeModule(mod, true));
+    await writeTextParts(irPath, serializeModuleParts(mod));
   }
 
   const nativeFeatures = executableNativeFeatures(
@@ -1448,7 +1455,7 @@ async function emitSemanticLibraryHit(
   let irPath: string | undefined;
   if (opts.emitIr) {
     irPath = join(opts.outDir, `${stem}.lib.ir.json`);
-    await writeFile(irPath, serializeModule(mod, true));
+    await writeTextParts(irPath, serializeModuleParts(mod));
   }
   await compileLibraryNative(profile, llvmPath, archivePath, opts.sanitize ?? false, hit.native);
   timing("native-archive");
@@ -1724,7 +1731,7 @@ async function compileLibraryTracked(
           ? Buffer.byteLength(ll)
           : ll.reduce((bytes, part) => bytes + Buffer.byteLength(part), 0),
     });
-    await writeFile(llvmPath, ll);
+    await writeTextParts(llvmPath, ll);
     timing("llvm-write");
   } catch (err) {
     if (!(err instanceof LlvmUnsupportedError)) throw err;
@@ -1734,7 +1741,7 @@ async function compileLibraryTracked(
   let irPath: string | undefined;
   if (opts.emitIr) {
     irPath = join(opts.outDir, `${stem}.lib.ir.json`);
-    await writeFile(irPath, serializeModule(mod, true));
+    await writeTextParts(irPath, serializeModuleParts(mod));
   }
 
   const nativeFeatures = libraryNativeFeatures(mod, profile.emission);

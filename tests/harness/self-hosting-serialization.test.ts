@@ -178,6 +178,26 @@ for (const backend of ["llvm"] as const) {
       expect(deserializeModule(many.native.stdout.toString())).toEqual(
         deserializeModule(many.oracle.stdout.toString()),
       );
+      // Byte decoding and compact parts, from both encodings.
+      for (const input of [serializeModule(manyFunctions), serializeModule(manyFunctions, true)]) {
+        const parts = run(input, ["bytes"]);
+        expect(parts.native.status, parts.native.stdout.toString()).toBe(0);
+        expect(parts.native.stdout.toString().trimEnd()).not.toContain("\n");
+        expect(deserializeModule(parts.native.stdout.toString())).toEqual(manyFunctions);
+        expect(deserializeModule(parts.native.stdout.toString())).toEqual(
+          deserializeModule(parts.oracle.stdout.toString()),
+        );
+      }
+      const truncated = run(serializeModule(manyFunctions, true).slice(0, -1), ["bytes"]);
+      expect(truncated.native.status).toBe(1);
+      expect(truncated.oracle.status).toBe(1);
+      const olderBytes = run(
+        serializeModule({ ...manyFunctions, irVersion: IR_VERSION - 1 }, true),
+        ["bytes"],
+      );
+      expect(olderBytes.native.status).toBe(1);
+      expect(olderBytes.native.stdout).toEqual(olderBytes.oracle.stdout);
+      expect(olderBytes.native.stdout.toString()).toContain("IR version mismatch");
       const print = numeric.functions[0]!.body[1]!;
       expect(print.kind).toBe("exprStmt");
       if (print.kind !== "exprStmt" || print.expr.kind !== "intrinsic")
