@@ -15778,6 +15778,36 @@
     "<repo>/tests/corpus/4602-constructor-escape-order.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4630-reference-write-call-arguments.ts": {
+   "order": [
+    "<repo>/tests/corpus/4630-reference-write-call-arguments.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4631-reference-write-aliases.ts": {
+   "order": [
+    "<repo>/tests/corpus/4631-reference-write-aliases.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4632-reference-write-loops-and-walks.ts": {
+   "order": [
+    "<repo>/tests/corpus/4632-reference-write-loops-and-walks.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4633-reference-write-callbacks-returns.ts": {
+   "order": [
+    "<repo>/tests/corpus/4633-reference-write-callbacks-returns.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4634-optional-element-borrowed-returns.ts": {
+   "order": [
+    "<repo>/tests/corpus/4634-optional-element-borrowed-returns.ts"
+   ],
+   "diags": []
   }
  }
 }
