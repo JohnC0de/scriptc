@@ -217,6 +217,91 @@ static void check_threads(void) {
 }
 #endif
 
+#if defined(SCR_WORKERS) && SCR_SMALL_ALLOC && defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+
+/* An exiting thread returns the pages that hold only free blocks; the next
+ * thread to claim the arena carves the returned range again, zeroed, before
+ * growing the slice. */
+enum { TRIM_BLOCKS = 1 << 20, TRIM_KEEP = 4096, TRIM_SIZE = 48 };
+static unsigned char **trim_blocks;
+static unsigned char *trim_kept[TRIM_BLOCKS / TRIM_KEEP];
+static uintptr_t trim_lo, trim_hi;
+static size_t trim_outside;
+
+static size_t resident_pages(uintptr_t lo, uintptr_t hi) {
+  size_t page = (size_t)sysconf(_SC_PAGESIZE);
+  lo &= ~(uintptr_t)(page - 1);
+  size_t n = (hi - lo + page - 1) / page, count = 0;
+  unsigned char *vec = malloc(n);
+  assert(vec && mincore((void *)lo, n * page, vec) == 0);
+  for (size_t i = 0; i < n; i++) count += vec[i] & 1;
+  free(vec);
+  return count;
+}
+
+static void *trim_allocate(void *arg) {
+  (void)arg;
+  trim_lo = UINTPTR_MAX;
+  trim_hi = 0;
+  for (size_t i = 0; i < TRIM_BLOCKS; i++) {
+    trim_blocks[i] = scr_mem_alloc(TRIM_SIZE);
+    assert(trim_blocks[i] && owned(trim_blocks[i]));
+    fill(trim_blocks[i], TRIM_SIZE, (unsigned char)i);
+    if ((uintptr_t)trim_blocks[i] < trim_lo) trim_lo = (uintptr_t)trim_blocks[i];
+    if ((uintptr_t)trim_blocks[i] + TRIM_SIZE > trim_hi) trim_hi = (uintptr_t)trim_blocks[i] + TRIM_SIZE;
+  }
+  for (size_t i = 0; i < TRIM_BLOCKS; i++) {
+    if (i % TRIM_KEEP == 0) trim_kept[i / TRIM_KEEP] = trim_blocks[i];
+    else scr_mem_free(trim_blocks[i]);
+  }
+  scr_sa_thread_park();
+  return NULL;
+}
+
+static void *trim_reuse(void *arg) {
+  (void)arg;
+  trim_outside = 0;
+  for (size_t i = 0; i < TRIM_BLOCKS; i++) {
+    unsigned char *p = scr_mem_calloc(TRIM_SIZE);
+    assert(p && owned(p));
+    for (size_t k = 0; k < TRIM_SIZE; k++) assert(p[k] == 0);
+    fill(p, TRIM_SIZE, (unsigned char)i);
+    if ((uintptr_t)p < trim_lo || (uintptr_t)p >= trim_hi) trim_outside++;
+    trim_blocks[i] = p;
+  }
+  for (size_t i = 0; i < TRIM_BLOCKS; i++) scr_mem_free(trim_blocks[i]);
+  scr_sa_thread_park();
+  return NULL;
+}
+
+static void check_trim(void) {
+  trim_blocks = malloc(TRIM_BLOCKS * sizeof *trim_blocks);
+  assert(trim_blocks);
+  pthread_t t;
+  assert(pthread_create(&t, NULL, trim_allocate, NULL) == 0);
+  assert(pthread_join(t, NULL) == 0);
+  scr_sa_wait_trims(); /* a helper thread returns the pages */
+  /* One page per kept block stays, give or take the pages at run ends. */
+  size_t total = (trim_hi - trim_lo) / (size_t)sysconf(_SC_PAGESIZE);
+  size_t resident = resident_pages(trim_lo, trim_hi);
+  assert(resident < total / 8);
+  for (size_t k = 0; k < TRIM_BLOCKS / TRIM_KEEP; k++)
+    verify(trim_kept[k], TRIM_SIZE, (unsigned char)(k * TRIM_KEEP));
+  assert(pthread_create(&t, NULL, trim_reuse, NULL) == 0);
+  assert(pthread_join(t, NULL) == 0);
+  scr_sa_wait_trims();
+  /* Nearly every block came from the returned range: the slice did not grow. */
+  assert(trim_outside < 4 * TRIM_BLOCKS / TRIM_KEEP + 256);
+  for (size_t k = 0; k < TRIM_BLOCKS / TRIM_KEEP; k++) {
+    verify(trim_kept[k], TRIM_SIZE, (unsigned char)(k * TRIM_KEEP));
+    scr_mem_free(trim_kept[k]); /* remote free into the parked arena */
+  }
+  free(trim_blocks);
+}
+#endif
+
 int main(void) {
 #if SCR_SMALL_ALLOC
   check_slice_growth(); /* first: its class must be untouched */
@@ -227,6 +312,9 @@ int main(void) {
   check_churn();
 #if defined(SCR_WORKERS) && SCR_SMALL_ALLOC
   check_threads();
+#ifdef __linux__
+  check_trim();
+#endif
   printf("allocator checks passed: size-class workers\n");
 #else
   printf("allocator checks passed: %s\n", SCR_SMALL_ALLOC ? "size-class" : "system");

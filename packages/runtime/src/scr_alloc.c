@@ -6,9 +6,10 @@
  * and the out-of-line entry points the LLVM backend calls for acyclic
  * records and class instances.
  *
- * Freed blocks are recycled within their class and never returned to the
- * operating system; the reservation itself costs address space only, and
- * pages are committed as the bump pointers first touch them. */
+ * Freed blocks are recycled within their class; the reservation itself
+ * costs address space only, and pages are committed as the bump pointers
+ * first touch them. Only an exiting worker thread returns pages, those
+ * holding nothing but free blocks (scr_sa_trim, Linux). */
 #include "scr_runtime.h"
 
 /* Defined in every build: the emitted fast paths read it (see the layout
@@ -84,6 +85,15 @@ static char *scr_sa_extend(char *start, char *lim, char *end) {
 #ifdef SCR_WORKERS
 #include <pthread.h>
 #include <stdatomic.h>
+#if defined(__linux__) && defined(MADV_DONTNEED)
+#define SCR_SA_TRIM 1
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+#endif
 
 /* Per-thread arenas (contract in scr_runtime.h). The region is reserved
  * once; arena i spans [region + i * arena_span, + arena_span) and is split
@@ -123,6 +133,13 @@ static bool scr_sa_reserve_region(void) {
   return atomic_load_explicit(&scr_sa_region, memory_order_acquire) != 0;
 }
 
+#ifdef SCR_SA_TRIM
+/* The arena's carved bytes when the current thread claimed it (see
+ * scr_sa_trim). */
+static size_t scr_sa_claim_carved[SCR_SA_ARENAS];
+static size_t scr_sa_carved(void);
+#endif
+
 /* Moves every block other threads freed into this arena's free lists. */
 static void scr_sa_drain_remote(void) {
   ScrSaBlock *b = atomic_exchange_explicit(&scr_sa_remote[scr_sa_arena], NULL, memory_order_acquire);
@@ -161,14 +178,287 @@ static bool scr_sa_reserve(void) {
         scr_sa.shift = scr_sa_region_shift;
       }
       scr_sa_drain_remote();
+#ifdef SCR_SA_TRIM
+      scr_sa_claim_carved[i] = scr_sa_carved();
+#endif
       return true;
     }
   }
 }
 
+#ifdef SCR_SA_TRIM
+/* Returning an exited thread's free memory (Linux). When a script thread
+ * exits, every page of its arena that holds only free blocks goes back to
+ * the system (MADV_DONTNEED, after which it reads as zero), so other
+ * threads can use that memory while the arena is parked. The free blocks on
+ * the kept pages are relinked in address order; the returned runs of pages
+ * become zeroed carve regions (`ScrSaHoles`), which the next thread to claim
+ * the arena carves before the slice's own frontier: the bump fast paths
+ * already rely on carved memory being zero. A thread that carved less than
+ * SCR_SA_TRIM_MIN, or whose arena holds less than that in free blocks,
+ * leaves the arena as it is. */
+#define SCR_SA_TRIM_MIN ((size_t)16 << 20)
+typedef struct {
+  char *lo, *hi;
+} ScrSaRun;
+typedef struct {
+  ScrSaRun *runs; /* zeroed regions left to carve, carved from the end */
+  size_t n, cap;
+  char *bump, *lim; /* the frontier while a region is carved (lim != NULL) */
+} ScrSaHoles;
+static ScrSaHoles scr_sa_holes[SCR_SA_ARENAS][SCR_SA_NCLASS];
+
+/* Bytes carved from the calling thread's slices: up to each frontier. */
+static size_t scr_sa_carved(void) {
+  size_t carved = 0;
+  for (unsigned c = 0; c < SCR_SA_NCLASS; c++) {
+    if (!scr_sa.lim[c]) continue;
+    const ScrSaHoles *h = &scr_sa_holes[scr_sa_arena][c];
+    char *top = h->lim ? h->bump : scr_sa.bump[c];
+    carved += (size_t)(top - ((char *)scr_sa.base + ((size_t)c << scr_sa.shift)));
+  }
+  return carved;
+}
+
+/* For the slow path of class c, whose bump room is below sz: moves the
+ * bump pointer to the next zeroed region, or back to the frontier. */
+static void scr_sa_next_hole(unsigned c, size_t sz) {
+  ScrSaHoles *h = &scr_sa_holes[scr_sa_arena][c];
+  if ((size_t)(scr_sa.lim[c] - scr_sa.bump[c]) >= sz || (!h->n && !h->lim)) return;
+  if (h->n) {
+    if (!h->lim) {
+      h->bump = scr_sa.bump[c];
+      h->lim = scr_sa.lim[c];
+    }
+    ScrSaRun r = h->runs[--h->n];
+    scr_sa.bump[c] = r.lo;
+    scr_sa.lim[c] = r.hi;
+  } else {
+    scr_sa.bump[c] = h->bump;
+    scr_sa.lim[c] = h->lim;
+    h->bump = h->lim = NULL;
+  }
+}
+
+static bool scr_sa_push_run(ScrSaHoles *h, char *lo, char *hi) {
+  if (h->n == h->cap) {
+    size_t cap = h->cap ? 2 * h->cap : 64;
+    ScrSaRun *runs = realloc(h->runs, cap * sizeof *runs);
+    if (!runs) return false;
+    h->runs = runs;
+    h->cap = cap;
+  }
+  h->runs[h->n++] = (ScrSaRun){lo, hi};
+  return true;
+}
+
+/* With SCR_SA_STATS=1: carved, free and returned bytes of the parking thread. */
+static _Thread_local size_t scr_sa_trim_stats[3];
+
+/* Returns the pages of class c that hold only free blocks (see above). */
+static void scr_sa_trim_class(unsigned c, size_t page) {
+  ScrSaHoles *h = &scr_sa_holes[scr_sa_arena][c];
+  size_t sz = (size_t)(c + 1) * SCR_SA_STEP;
+  char *start = (char *)scr_sa.base + ((size_t)c << scr_sa.shift);
+  /* Close the region being carved: its rest is still zero. */
+  if (h->lim) {
+    char *lo = scr_sa.bump[c], *hi = scr_sa.lim[c];
+    scr_sa.bump[c] = h->bump;
+    scr_sa.lim[c] = h->lim;
+    h->bump = h->lim = NULL;
+    if ((size_t)(hi - lo) >= sz && !scr_sa_push_run(h, lo, hi)) return;
+  }
+  char *top = scr_sa.bump[c];
+  size_t nblocks = (size_t)(top - start) / sz;
+  if (!nblocks) return;
+  size_t words = (nblocks + 63) / 64;
+  uint64_t *bits = mmap(NULL, words * 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (bits == MAP_FAILED) return;
+  size_t nfree = 0;
+  for (ScrSaBlock *b = scr_sa.free[c]; b; b = b->next) {
+    size_t k = (size_t)((char *)b - start) / sz;
+    bits[k / 64] |= (uint64_t)1 << (k % 64);
+    nfree++;
+  }
+  /* Uncarved zeroed regions count as free; they are rebuilt below. */
+  for (size_t r = 0; r < h->n; r++) {
+    for (char *q = h->runs[r].lo; q + sz <= h->runs[r].hi; q += sz) {
+      size_t k = (size_t)(q - start) / sz;
+      bits[k / 64] |= (uint64_t)1 << (k % 64);
+    }
+  }
+  scr_sa_trim_stats[0] += nblocks * sz;
+  scr_sa_trim_stats[1] += nfree * sz;
+#define SCR_SA_BIT(k) ((bits[(k) / 64] >> ((k) % 64)) & 1)
+  /* Whole pages below the frontier whose blocks are all free. */
+  uintptr_t first = ((uintptr_t)start + page - 1) & ~(uintptr_t)(page - 1);
+  uintptr_t last = (uintptr_t)top & ~(uintptr_t)(page - 1);
+  h->n = 0;
+  char *run = NULL;
+  for (uintptr_t pg = first; pg <= last; pg += page) {
+    bool empty = false;
+    if (pg < last) {
+      size_t k0 = (size_t)((char *)pg - start) / sz;
+      size_t k1 = (size_t)((char *)pg + page - 1 - start) / sz;
+      if (k1 >= nblocks) k1 = nblocks - 1;
+      empty = true;
+      for (size_t k = k0; k <= k1 && empty; k++) empty = SCR_SA_BIT(k);
+    }
+    if (empty && !run) run = (char *)pg;
+    if (!empty && run) {
+      (void)madvise(run, (size_t)((char *)pg - run), MADV_DONTNEED);
+      scr_sa_trim_stats[2] += (size_t)((char *)pg - run);
+      /* Blocks wholly inside the returned pages carve from it later. */
+      char *lo = start + ((size_t)(run - start) + sz - 1) / sz * sz;
+      char *hi = start + ((size_t)((char *)pg - start) / sz) * sz;
+      if (hi > lo) (void)scr_sa_push_run(h, lo, hi);
+      for (char *q = lo; q < hi; q += sz) {
+        size_t k = (size_t)(q - start) / sz;
+        bits[k / 64] &= ~((uint64_t)1 << (k % 64));
+      }
+      /* A block starting in the returned pages but ending on a kept one is
+       * dropped: relinking it would fault its page back in. */
+      if (hi < (char *)pg && hi >= run) {
+        size_t k = (size_t)(hi - start) / sz;
+        bits[k / 64] &= ~((uint64_t)1 << (k % 64));
+      }
+      run = NULL;
+    }
+  }
+#undef SCR_SA_BIT
+  /* The remaining free blocks, in address order. */
+  ScrSaBlock *head = NULL, **tail = &head;
+  for (size_t w = 0; w < words; w++) {
+    for (uint64_t m = bits[w]; m; m &= m - 1) {
+      size_t k = w * 64 + (size_t)__builtin_ctzll(m);
+      ScrSaBlock *b = (ScrSaBlock *)(start + k * sz);
+      *tail = b;
+      tail = &b->next;
+    }
+  }
+  *tail = NULL;
+  scr_sa.free[c] = head;
+  munmap(bits, words * 8);
+  /* The next owner carves the returned regions before the frontier. */
+  if (h->n) {
+    h->bump = scr_sa.bump[c];
+    h->lim = scr_sa.lim[c];
+    ScrSaRun r = h->runs[--h->n];
+    scr_sa.bump[c] = r.lo;
+    scr_sa.lim[c] = r.hi;
+  }
+}
+
+/* Whether the calling thread carved at least SCR_SA_TRIM_MIN since it
+ * claimed its arena: a short-lived thread reusing the arena's free blocks
+ * leaves them for the next one. */
+static bool scr_sa_trim_worth(void) {
+  return scr_sa_carved() - scr_sa_claim_carved[scr_sa_arena] >= SCR_SA_TRIM_MIN;
+}
+
+/* Returns the free pages of the calling thread's arena (see above). */
+static void scr_sa_trim(void) {
+  scr_sa_drain_remote();
+  size_t free_bytes = 0;
+  for (unsigned c = 0; c < SCR_SA_NCLASS; c++) {
+    size_t n = 0;
+    for (ScrSaBlock *b = scr_sa.free[c]; b && n * (c + 1) * SCR_SA_STEP < SCR_SA_TRIM_MIN;
+         b = b->next)
+      n++;
+    free_bytes += n * (c + 1) * SCR_SA_STEP;
+    if (free_bytes >= SCR_SA_TRIM_MIN) break;
+  }
+  const char *stats = getenv("SCR_SA_STATS");
+  const char *off = getenv("SCR_SA_TRIM");
+  bool trim = free_bytes >= SCR_SA_TRIM_MIN && !(off && off[0] == '0');
+  memset(scr_sa_trim_stats, 0, sizeof scr_sa_trim_stats);
+  if (!trim && stats && stats[0] == '1')
+    for (unsigned c = 0; c < SCR_SA_NCLASS; c++) {
+      if (!scr_sa.lim[c]) continue;
+      size_t sz = (size_t)(c + 1) * SCR_SA_STEP;
+      char *start = (char *)scr_sa.base + ((size_t)c << scr_sa.shift);
+      scr_sa_trim_stats[0] += (size_t)(scr_sa.bump[c] - start);
+      for (ScrSaBlock *b = scr_sa.free[c]; b; b = b->next) scr_sa_trim_stats[1] += sz;
+    }
+  if (trim) {
+    long page = sysconf(_SC_PAGESIZE);
+    for (unsigned c = 0; c < SCR_SA_NCLASS; c++)
+      if (scr_sa.lim[c]) scr_sa_trim_class(c, page > 0 ? (size_t)page : 4096);
+  }
+#if defined(__GLIBC__)
+  /* Large blocks: the system allocator's free pages too. */
+  if (trim) (void)malloc_trim(0);
+#endif
+  if (stats && stats[0] == '1')
+    fprintf(stderr, "scr_sa: park arena %d trim %d carved %zu MB free %zu MB returned %zu MB\n",
+            scr_sa_arena, (int)trim, scr_sa_trim_stats[0] >> 20, scr_sa_trim_stats[1] >> 20,
+            scr_sa_trim_stats[2] >> 20);
+}
+#endif
+
+#ifdef SCR_SA_TRIM
+/* Trims run on a detached helper thread: the parent of a worker joins it
+ * when it handles the worker's exit, which must not wait for the trim (at
+ * the end of a program every worker exits at once, and the process ends
+ * right after). The helper takes over the exiting thread's claim on the
+ * arena, so no thread claims it during the trim. */
+static _Atomic(unsigned) scr_sa_trimming; /* helpers running */
+
+static void scr_sa_release(unsigned i) {
+  scr_sa_parked[i] = scr_sa;
+  memset(&scr_sa, 0, sizeof scr_sa);
+  scr_sa_arena = -1;
+  scr_sa_refused = true;
+  atomic_fetch_and_explicit(&scr_sa_claimed, ~(1u << i), memory_order_release);
+}
+
+static void *scr_sa_trim_main(void *arg) {
+  unsigned i = (unsigned)(uintptr_t)arg;
+  scr_sa_arena = (int)i;
+  scr_sa = scr_sa_parked[i];
+  scr_sa_trim();
+  scr_sa_release(i);
+  atomic_fetch_sub_explicit(&scr_sa_trimming, 1, memory_order_release);
+  return NULL;
+}
+
+void scr_sa_wait_trims(void) {
+  while (atomic_load_explicit(&scr_sa_trimming, memory_order_acquire)) {
+    struct timespec pause = {0, 1000000};
+    nanosleep(&pause, NULL);
+  }
+}
+#else
+void scr_sa_wait_trims(void) {}
+#endif
+
 void scr_sa_thread_park(void) {
   if (scr_sa_arena < 0) return;
   unsigned i = (unsigned)scr_sa_arena;
+#ifdef SCR_SA_TRIM
+  if (scr_sa_trim_worth()) {
+    scr_sa_parked[i] = scr_sa;
+    atomic_fetch_add_explicit(&scr_sa_trimming, 1, memory_order_relaxed);
+    pthread_attr_t attr;
+    pthread_t helper;
+    bool started = pthread_attr_init(&attr) == 0;
+    if (started) {
+      started = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
+                pthread_create(&helper, &attr, scr_sa_trim_main, (void *)(uintptr_t)i) == 0;
+      pthread_attr_destroy(&attr);
+    }
+    if (started) {
+      /* Later frees on this thread take the foreign path into the arena's
+       * remote list; the helper releases the claim. */
+      memset(&scr_sa, 0, sizeof scr_sa);
+      scr_sa_arena = -1;
+      scr_sa_refused = true;
+      return;
+    }
+    atomic_fetch_sub_explicit(&scr_sa_trimming, 1, memory_order_relaxed);
+    scr_sa_trim();
+  }
+#endif
   scr_sa_parked[i] = scr_sa;
   /* Later frees on this thread (thread-exit destructors) take the foreign
    * path into the parked arena's remote list. */
@@ -241,6 +531,9 @@ __attribute__((cold, noinline)) void *scr_sa_slow(size_t n, bool zero) {
     /* Carve from the slice, opening it or raising its limit as needed;
      * fresh pages are zero. */
     size_t sz = (size_t)(c + 1) * SCR_SA_STEP;
+#ifdef SCR_SA_TRIM
+    if (scr_sa.lim[c]) scr_sa_next_hole(c, sz);
+#endif
     char *start = (char *)scr_sa.base + ((size_t)c << scr_sa.shift);
     char *end = start + ((size_t)1 << scr_sa.shift);
     char *p = scr_sa.lim[c] ? scr_sa.bump[c] : start;
@@ -279,6 +572,7 @@ void *scr_mem_realloc(void *p, size_t n) {
 void *scr_mem_realloc(void *p, size_t n) { return realloc(p, n); }
 #ifdef SCR_WORKERS
 void scr_sa_thread_park(void) {}
+void scr_sa_wait_trims(void) {}
 void scr_sa_free_foreign(void *p) { free(p); }
 #endif
 #endif
