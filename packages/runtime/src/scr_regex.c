@@ -609,9 +609,10 @@ ScrArr *scr_regex_exec(ScrStr *s, ScrRegex *re) {
   if (rc == 1) {
     int count = lre_get_capture_count(bc);
     out = scr_arr_new(SCR_ELEM_STR, (size_t)count);
-    out->metadata = scr_dyn_new_obj();
-    scr_dyn_obj_set(out->metadata, "index", 5, scr_dyn_new_num((double)scr_capture_index(&input, capture[0])));
-    scr_dyn_obj_set(out->metadata, "input", 5, scr_dyn_new_str(s));
+    ScrDyn *metadata = scr_dyn_new_obj();
+    scr_arr_ext(out)->metadata = metadata;
+    scr_dyn_obj_set(metadata, "index", 5, scr_dyn_new_num((double)scr_capture_index(&input, capture[0])));
+    scr_dyn_obj_set(metadata, "input", 5, scr_dyn_new_str(s));
     for (int k = 0; k < count; k++) {
       const uint8_t *cs = capture[2 * k], *ce = capture[2 * k + 1];
       if (cs == NULL || ce == NULL) {

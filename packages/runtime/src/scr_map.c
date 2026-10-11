@@ -674,7 +674,8 @@ ScrMap *scr_map_new_typed(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
   ScrMap *m;
   if (key_trace || val_trace) {
     /* Either side can point back: collector header + trace. */
-    m = scr_cyc_alloc(sizeof *m, &scr_map_trace, &scr_map_gcfree);
+    static const ScrCycType cyc_type = { &scr_map_trace, &scr_map_gcfree, SCR_CYC_KIND_MAP };
+    m = scr_cyc_alloc(sizeof *m, &cyc_type);
   } else {
     m = calloc(1, sizeof *m);
     if (!m) scr_map_oom();
