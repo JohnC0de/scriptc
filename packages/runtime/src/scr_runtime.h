@@ -62,7 +62,7 @@ void scr_init(void);
 /* Program objects emitted by the bundled LLVM helper reference this symbol.
  * Its versioned spelling makes a mismatched manual runtime link fail before
  * the program can start. */
-void scr_runtime_abi_v10(void);
+void scr_runtime_abi_v12(void);
 void scr_runtime_workers_v8(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -442,8 +442,37 @@ enum { SCR_CYC_NURSERY = 0, SCR_CYC_MATURE = 1, SCR_CYC_OLD = 2, SCR_CYC_NGENS =
 typedef struct ScrCycType {
   ScrTraceFn trace;
   ScrCycFreeFn free_fn;
+  /* Index of the type's per-thread collector statistics (scr_cycle.c's
+   * nursery bypass): a runtime family's SCR_CYC_KIND_*, or for emitted
+   * descriptors their number counting from SCR_CYC_KIND_EMITTED. 0 keeps
+   * no statistics. Statistics only steer
+   * when a candidate is walked, never what a pass frees, so two types that
+   * share an index (separately emitted code in one process) are merely
+   * judged together. */
+  uint32_t kind;
 } ScrCycType;
-#define SCR_CYC_TYPE(name, trace_fn, free) static const ScrCycType name = { (trace_fn), (free) }
+/* Runtime families' kinds. Emitted descriptors count from
+ * SCR_CYC_KIND_EMITTED (llvm/alloc.ts FIRST_EMITTED_CYC_KIND). */
+enum {
+  SCR_CYC_KIND_NONE = 0,
+  SCR_CYC_KIND_ARRAY,
+  SCR_CYC_KIND_PROMISE,
+  SCR_CYC_KIND_BOX,
+  SCR_CYC_KIND_CLOSURE,
+  SCR_CYC_KIND_ERROR,
+  SCR_CYC_KIND_DOMEXCEPTION,
+  SCR_CYC_KIND_EMITTER,
+  SCR_CYC_KIND_CAUGHT,
+  SCR_CYC_KIND_DYN,
+  SCR_CYC_KIND_WEAK_MAP,
+  SCR_CYC_KIND_MAP,
+  SCR_CYC_KIND_CLASS_OBJECT,
+  SCR_CYC_KIND_STREAM,
+  SCR_CYC_KIND_UNION,
+  SCR_CYC_KIND_WORKER_VIEW,
+  SCR_CYC_KIND_EMITTED = 32
+};
+#define SCR_CYC_TYPE(name, trace_fn, free) static const ScrCycType name = { (trace_fn), (free), 0 }
 
 typedef struct ScrCycHdr {
 #if UINTPTR_MAX == UINT32_MAX
@@ -1564,6 +1593,13 @@ typedef struct ScrArr {
   ScrTraceFn elem_trace;
   uint64_t *data;
   uint8_t *present; /* one state per dense slot; heap arrays share data allocation */
+  /* Rarely used storage (sparse indices, noncanonical numeric properties,
+   * match-result metadata) lives out of line: NULL until first needed, so
+   * the common dense array stays small. */
+  struct ScrArrExt *ext;
+} ScrArr;
+
+typedef struct ScrArrExt {
   struct ScrArrSparseSlot *sparse;
   size_t sparse_len;
   size_t sparse_cap;
@@ -1571,7 +1607,7 @@ typedef struct ScrArr {
   size_t prop_len;
   size_t prop_cap;
   struct ScrDyn *metadata; /* heterogeneous named properties of match results */
-} ScrArr;
+} ScrArrExt;
 /* The LLVM backend's inline retain/release read elem_trace through its
  * mirrored %ScrArr type (field 6) to decide mark-live / candidate buffering
  * exactly like scr_arr_retain and scr_arr_release. */
@@ -1613,6 +1649,11 @@ static inline ScrArr *scr_arr_retain(ScrArr *a) {
  * non-NULL) feed the candidate-root buffer like every headered type. */
 void scr_arr_release(ScrArr *a);
 void scr_arr_copy_metadata(ScrArr *a, struct ScrDyn *target);
+/* The array's out-of-line storage, allocated (zeroed) on first use. */
+ScrArrExt *scr_arr_ext(ScrArr *a);
+/* Swaps the sparse slots and numeric properties of two arrays; each keeps
+ * its own match metadata (refresh of a cached typed view, llvm/dyn.ts). */
+void scr_arr_swap_indexed_ext(ScrArr *a, ScrArr *b);
 
 /* Trace entry point for cycle-capable arrays — stored in their collector
  * header and passed wherever a container stores an ARRAY payload's RC entry

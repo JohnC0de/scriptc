@@ -15803,6 +15803,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts": {
+   "order": [
+    "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts": {
+   "order": [
+    "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/4598-live-array-ref-element-access.ts": {
    "order": [
     "<repo>/tests/corpus/4598-live-array-ref-element-access.ts"
