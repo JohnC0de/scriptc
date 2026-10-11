@@ -666,6 +666,12 @@ ScrMap *scr_map_new(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
   return scr_map_new_typed(key_kind, val_kind, NULL, NULL, NULL, val_retain, val_release, val_trace);
 }
 
+/* Map construction inlines into its callers; keeping the header allocation
+ * out of line keeps those call sites as small as the libc call they had. */
+static __attribute__((noinline)) ScrMap *scr_map_alloc_plain(void) {
+  return scr_mem_calloc(sizeof(ScrMap));
+}
+
 ScrMap *scr_map_new_typed(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
                          void *(*key_retain)(void *), void (*key_release)(void *),
                          ScrTraceFn key_trace,
@@ -677,7 +683,7 @@ ScrMap *scr_map_new_typed(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
     static const ScrCycType cyc_type = { &scr_map_trace, &scr_map_gcfree, SCR_CYC_KIND_MAP };
     m = scr_cyc_alloc(sizeof *m, &cyc_type);
   } else {
-    m = scr_mem_calloc(sizeof *m);
+    m = scr_map_alloc_plain();
     if (!m) scr_map_oom();
   }
   m->rc = 1;
