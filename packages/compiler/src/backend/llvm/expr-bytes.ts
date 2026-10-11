@@ -165,7 +165,7 @@ export function emitBytesLength(
   const count = bytes && size !== 1 ? B.tmp() : len;
   if (count !== len) B.line(`${count} = shl ${host.sizeType} ${len}, ${Math.log2(size)}`);
   const out = B.tmp();
-  B.line(`${out} = uitofp ${host.sizeType} ${count} to double`);
+  B.line(`${out} = sitofp ${host.sizeType} ${count} to double`);
   return { name: out, type: F64 };
 }
 

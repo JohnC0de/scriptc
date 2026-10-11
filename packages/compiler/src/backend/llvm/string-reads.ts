@@ -47,7 +47,7 @@ export const STRING_READ_HELPERS: readonly StringReadHelper[] = [
       `  br i1 %ascii, label %fast, label %slow`,
       `fast:`,
       ...loadLength(sz),
-      `  %n = uitofp ${sz} %len to double`,
+      `  %n = sitofp ${sz} %len to double`,
       `  ret double %n`,
       `slow:`,
       `  %r = call double @scr_str_utf16_len(ptr %s)`,
