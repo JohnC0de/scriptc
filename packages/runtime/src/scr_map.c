@@ -994,6 +994,11 @@ bool scr_map_get_str_bool(const ScrMap *m, const ScrStr *key, bool *out) {
   return true;
 }
 
+const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key) {
+  size_t e = scr_map_find_str(m, key);
+  return e == SCR_MAP_EMPTY ? NULL : &m->entries[e];
+}
+
 void *scr_map_get_str_ref(const ScrMap *m, const ScrStr *key) {
   size_t e = scr_map_find_str(m, key);
   if (e == SCR_MAP_EMPTY) return NULL;

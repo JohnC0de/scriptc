@@ -23,11 +23,13 @@ import {
   borrowsMapReadInputs,
   borrowsMapMutationReceiver,
   inlineNumberKey,
+  entryStringKey,
 } from "./map-read-lifetimes.js";
 import {
   emitNumberMapGetRef,
   emitNumberMapGetScalar,
   emitNumberMapHas,
+  emitStringMapGetRef,
 } from "./map-number-lookup.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
 import { emitStringSliceRead } from "./string-slices.js";
@@ -1119,12 +1121,15 @@ export function emitMapLikeIntrinsic(
         return host.own({ name: t, type: e.type });
       }
       const numberKey = inlineNumberKey(k);
+      const stringKey = entryStringKey(k);
       if (value.kind === "union") {
         const isnull = B.tmp();
         const t = B.tmp();
         let raw: string;
         if (numberKey !== null) {
           raw = emitNumberMapGetRef(host, r.name, numberKey, value);
+        } else if (stringKey !== null) {
+          raw = emitStringMapGetRef(host, r.name, stringKey, value);
         } else {
           host.declare(`declare ptr @scr_map_get_${kAcc}_ref(ptr, ${kTy})`);
           raw = B.tmp();
@@ -1195,6 +1200,10 @@ export function emitMapLikeIntrinsic(
       }
       if (numberKey !== null && isRefCounted(value)) {
         const raw = emitNumberMapGetRef(host, r.name, numberKey, value);
+        return host.wrapNullable(raw, raw, value, valueTag, e.type, undefTag);
+      }
+      if (stringKey !== null && isRefCounted(value)) {
+        const raw = emitStringMapGetRef(host, r.name, stringKey, value);
         return host.wrapNullable(raw, raw, value, valueTag, e.type, undefTag);
       }
       host.declare(`declare ptr @scr_map_get_${kAcc}_ref(ptr, ${kTy})`);
