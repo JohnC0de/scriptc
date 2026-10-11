@@ -448,7 +448,6 @@ const ERROR_KIND_NAMES: readonly string[] = [
 
 /** A short description of a node that seeds the may-throw fixpoint. */
 function describeThrowingNode(rec: IrExpr | IrStmt): string {
-  const detail = rec as { method?: string; fn?: string; name?: string };
   switch (rec.kind) {
     case "throw":
       return "throw statement";
@@ -494,10 +493,17 @@ function describeThrowingNode(rec: IrExpr | IrStmt): string {
             : "Error";
         return message?.kind === "strLit" ? `throws ${name}: ${message.value}` : `throws ${name}`;
       }
-      return `library call ${detail.fn ?? ""}`.trimEnd();
+      return `library call ${rec.fn}`;
     }
     case "intrinsic":
-      return `intrinsic ${detail.name ?? ""}`.trimEnd();
+      return `intrinsic ${rec.name}`;
+    case "strIntrinsic":
+    case "regexIntrinsic":
+    case "arrIntrinsic":
+    case "bytesIntrinsic":
+    case "mapIntrinsic":
+    case "setIntrinsic":
+      return `${rec.kind} ${rec.method}`;
     case "arraySetLength":
       return "array length assignment (RangeError)";
     case "jsonStringify":
@@ -508,7 +514,7 @@ function describeThrowingNode(rec: IrExpr | IrStmt): string {
     case "recordSet":
       return "write into a possibly published object (TypeError)";
     default:
-      return detail.method !== undefined ? `${rec.kind} ${detail.method}` : rec.kind;
+      return rec.kind;
   }
 }
 

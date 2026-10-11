@@ -93,6 +93,8 @@ class ContractChecker {
   private readonly globalsByLoc = new Map<string, string[]>();
   private readonly classesByLoc = new Map<string, IrClassDef[]>();
   private readonly contracts: IrContracts = {};
+  /** Whether any verified fact was recorded. */
+  private recorded = false;
 
   constructor(
     readonly mod: IrModule,
@@ -233,13 +235,14 @@ class ContractChecker {
     immutable.run();
     if (this.diagnostics.length > 0) return { diagnostics: this.diagnostics, contracts: null };
     const c = this.contracts;
-    const empty = Object.values(c).every((v) => v === undefined || (v as unknown[]).length === 0);
-    return { diagnostics: [], contracts: empty ? null : c };
+    return { diagnostics: [], contracts: this.recorded ? c : null };
   }
 
-  record(field: keyof IrContracts, values: Iterable<string>): void {
+  record(field: keyof IrContracts, values: readonly string[]): void {
     const list = [...new Set(values)].sort();
-    if (list.length > 0) this.contracts[field] = list;
+    if (list.length === 0) return;
+    this.contracts[field] = list;
+    this.recorded = true;
   }
 
   /* ── NoThrow ── */
@@ -349,10 +352,10 @@ class Int32Contracts {
     if (this.fields.size + this.params.size + this.returns.size + this.locals.size === 0) return;
     this.structural();
     this.writes();
-    this.c.record("int32Fields", this.fields.keys());
-    this.c.record("int32Params", this.params.keys());
-    this.c.record("int32Returns", this.returns.keys());
-    this.c.record("int32Locals", this.locals.keys());
+    this.c.record("int32Fields", [...this.fields.keys()]);
+    this.c.record("int32Params", [...this.params.keys()]);
+    this.c.record("int32Returns", [...this.returns.keys()]);
+    this.c.record("int32Locals", [...this.locals.keys()]);
   }
 
   private refuse(note: ContractNote, why: string, hint: string): void {
@@ -595,11 +598,11 @@ class Int32Contracts {
           else if (!int32(arg)) fail(note, arg, arg.loc, "the argument for");
         });
       };
-      const incDecStored = (e: IrExpr & { prefix: boolean; op: "+" | "-" }): boolean => {
+      const incDecStored = (e: IrExpr, prefix: boolean, op: "+" | "-"): boolean => {
         const result = ranges.get(e);
         if (!result) return false;
-        if (e.prefix) return withinInt32(result);
-        return withinInt32(integerArithmeticRange(e.op, result, { min: 1, max: 1 }));
+        if (prefix) return withinInt32(result);
+        return withinInt32(integerArithmeticRange(op, result, { min: 1, max: 1 }));
       };
       walk(fn.body, {
         stmt: (s) => {
@@ -639,7 +642,7 @@ class Int32Contracts {
             if (note && !int32(e.value)) fail(note, e.value, e.value.loc, "the value stored into");
           } else if (e.kind === "incDec") {
             const note = localNote(e.localId);
-            if (note && !incDecStored(e))
+            if (note && !incDecStored(e, e.prefix, e.op))
               c.report(
                 "SC7002",
                 e.loc,
@@ -921,12 +924,9 @@ class ImmutableContracts {
       walk(fn.body, {
         stmt: (s) => {
           const value = s.kind === "varDecl" ? s.init : s.kind === "assign" ? s.value : undefined;
-          if (
-            value &&
-            candidates.has((s as { localId: string }).localId) &&
-            !this.fresh(value, candidates)
-          ) {
-            candidates.delete((s as { localId: string }).localId);
+          const target = s.kind === "varDecl" || s.kind === "assign" ? s.localId : "";
+          if (value && candidates.has(target) && !this.fresh(value, candidates)) {
+            candidates.delete(target);
             changed = true;
           }
           if (s.kind === "forOf" && candidates.delete(s.localId)) changed = true;
@@ -1131,9 +1131,11 @@ class ImmutableContracts {
               store(`s:${s.shapeId}\0${s.field}`, s.value);
               break;
             case "recordKeySet":
+              mutate(s.obj, s.loc, `'${c.text(s.loc)}'`);
+              escape(s.value, s.loc, "a dynamically keyed property");
+              break;
             case "recordKeyDelete":
-              mutate((s as { obj: IrExpr }).obj, s.loc, `'${c.text(s.loc)}'`);
-              if (s.kind === "recordKeySet") escape(s.value, s.loc, "a dynamically keyed property");
+              mutate(s.obj, s.loc, `'${c.text(s.loc)}'`);
               break;
             case "arraySet":
               mutate(s.arr, s.loc, `'${c.text(s.loc)}'`);
@@ -1143,7 +1145,7 @@ class ImmutableContracts {
             case "arraySetUndefined":
             case "arrayDelete":
             case "bytesSet":
-              mutate((s as { arr: IrExpr }).arr, s.loc, `'${c.text(s.loc)}'`);
+              mutate(s.arr, s.loc, `'${c.text(s.loc)}'`);
               break;
             case "forOf": {
               const slot = this.localSlot(fn, s.localId);
@@ -1279,8 +1281,14 @@ class ImmutableContracts {
     for (let steps = 0; steps < 16; steps++) {
       if (root.kind === "fieldGet" || root.kind === "recordGet") root = root.obj;
       else if (root.kind === "arrayGet") root = root.arr;
-      else if (PASS_THROUGH.has(root.kind) && "value" in root)
-        root = (root as { value: IrExpr }).value;
+      else if (
+        root.kind === "upcast" ||
+        root.kind === "downcast" ||
+        root.kind === "unionWrap" ||
+        root.kind === "unionNarrow" ||
+        root.kind === "assignExpr"
+      )
+        root = root.value;
       else if (root.kind === "varRef") {
         // Compiler temporaries (no source binding): follow their initializer.
         const id = root.localId;
@@ -1320,8 +1328,9 @@ class ImmutableContracts {
       }
       case "recordGet":
         return (
-          this.mayHold.has(`s:${(e.obj.type as { shapeId?: string }).shapeId ?? ""}\0${e.field}`) ||
-          derived(e.obj)
+          this.mayHold.has(
+            `s:${e.obj.type.kind === "record" ? e.obj.type.shapeId : ""}\0${e.field}`,
+          ) || derived(e.obj)
         );
       case "arrayGet":
         return this.mayHold.has(`e:${typeKey(e.arr.type)}`) || derived(e.arr);
@@ -1481,7 +1490,7 @@ function describeSink(e: IrExpr): string {
     case "jsExit":
       return "the JavaScript island";
     case "intrinsic":
-      return `the runtime (${(e as { name: string }).name})`;
+      return `the runtime (${e.name})`;
     default:
       return `an operation scriptc does not follow (${e.kind})`;
   }

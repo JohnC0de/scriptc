@@ -546,7 +546,11 @@ test("explain names the first throwing operation and each call edge", () => {
   const callLoc = { file: "tdz.ts", start: 5, end: 9 };
   const mod = moduleWith(
     fn("thrower", [exprStmt(nodeThrow)], []),
-    fn("caller", [exprStmt({ kind: "call", callee: "thrower", args: [], type: VOID, loc: callLoc })], []),
+    fn(
+      "caller",
+      [exprStmt({ kind: "call", callee: "thrower", args: [], type: VOID, loc: callLoc })],
+      [],
+    ),
     fn("quiet", [exprStmt(value)], []),
   );
   const result = computeMayThrow(mod, { explain: true });
