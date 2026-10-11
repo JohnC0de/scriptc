@@ -28,6 +28,7 @@ import {
   undefinedArmTag,
 } from "../../ir/analysis.js";
 import { emitLibraryIdentityLines } from "../library-identity-markers.js";
+import { loopTestsEveryIteration } from "../loop-polls.js";
 import type {
   IrBytesElem,
   IrExpr,
@@ -3974,8 +3975,30 @@ export class LlEmitter {
     B.startBlock(ok);
   }
 
-  private workerLoopBudget(): string | null {
+  /** Whether the emitter follows this call with a pending test (the
+   * conditions in expr-calls.ts). */
+  private callTestsPending(e: IrExpr): boolean {
+    switch (e.kind) {
+      case "call":
+        return this.mayThrow.has(e.callee);
+      case "new":
+        return this.mayThrow.has(`%${e.className}.constructor`);
+      case "virtualCall":
+        return this.mayThrowMethods.has(e.method);
+      case "callValue":
+        return this.indirectMayThrow;
+      default:
+        return false;
+    }
+  }
+
+  private workerLoopBudget(
+    loop: Extract<IrStmt, { kind: "while" | "doWhile" | "for" | "forOf" }>,
+  ): string | null {
     if (!this.mod.workers) return null;
+    // A loop that runs a pending test on every iteration observes a
+    // terminate request through it; a separate poll would only add work.
+    if (loopTestsEveryIteration(loop, (e) => this.callTestsPending(e))) return null;
     const slot = this.B.slot();
     this.B.entryAllocas.push(`${slot} = alloca i32 ; worker cancellation budget`);
     this.B.line(`store i32 0, ptr ${slot}`);
@@ -5930,7 +5953,7 @@ export class LlEmitter {
         break;
       }
       case "while": {
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         const lc = B.newLabel("loop.c");
         const lb = B.newLabel("loop.b");
         const le = B.newLabel("loop.e");
@@ -5955,7 +5978,7 @@ export class LlEmitter {
         break;
       }
       case "doWhile": {
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         // Body first (runs at least once); continue jumps to the CONDITION.
         const lb = B.newLabel("loop.b");
         const lc = B.newLabel("loop.c");
@@ -6124,7 +6147,7 @@ export class LlEmitter {
         };
         const lu = s.update || capturedLets.length > 0 ? B.newLabel("loop.u") : lc;
         freshenBindings();
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         B.br(lc);
         B.startBlock(lc);
         this.emitWorkerLoopCheck(workerBudget);
@@ -6227,7 +6250,7 @@ export class LlEmitter {
         const lb = B.newLabel("fof.b");
         const lu = B.newLabel("fof.u");
         const le = B.newLabel("fof.e");
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         B.br(lc);
         B.startBlock(lc);
         this.emitWorkerLoopCheck(workerBudget);

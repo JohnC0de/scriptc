@@ -15742,6 +15742,12 @@
     "<repo>/tests/corpus/4596-tdz-nullable-forward-capture.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts"
+   ],
+   "diags": []
   }
  }
 }
