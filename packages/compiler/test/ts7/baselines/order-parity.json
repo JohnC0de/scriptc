@@ -10493,24 +10493,6 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/missing-read-lambda-results.ts": {
-   "order": [
-    "<repo>/tests/corpus/missing-read-lambda-results.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/missing-read-narrowed-storage.ts": {
-   "order": [
-    "<repo>/tests/corpus/missing-read-narrowed-storage.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/missing-read-number-conversions.ts": {
-   "order": [
-    "<repo>/tests/corpus/missing-read-number-conversions.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/module-fallback-functions/main.js": {
    "order": [
     "<repo>/tests/corpus/module-fallback-functions/platform.js",
@@ -11424,12 +11406,6 @@
   "<repo>/tests/corpus/typed-array-integer-widths.ts": {
    "order": [
     "<repo>/tests/corpus/typed-array-integer-widths.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/typed-array-nan-coded-reads.ts": {
-   "order": [
-    "<repo>/tests/corpus/typed-array-nan-coded-reads.ts"
    ],
    "diags": []
   },
@@ -14554,6 +14530,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-arena-reuse.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/native-worker-buffer-consumers.ts": {
    "order": [
     "<repo>/tests/corpus/native-worker-buffer-consumers.ts"
@@ -15764,6 +15746,54 @@
   "<repo>/tests/corpus/4596-tdz-nullable-forward-capture.ts": {
    "order": [
     "<repo>/tests/corpus/4596-tdz-nullable-forward-capture.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4598-map-set-clear-reuse.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-map-set-clear-reuse.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/missing-read-lambda-results.ts": {
+   "order": [
+    "<repo>/tests/corpus/missing-read-lambda-results.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/missing-read-narrowed-storage.ts": {
+   "order": [
+    "<repo>/tests/corpus/missing-read-narrowed-storage.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/missing-read-number-conversions.ts": {
+   "order": [
+    "<repo>/tests/corpus/missing-read-number-conversions.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/typed-array-nan-coded-reads.ts": {
+   "order": [
+    "<repo>/tests/corpus/typed-array-nan-coded-reads.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/typed-array-present-reads.ts": {
+   "order": [
+    "<repo>/tests/corpus/typed-array-present-reads.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4601-cycle-holders.ts": {
+   "order": [
+    "<repo>/tests/corpus/4601-cycle-holders.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4602-constructor-escape-order.ts": {
+   "order": [
+    "<repo>/tests/corpus/4602-constructor-escape-order.ts"
    ],
    "diags": []
   }

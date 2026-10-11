@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { createRequire } from "node:module";
-import { access, chmod, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -27,6 +27,7 @@ import {
   type NativeTargetSpec,
 } from "./targets.js";
 import { compilerReleaseVersion } from "../library/sidecar.js";
+import { writeTextParts } from "../text-parts.js";
 
 import {
   NativeCodegenError,
@@ -87,39 +88,13 @@ export interface NativeCodegenOptions {
   importBitcode?: { paths: readonly string[]; digests: readonly string[] };
 }
 
-/** Writes LLVM text in large batches. Programs past the engine's string
- * limit arrive as many parts, and writing each part separately is several
- * times slower than writing the same bytes in a few large chunks. */
+/** Writes LLVM text in large batches; see `writeTextParts`. */
 export async function writeLlvmSource(
   path: string,
   llvm: string | readonly string[],
   mode = 0o666,
 ): Promise<void> {
-  const file = await open(path, "w", mode);
-  try {
-    const write = async (text: string): Promise<void> => {
-      const bytes = Buffer.from(text, "utf8");
-      for (let offset = 0; offset < bytes.length;) {
-        const { bytesWritten } = await file.write(bytes, offset, bytes.length - offset);
-        offset += bytesWritten;
-      }
-    };
-    if (typeof llvm === "string") return await write(llvm);
-    let batch: string[] = [];
-    let length = 0;
-    for (const part of llvm) {
-      batch.push(part);
-      length += part.length;
-      if (length >= 16 * 1024 * 1024) {
-        await write(batch.join(""));
-        batch = [];
-        length = 0;
-      }
-    }
-    if (batch.length > 0) await write(batch.join(""));
-  } finally {
-    await file.close();
-  }
+  await writeTextParts(path, llvm, mode);
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
