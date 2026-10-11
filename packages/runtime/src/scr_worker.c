@@ -41,9 +41,17 @@ __attribute__((constructor)) static void scr_worker_reserve_fd_table(void) {
 struct ScrWorkerThread {
   atomic_size_t references;
   atomic_bool cancel;
+#ifdef SCR_EXC_FLAG
+  /* The worker thread's exact pending word (scr_exception.c) while its
+   * script runs, NULL before and after: terminate() sets the stop bit
+   * through it. The lock keeps the thread's TLS alive across that write. */
+  pthread_mutex_t flag_lock;
+  _Atomic uint32_t *flag;
+#else
   /* The exception alert reference of a terminate request: 0 none, 1 held,
    * 2 the thread finished its script (no reference is taken any more). */
   atomic_int alert;
+#endif
   atomic_bool port_closed;
   uint64_t id;
   uint32_t root;
@@ -92,6 +100,9 @@ void scr_worker_thread_release(ScrWorkerThread *worker) {
   scr_context_env_free(worker->environment);
   for (int i = 0; i < worker->argc; i++) free(worker->argv[i]);
   free(worker->argv);
+#ifdef SCR_EXC_FLAG
+  pthread_mutex_destroy(&worker->flag_lock);
+#endif
   free(worker);
 }
 
@@ -126,6 +137,15 @@ uint64_t scr_worker_thread_id(const ScrWorkerThread *worker) { return worker->id
 
 void scr_worker_thread_terminate(ScrWorkerThread *worker) {
   atomic_store_explicit(&worker->cancel, true, memory_order_relaxed);
+#ifdef SCR_EXC_FLAG
+  /* Emitted checks test only the worker's own pending word: raise its stop
+   * bit. A worker that has not registered its word yet finds the cancel
+   * flag when it does (scr_worker_thread_run); one that has finished its
+   * script needs nothing. */
+  pthread_mutex_lock(&worker->flag_lock);
+  if (worker->flag) scr_exc_flag_request_stop(worker->flag);
+  pthread_mutex_unlock(&worker->flag_lock);
+#else
   /* Emitted polls only call into the runtime while the exception alert is
    * raised: hold a reference until the worker's script has ended. */
   scr_exc_alert_add(1);
@@ -133,6 +153,7 @@ void scr_worker_thread_terminate(ScrWorkerThread *worker) {
   if (!atomic_compare_exchange_strong_explicit(&worker->alert, &idle, 1, memory_order_acq_rel,
                                                memory_order_acquire))
     scr_exc_alert_add(-1);
+#endif
   scr_mailbox_post(worker->inbox, scr_worker_event(SCR_WORKER_WAKE, 0, 0, NULL));
 }
 
@@ -177,6 +198,14 @@ static void scr_worker_report_error(void) {
 
 static void scr_worker_thread_run(ScrWorkerThread *worker) {
   scr_context_enter(worker->id);
+#ifdef SCR_EXC_FLAG
+  pthread_mutex_lock(&worker->flag_lock);
+  worker->flag = &scr_exc_flag;
+  pthread_mutex_unlock(&worker->flag_lock);
+  /* A terminate() that ran before the registration only set the flag. */
+  if (atomic_load_explicit(&worker->cancel, memory_order_relaxed))
+    scr_exc_flag_request_stop(&scr_exc_flag);
+#endif
   scr_context_stop_flag(&worker->cancel);
   scr_context_env_enter(worker->environment);
   worker->environment = NULL;
@@ -188,7 +217,13 @@ static void scr_worker_thread_run(ScrWorkerThread *worker) {
   scr_context_cleanup();
   scr_worker_current = NULL;
   scr_exc_alert_thread_exit();
+#ifdef SCR_EXC_FLAG
+  pthread_mutex_lock(&worker->flag_lock);
+  worker->flag = NULL;
+  pthread_mutex_unlock(&worker->flag_lock);
+#else
   if (atomic_exchange_explicit(&worker->alert, 2, memory_order_acq_rel) == 1) scr_exc_alert_add(-1);
+#endif
   /* Cleanup may itself finish owner-bound native operations. Publish exit
    * only once none of those operations can touch the worker's script heap. */
   scr_mailbox_post(worker->parent, scr_worker_event(SCR_WORKER_EXIT, worker->id, code, NULL));
@@ -216,7 +251,12 @@ ScrWorkerThread *scr_worker_thread_start(ScrWorkerEntry entry, uint32_t root,
   if (!worker) scr_trap("scriptc: out of memory\n");
   atomic_init(&worker->references, 2); /* owner and native thread */
   atomic_init(&worker->cancel, false);
+#ifdef SCR_EXC_FLAG
+  if (pthread_mutex_init(&worker->flag_lock, NULL) != 0) scr_trap("scriptc: out of memory\n");
+  worker->flag = NULL;
+#else
   atomic_init(&worker->alert, 0);
+#endif
   atomic_init(&worker->port_closed, false);
   worker->id = atomic_fetch_add_explicit(&scr_worker_next_id, 1, memory_order_relaxed);
   worker->entry = entry;
@@ -262,6 +302,9 @@ failed:
   scr_mailbox_release(worker->inbox);
   scr_mailbox_release(worker->parent);
   scr_message_free(worker->data);
+#ifdef SCR_EXC_FLAG
+  pthread_mutex_destroy(&worker->flag_lock);
+#endif
   free(worker);
   if (!scr_exc_pending()) {
     static const char message[] = "Could not start worker thread";

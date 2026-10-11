@@ -15749,6 +15749,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/native-worker-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-exception-state.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-exception-state.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
    "order": [
     "<repo>/tests/corpus/native-worker-arena-reuse.ts"
