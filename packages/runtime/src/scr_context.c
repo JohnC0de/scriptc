@@ -122,9 +122,19 @@ void scr_context_stop_flag(const void *flag) {
   if (!scr_context_stopped) scr_context_signal = flag ? flag : &scr_context_unsignaled;
 }
 bool scr_context_stopping(void) { return scr_context_stopped; }
+/* Asked to stop: the owner's signal, or (ELF worker executables) the stop
+ * bit of the thread's exact pending word, which worker.terminate() sets
+ * directly so that emitted checks observe it. */
+static bool scr_context_signaled(void) {
+#ifdef SCR_EXC_FLAG
+  if (atomic_load_explicit(&scr_exc_flag, memory_order_acquire) & SCR_EXC_FLAG_STOP) return true;
+#endif
+  return atomic_load_explicit(scr_context_signal, memory_order_relaxed);
+}
+
 /* Neither stopping nor asked to stop. */
 bool scr_context_quiet(void) {
-  return !scr_context_stopped && !atomic_load_explicit(scr_context_signal, memory_order_relaxed);
+  return !scr_context_stopped && !scr_context_signaled();
 }
 
 void scr_context_stop(int code) {
@@ -137,8 +147,7 @@ void scr_context_stop(int code) {
 }
 
 bool scr_context_checkpoint(void) {
-  if (!scr_context_stopped && atomic_load_explicit(scr_context_signal, memory_order_relaxed))
-    scr_context_stop(1);
+  if (!scr_context_stopped && scr_context_signaled()) scr_context_stop(1);
   if (!scr_context_stopped) return false;
   /* Each fiber has its own exception cell. Reinstall the sentinel after a
    * context switch or a runtime continuation consumes its pending payload. */
@@ -198,12 +207,56 @@ ScrDyn *scr_worker_parent_port(void) { return scr_dyn_new_null(); }
 #include <pthread.h>
 #endif
 
+#ifdef SCR_STACK_GUARD_TSD
+/* The guard's thread-specific-data slot (scr_runtime.h). libpthread keeps a
+ * thread's values in an array at its thread pointer, indexed by key, which
+ * is also how its own inline accessors read them; the probe below checks
+ * that layout once before compiled code relies on it. */
+uintptr_t scr_stack_guard_tsd = 0;
+static pthread_key_t scr_stack_guard_key;
+static bool scr_stack_guard_keyed;
+static pthread_once_t scr_stack_guard_once = PTHREAD_ONCE_INIT;
+
+static void *scr_stack_guard_tsd_read(uintptr_t offset) {
+  void *value;
+#if defined(__aarch64__)
+  uintptr_t base;
+  __asm__ volatile("mrs %0, TPIDRRO_EL0" : "=r"(base));
+  value = *(void *volatile *)((base & ~(uintptr_t)7) + offset);
+#else
+  __asm__ volatile("movq %%gs:(%1), %0" : "=r"(value) : "r"(offset));
+#endif
+  return value;
+}
+
+static void scr_stack_guard_key_init(void) {
+  if (pthread_key_create(&scr_stack_guard_key, NULL) != 0) return;
+  scr_stack_guard_keyed = true;
+  static const char probe;
+  uintptr_t offset = (uintptr_t)scr_stack_guard_key * sizeof(void *);
+  if (offset != 0 && pthread_setspecific(scr_stack_guard_key, &probe) == 0 &&
+      scr_stack_guard_tsd_read(offset) == &probe)
+    scr_stack_guard_tsd = offset;
+  (void)pthread_setspecific(scr_stack_guard_key, NULL);
+}
+
+void scr_stack_guard_set(uintptr_t guard) {
+  scr_stack_guard = guard;
+  if (scr_stack_guard_keyed) (void)pthread_setspecific(scr_stack_guard_key, (void *)guard);
+}
+
+uintptr_t scr_stack_guard_get(void) { return scr_stack_guard; }
+#endif
+
 void scr_stack_guard_init(void) {
 #if defined(__APPLE__) && !defined(SCR_LIB)
+#ifdef SCR_STACK_GUARD_TSD
+  (void)pthread_once(&scr_stack_guard_once, scr_stack_guard_key_init);
+#endif
   pthread_t self = pthread_self();
   uintptr_t high = (uintptr_t)pthread_get_stackaddr_np(self);
   size_t size = pthread_get_stacksize_np(self);
-  if (high > size) scr_stack_guard = scr_stack_guard_for(high - size, size);
+  if (high > size) SCR_STACK_GUARD_SET(scr_stack_guard_for(high - size, size));
 #elif defined(__linux__) && !defined(SCR_LIB)
 #ifdef SCR_WORKERS
   if (!scr_context_is_main()) {
