@@ -1806,6 +1806,56 @@ double scr_process_exit_code_or_zero(void) {
   return (double)scr_exit_code_hint_get();
 }
 
+#if defined(__linux__)
+#include <sched.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#ifndef SYS_close_range
+#define SYS_close_range 436 /* the generic syscall table: x86_64 and aarch64 */
+#endif
+
+/* Detached teardown (`scriptc build --detached-exit`): the kernel frees an
+ * exiting process's memory on its critical path, 30-40 ms per GB of 4 KiB
+ * pages, before its parent sees it exit. A helper process that shares the
+ * address space (CLONE_VM) and holds no descriptor but the read end of a
+ * pipe keeps the memory alive past the exit, then exits itself and frees it
+ * off the parent's critical path (the latency mold's --fork hides). The
+ * kernel releases an exiting process's memory (exit_mm) before its files
+ * (exit_files), so EOF on the pipe means the helper holds the last
+ * reference. The helper keeps the executable mapped and the memory charged
+ * to the cgroup until then, so a program opts in at build time: the program
+ * object then defines scr_detached_exit = 1, overriding this weak default. */
+__attribute__((weak)) const unsigned char scr_detached_exit = 0;
+static char scr_teardown_stack[16384] __attribute__((aligned(64)));
+
+static int scr_teardown_main(void *arg) {
+  int fd = (int)(intptr_t)arg;
+  /* Raw syscalls only: the helper runs on the exiting thread's TLS. */
+  if (fd > 0) (void)syscall(SYS_close_range, 0u, (unsigned)fd - 1u, 0u);
+  (void)syscall(SYS_close_range, (unsigned)fd + 1u, ~0u, 0u);
+  char c;
+  while (syscall(SYS_read, fd, &c, 1) != 0) {
+  }
+  syscall(SYS_exit, 0);
+  return 0;
+}
+
+static void scr_detach_teardown(void) {
+  if (!scr_detached_exit) return;
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) != 0) return;
+  sigset_t all, old;
+  sigfillset(&all);
+  pthread_sigmask(SIG_SETMASK, &all, &old);
+  pid_t pid = clone(scr_teardown_main, scr_teardown_stack + sizeof scr_teardown_stack, CLONE_VM | SIGCHLD,
+                    (void *)(intptr_t)fds[0]);
+  pthread_sigmask(SIG_SETMASK, &old, NULL);
+  (void)close(fds[0]);
+  if (pid < 0) (void)close(fds[1]);
+  /* fds[1] stays open until the process's files are released. */
+}
+#endif
+
 void scr_process_exit(double code) {
   /* Node runs 'exit' listeners on explicit process.exit() too — they run
    * HERE, synchronously, before the teardown-free exit below. The hook is
@@ -1823,6 +1873,9 @@ void scr_process_exit(double code) {
    * Node), and the RC audit is meaningless mid-program (live values are
    * expected). scr_init's flush-at-exit is also skipped — flush here. */
   fflush(stdout);
+#if defined(__linux__)
+  scr_detach_teardown();
+#endif
   _Exit((int)code);
 }
 

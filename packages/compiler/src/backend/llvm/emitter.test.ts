@@ -109,6 +109,16 @@ test("throwing-call count does not multiply identical scope cleanup", () => {
   }
 });
 
+test("detached exit defines the runtime opt-in symbol only when requested", () => {
+  const module = moduleFor([call()]);
+  const plain = emitLlvmModule(module);
+  expect(emitLlvmModule(module, { detachedExit: false })).toBe(plain);
+  expect(plain).not.toContain("@scr_detached_exit");
+  const detached = emitLlvmModule(module, { detachedExit: true });
+  expect(detached.match(/^@scr_detached_exit = constant i8 1$/gm)).toHaveLength(1);
+  expect(detached.replace("@scr_detached_exit = constant i8 1\n", "")).toBe(plain);
+});
+
 test("inline RC is a speed-only emission mode and leaves release IR unchanged", () => {
   for (const boxed of [false, true]) {
     const module = moduleFor(Array.from({ length: 4 }, call), { boxed });
