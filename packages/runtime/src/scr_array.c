@@ -287,9 +287,11 @@ typedef enum {
   SCR_ARR_GROW_EXACT,  /* construction with a known element count */
 } ScrArrGrow;
 
-/* The small-object allocator rounds blocks up to SCR_SA_STEP bytes, so a
- * request can use the whole block for slots: a one-element array keeps a
- * 16-byte block rather than reserving 4 slots in a 48-byte one. */
+/* The small-object allocator rounds blocks up to SCR_SA_STEP bytes, so an
+ * exactly sized array can use the whole block for slots: a one-element
+ * literal keeps a 16-byte block rather than reserving 4 slots in a 48-byte
+ * one. Growth keeps its own sequence (4, 8, 16, ...): rounding it as well
+ * moves array storage into other size classes and measured slower. */
 static size_t scr_arr_block_cap(size_t cap) {
 #if SCR_SMALL_ALLOC
   size_t bytes = cap * SCR_ARR_SLOT_BYTES;
@@ -310,8 +312,10 @@ static size_t scr_arr_block_cap(size_t cap) {
 static void scr_arr_grow_dense_to(ScrArr *a, size_t need, ScrArrGrow mode) {
   if (need <= a->cap) return;
   if (need > SCR_ARR_MAX_LENGTH) scr_arr_oom();
-  size_t cap = need;
-  if (mode != SCR_ARR_GROW_EXACT) {
+  size_t cap;
+  if (mode == SCR_ARR_GROW_EXACT) {
+    cap = scr_arr_block_cap(need);
+  } else {
     cap = a->cap < SCR_ARR_MIN_GROWTH ? SCR_ARR_MIN_GROWTH : a->cap;
     while (cap < need) {
       /* Double below the cutoff; grow by half above it to bound overshoot. */
@@ -323,7 +327,6 @@ static void scr_arr_grow_dense_to(ScrArr *a, size_t need, ScrArrGrow mode) {
      * appends benefit from geometric headroom. */
     if (mode == SCR_ARR_GROW_SPAN && need > SCR_ARR_DENSE_LIMIT) cap = need;
   }
-  cap = scr_arr_block_cap(cap);
   if (cap > SIZE_MAX / SCR_ARR_SLOT_BYTES) scr_arr_oom();
   if (!a->data && SCR_AX(a)->sparse_len == 0) {
     /* First storage: nothing to copy, move or absorb. */

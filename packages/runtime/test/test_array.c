@@ -1107,6 +1107,33 @@ static void test_comparator_sort(void) {
   scr_arr_release(wide);
 }
 
+static void test_exact_construction(void) {
+  /* Construction reserves the requested slots (rounded up to the small
+   * allocator's block where it is live); appends past them grow
+   * geometrically, and every new slot starts as a hole. */
+  ScrArr *one = scr_arr_new(SCR_ELEM_F64, 1);
+  check(one->cap >= 1 && one->cap < 4 && scr_arr_len(one) == 0 && !scr_arr_has(one, 0),
+        "one-slot construction keeps an exactly sized empty dense prefix");
+  scr_arr_push_f64(one, 1);
+  size_t first_cap = one->cap;
+  for (int i = 2; i <= 6; i++) scr_arr_push_f64(one, i);
+  check(one->cap >= 6 && one->cap > first_cap && scr_arr_len(one) == 6,
+        "appends past an exact construction grow the dense prefix");
+  for (int i = 0; i < 6; i++) check(scr_arr_get_number(one, i) == i + 1, "grown values kept");
+  scr_arr_set_len(one, (double)one->cap + 3);
+  check(!scr_arr_has(one, 6) && !scr_arr_has(one, (double)one->cap - 1),
+        "spare capacity after growth from an exact size reads as holes");
+  scr_arr_release(one);
+
+  ScrArr *refs = scr_arr_new(SCR_ELEM_STR, 3);
+  scr_arr_push_ref(refs, scr_str_new("a", 1));
+  scr_arr_set_ref(refs, 4, scr_str_new("e", 1));
+  check(scr_arr_len(refs) == 5 && scr_arr_has(refs, 0) && !scr_arr_has(refs, 1) &&
+            !scr_arr_has(refs, 3) && scr_arr_has(refs, 4),
+        "index write past an exact construction leaves holes between");
+  scr_arr_release(refs);
+}
+
 int main(int argc, char **argv) {
   if (argc > 1) {
     ScrArr *a = scr_arr_new(SCR_ELEM_F64, 0);
@@ -1135,6 +1162,7 @@ int main(int argc, char **argv) {
   test_numeric_read();
   test_borrowed_ref_read();
   test_bool();
+  test_exact_construction();
   test_dense_replacement();
   test_unshift_reverse();
   test_str_rc();
