@@ -99,6 +99,8 @@ import { specializeNumericCalls } from "../../ir/numeric-call-specialization.js"
 import { everyExprChild, everyStmtChild, everyStmtList } from "../../ir/traverse.js";
 import { analyzeIntegerRanges, INT32_RANGE, type IntegerRanges } from "../../ir/integer-ranges.js";
 import { analyzeInt32Slots, type Int32Slots } from "../../ir/int32-slots.js";
+import { analyzeFinalFields, constructorClass, type FinalFields } from "../../ir/final-fields.js";
+import { foldConstantGlobals } from "../../ir/constant-globals.js";
 import { findIntegerViews } from "./integer-views.js";
 import { findInitializerBindings, withInitializerBindings } from "../../ir/initializer-bindings.js";
 import { findConstantNumericTables, type ConstantNumericTable } from "../../ir/constant-tables.js";
@@ -174,6 +176,7 @@ import { StackCaptures } from "./stack-captures.js";
 import {
   ABSENT_FIELD_PAYLOAD,
   emitFieldAbsentTest,
+  exactIndexLines,
   f64Lit,
   ffiNativeTypeLl,
   ffiNativeParamLl,
@@ -404,7 +407,7 @@ export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): 
   // Keep source storage intact for debugger inspection in dev builds.
   return new LlEmitter(
     options.debugSources === undefined
-      ? scalarizeNumericRecords(specializeNumericCalls(mod, mangleFunction))
+      ? scalarizeNumericRecords(specializeNumericCalls(foldConstantGlobals(mod), mangleFunction))
       : mod,
     options,
   ).emit();
@@ -417,7 +420,7 @@ export function emitLlvmModuleSource(
 ): string | readonly string[] {
   const parts = new LlEmitter(
     options.debugSources === undefined
-      ? scalarizeNumericRecords(specializeNumericCalls(mod, mangleFunction))
+      ? scalarizeNumericRecords(specializeNumericCalls(foldConstantGlobals(mod), mangleFunction))
       : mod,
     options,
   ).emitParts();
@@ -744,6 +747,11 @@ export class LlEmitter {
     { slot: string; type: "i32" | "i64"; signed?: boolean; range?: { min: number; max: number } }
   >();
   private countedLoopsEnabled = false;
+  /** Whole-program final reference fields (ir/final-fields.ts). */
+  private finalFields!: FinalFields;
+  /** The current function may borrow final fields of borrowable objects:
+   * not a constructor (where they change), not async or a generator. */
+  private finalFieldBorrows = false;
   integerRanges: IntegerRanges = new Map();
   private byteWindowsEnabled = true;
   private byteWindowEntries: ReturnType<typeof findInitializedByteLoopBindings> = new Map();
@@ -818,6 +826,7 @@ export class LlEmitter {
     this.constantNumericTables = findConstantNumericTables(mod);
     this.initializerBindings = findInitializerBindings(mod);
     this.int32Slots = analyzeInt32Slots(mod);
+    this.finalFields = analyzeFinalFields(mod);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.ffiExtendNarrowIntegers =
       options.wasi === true || ffiExtendsNarrowIntegers(options.targetTriple);
@@ -1932,25 +1941,18 @@ export class LlEmitter {
     const flushedDecls = new Set(this.decls);
     for (const table of this.constantNumericTables.values()) {
       const n = table.values.length;
+      let tableTmp = 0;
+      const tableIndex = exactIndexLines("%i", String(n), "i64", () => `%ix${tableTmp++}`);
       out.push(
         `@${table.symbol} = private constant [${n} x double] [${table.values.map((v) => `double ${f64Lit(v)}`).join(", ")}]`,
         `define internal double @${table.symbol}_get(ptr %a, double %i) alwaysinline #0 {`,
         `entry:`,
         `  %initialized = icmp ne ptr %a, null`,
-        `  %nonnegative = fcmp oge double %i, ${f64Lit(0)}`,
-        `  %below = fcmp olt double %i, ${f64Lit(n)}`,
-        `  %range = and i1 %nonnegative, %below`,
-        `  %safe = and i1 %initialized, %range`,
-        `  br i1 %safe, label %convert, label %fallback`,
-        `convert:`,
-        // The branch must dominate fptoui: NaN/out-of-range conversion
-        // would produce poison. Fractional indices also need a fallback.
-        `  %index = fptoui double %i to ${this.sizeType}`,
-        `  %roundtrip = sitofp ${this.sizeType} %index to double`,
-        `  %integer = fcmp oeq double %roundtrip, %i`,
-        `  br i1 %integer, label %read, label %fallback`,
+        ...tableIndex.lines.map((line) => `  ${line}`),
+        `  %safe = and i1 %initialized, ${tableIndex.ok}`,
+        `  br i1 %safe, label %read, label %fallback`,
         `read:`,
-        `  %slot = getelementptr inbounds [${n} x double], ptr @${table.symbol}, ${this.sizeType} 0, ${this.sizeType} %index`,
+        `  %slot = getelementptr inbounds [${n} x double], ptr @${table.symbol}, i64 0, i64 ${tableIndex.wide}`,
         `  %value = load double, ptr %slot`,
         `  ret double %value`,
         `fallback:`,
@@ -2775,22 +2777,20 @@ export class LlEmitter {
     // keeps the complete SameValueZero semantics.
     if (this.decls.has(NUMBER_MAP_ENTRY_DECL)) {
       const sz = this.sizeType;
+      let mapTmp = 0;
+      const mapIndex = exactIndexLines("%k", "%nd", sz, () => `%ix${mapTmp++}`);
       defs.push(
         `define internal ptr @sc_map_entry_f64(ptr %m, double %k) ${FN_ATTRS} {`,
         `entry:`,
         `  %ndp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 19`,
         `  %nd = load ${sz}, ptr %ndp`,
-        `  %ndf = sitofp ${sz} %nd to double`,
-        `  %lo = fcmp oge double %k, 0.0`,
-        `  %hi = fcmp olt double %k, %ndf`,
-        `  %in = and i1 %lo, %hi`,
-        `  br i1 %in, label %direct, label %outside`,
-        `direct:`,
-        `  %i = fptoui double %k to ${sz}`,
-        `  %back = sitofp ${sz} %i to double`,
-        `  %int = fcmp oeq double %back, %k`,
-        `  br i1 %int, label %slot, label %miss`,
+        // A non-integral key inside the table is as absent as one outside it.
+        ...mapIndex.lines.map((line) => `  ${line}`),
+        `  br i1 ${mapIndex.ok}, label %slot, label %outside`,
         `slot:`,
+        sz === "i64"
+          ? `  %i = add i64 ${mapIndex.wide}, 0`
+          : `  %i = trunc i64 ${mapIndex.wide} to ${sz}`,
         `  %dp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 18`,
         `  %dense = load ptr, ptr %dp`,
         `  %sp = getelementptr inbounds i32, ptr %dense, ${sz} %i`,
@@ -4971,6 +4971,8 @@ export class LlEmitter {
     );
     this.integerLoopBindings.clear();
     this.countedLoopsEnabled = this.debug === null && !fn.async && !fn.generator;
+    this.finalFieldBorrows =
+      !fn.async && !fn.generator && constructorClass(fn.name) === null && this.finalFields.size > 0;
     this.byteWindowsEnabled = this.countedLoopsEnabled;
     this.byteWindowEntries =
       this.byteWindowsEnabled && numericFn.locals.some((l) => l.type.kind === "bytes")
@@ -5341,6 +5343,17 @@ export class LlEmitter {
     // stable owner. The throwing arm's typed dummy owns nothing.
     if (value.kind === "unionNarrow") return this.canBorrowCallArgument(value.value);
     if (value.kind === "libCall") return value.fn === "error.nodeThrow";
+    // A final field never changes outside constructors: while its object is
+    // borrowable, so is the field's value. Nullable-pointer fields have no
+    // box to lend and keep their owning path.
+    if (
+      value.kind === "fieldGet" &&
+      this.finalFieldBorrows &&
+      isRefCounted(value.type) &&
+      this.finalFields.isFinal(value.className, value.field) &&
+      !this.nullableFieldGet(value)
+    )
+      return this.canBorrowReceiver(value.obj) && this.canBorrowCallArgument(value.obj);
     if (value.kind === "ternary")
       return (
         this.canBorrowReceiver(value.then) &&
@@ -5352,6 +5365,9 @@ export class LlEmitter {
     // owner dies: no later operand or callee can replace and release it.
     if ((value.kind === "fieldGet" || value.kind === "recordGet") && this.immutableRead(value))
       return this.canBorrowCallArgument(value.obj);
+    // An optional chain's bound receiver stays unchanged until its body
+    // finishes (see emitReadReceiver).
+    if (value.kind === "chainRecv") return this.chainSlots.has(value.id);
     if (value.kind !== "varRef") return false;
     const binding = this.binding(value.localId);
     // A module constant owns its value for the rest of the program.
@@ -6077,14 +6093,49 @@ export class LlEmitter {
         }
         let countedJoin: string | null = null;
         if (countedLoop?.guarded) {
-          const bound = this.emitExpr(countedLoop.limit);
-          const safe = B.tmp();
+          let safe = "true";
+          if (countedLoop.limitGuarded) {
+            const bound = this.emitExpr(countedLoop.limit);
+            safe = B.tmp();
+            B.line(
+              `${safe} = fcmp ${countedLoop.step > 0 ? "ole" : "oge"} double ${bound.name}, ${f64Lit(countedLoop.guardLimit)}`,
+            );
+          }
+          if (countedLoop.startGuarded) {
+            // An exact integer of at most 2^53 - 1 in magnitude, and not -0
+            // (the bit patterns of the value and its round trip agree).
+            // NaN and infinities fail the ordered range tests.
+            const start = this.emitExpr(countedLoop.start);
+            const low = B.tmp(),
+              high = B.tmp(),
+              raw = B.tmp(),
+              wide = B.tmp(),
+              back = B.tmp(),
+              bits = B.tmp(),
+              backBits = B.tmp(),
+              exact = B.tmp(),
+              inRange = B.tmp(),
+              ok = B.tmp();
+            B.line(`${low} = fcmp oge double ${start.name}, ${f64Lit(-Number.MAX_SAFE_INTEGER)}`);
+            B.line(`${high} = fcmp ole double ${start.name}, ${f64Lit(Number.MAX_SAFE_INTEGER)}`);
+            B.line(`${inRange} = and i1 ${low}, ${high}`);
+            B.line(`${raw} = fptosi double ${start.name} to i64`);
+            B.line(`${wide} = freeze i64 ${raw}`);
+            B.line(`${back} = sitofp i64 ${wide} to double`);
+            B.line(`${bits} = bitcast double ${start.name} to i64`);
+            B.line(`${backBits} = bitcast double ${back} to i64`);
+            B.line(`${exact} = icmp eq i64 ${bits}, ${backBits}`);
+            B.line(`${ok} = and i1 ${inRange}, ${exact}`);
+            if (safe === "true") safe = ok;
+            else {
+              const both = B.tmp();
+              B.line(`${both} = and i1 ${safe}, ${ok}`);
+              safe = both;
+            }
+          }
           const fast = B.newLabel("counted.fast");
           const slow = B.newLabel("counted.slow");
           countedJoin = B.newLabel("counted.done");
-          B.line(
-            `${safe} = fcmp ${countedLoop.step > 0 ? "ole" : "oge"} double ${bound.name}, ${f64Lit(countedLoop.guardLimit)}`,
-          );
           B.condBr(safe, fast, slow);
           B.startBlock(slow);
           this.countedLoopsEnabled = false;
@@ -7293,6 +7344,16 @@ export class LlEmitter {
       this.B.line(`${value} = load ptr, ptr ${binding.slot}`);
       return { name: value, type: e.type };
     }
+    if (e.kind === "chainRecv") {
+      // The chain's bind slot holds its receiver unchanged until the body
+      // finishes, owned by the slot itself or by the chain's receiver.
+      const bound = this.chainSlots.get(e.id);
+      if (!bound)
+        throw new InternalCompilerError(`llvm emitter bug: chainRecv "${e.id}" outside its chain`);
+      const value = this.B.tmp();
+      this.B.line(`${value} = load ${this.llType(bound.type)}, ptr ${bound.name}`);
+      return { name: value, type: e.type };
+    }
     if (e.kind === "arrayGet" && this.canBorrowReceiver(e)) {
       // The array keeps the element alive until the consumer; a missing
       // element still traps exactly like the owned read.
@@ -7545,6 +7606,8 @@ export class LlEmitter {
 
   canBorrowReceiver(e: IrExpr): boolean {
     switch (e.kind) {
+      case "chainRecv":
+        return this.chainSlots.has(e.id);
       case "varRef": {
         const binding = this.binding(e.localId);
         return (
