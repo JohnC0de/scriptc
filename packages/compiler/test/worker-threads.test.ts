@@ -179,7 +179,7 @@ settle().then((value) => console.log(value));
     // Worker runtimes keep one small-object allocator per script thread:
     // the inline paths address its state, live counts and dispose hook in
     // the runtime's one thread-local ScrThreadHot block.
-    expect(llvm).toMatch(/@scr_thread_hot = external thread_local(\(initialexec\))? global /);
+    expect(llvm).toMatch(/@scr_thread_hot = external thread_local(\(localexec\))? global /);
     expect(llvm).not.toMatch(/@scr_(sa|cyc_live|cyc_old_freed|weak_dispose_hook) = external/);
     expect(llvm).toContain("call ptr @llvm.threadlocal.address.p0(ptr @scr_thread_hot)");
     expect(llvm).toMatch(/getelementptr inbounds i8, ptr %[\w.]+\.tl\.hot, i64 808/);
@@ -228,33 +228,92 @@ test("worker entries without a source file stay refused", async () => {
     );
 });
 
-test("worker programs poll inline and skip termination polls in bounded functions", async () => {
-  const request = await fixture(
-    worker +
-      `
+test.each([
+  ["arm64-apple-macosx14.0.0", "alert"],
+  ["x86_64-unknown-linux-gnu", "flag"],
+  ["aarch64-unknown-linux-gnu", "flag"],
+])(
+  "worker programs for %s poll inline (%s) and skip termination polls in bounded functions",
+  async (target, lane) => {
+    vi.stubEnv("SCRIPTC_TARGET", target);
+    const request = await fixture(
+      worker +
+        `
 function mix(a: number, b: number): number { return (a * 31 + b) % 1000003; }
 function spin(n: number): number { return n < 2 ? mix(n, 1) : spin(n - 1) + spin(n - 2); }
 console.log(mix(1, 2), spin(5));
 `,
+    );
+    const result = await compile(request.entry, request);
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (result.ok) {
+      const llvm = await readFile(request.outPath, "utf8");
+      const body = (name: string): string => {
+        const start = llvm.search(new RegExp(`^define [^\\n]*@${name}\\(`, "m"));
+        expect(start).toBeGreaterThanOrEqual(0);
+        return llvm.slice(start, llvm.indexOf("\n}\n", start));
+      };
+      // A bounded helper neither polls on entry nor makes its callers poll.
+      expect(body("sc_f_mix")).not.toMatch(/@scr_exc_(alert|flag)/);
+      // Recursion tests after its recursive calls (its stack check replaces
+      // the entry poll) and never reads its thread-local cell inline.
+      expect(body("sc_f_spin")).not.toContain("@scr_exc_active");
+      if (lane === "alert") {
+        // Darwin: the inline test reads the process-wide alert word (a
+        // thread-local access is a call there), and only the slow path calls
+        // into the runtime.
+        expect(body("sc_f_spin")).toMatch(/load atomic i32, ptr @scr_exc_alert monotonic/);
+        expect(body("sc_f_spin")).toContain("call zeroext i1 @scr_exc_pending()");
+        expect(llvm).toMatch(/^@scr_exc_alert = external dso_local global i32, align 64$/m);
+      } else {
+        // ELF: the thread's exact pending word, one TLS load, no slow path.
+        expect(body("sc_f_spin")).toMatch(
+          /load atomic i32, ptr @scr_exc_flag (unordered|monotonic)/,
+        );
+        expect(body("sc_f_spin")).not.toContain("@scr_exc_pending");
+        expect(llvm).not.toContain("@scr_exc_alert");
+        expect(llvm).toMatch(
+          /^@scr_exc_flag = external thread_local\(localexec\) global i32, align 4$/m,
+        );
+      }
+    }
+  },
+);
+
+test.each([
+  ["arm64-apple-macosx14.0.0", "tpidrro"],
+  ["x86_64-apple-macosx14.0.0", "gs"],
+  ["x86_64-unknown-linux-gnu", "tls"],
+])("worker stack checks for %s read the guard through %s", async (target, access) => {
+  vi.stubEnv("SCRIPTC_TARGET", target);
+  const request = await fixture(
+    worker +
+      "\nfunction depth(n: number): number { return n < 1 ? 0 : depth(n - 1) + 1; }\nconsole.log(depth(9));\n",
   );
   const result = await compile(request.entry, request);
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (result.ok) {
     const llvm = await readFile(request.outPath, "utf8");
-    const body = (name: string): string => {
-      const start = llvm.search(new RegExp(`^define [^\\n]*@${name}\\(`, "m"));
-      expect(start).toBeGreaterThanOrEqual(0);
-      return llvm.slice(start, llvm.indexOf("\n}\n", start));
-    };
-    // A bounded helper neither polls on entry nor makes its callers poll.
-    expect(body("sc_f_mix")).not.toContain("@scr_exc_alert");
-    // Recursion polls on entry: the inline test reads the process-wide
-    // alert word (no thread-local access), and only the slow path calls into
-    // the runtime.
-    expect(body("sc_f_spin")).toMatch(/load atomic i32, ptr @scr_exc_alert monotonic/);
-    expect(body("sc_f_spin")).toContain("call zeroext i1 @scr_exc_pending()");
-    expect(body("sc_f_spin")).not.toContain("@scr_exc_active");
-    expect(llvm).toMatch(/^@scr_exc_alert = external global i32, align 64$/m);
+    const start = llvm.search(/^define [^\n]*@sc_f_depth\(/m);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const depth = llvm.slice(start, llvm.indexOf("\n}\n", start));
+    expect(depth).toContain("call ptr @llvm.stacksave.p0()");
+    if (access === "tls") {
+      // ELF: one thread-pointer-relative load of the thread-local guard.
+      expect(depth).toContain("load ptr, ptr @scr_stack_guard");
+      expect(depth).not.toContain("@scr_stack_guard_tsd");
+    } else {
+      // Darwin: a thread-local access calls the TLV thunk, so the guard comes
+      // from its thread-specific-data slot, with an out-of-line fallback.
+      expect(depth).not.toContain("ptr @scr_stack_guard\n");
+      expect(depth).toContain("load i64, ptr @scr_stack_guard_tsd");
+      expect(depth).toContain("call i64 @scr_stack_guard_get()");
+      if (access === "tpidrro") {
+        expect(depth).toContain('@llvm.read_register.i64(metadata !{!"tpidrro_el0"})');
+      } else {
+        expect(depth).toMatch(/load ptr, ptr addrspace\(256\) %/);
+      }
+    }
   }
 });
 
@@ -269,14 +328,15 @@ test.each([
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (result.ok) {
     const llvm = await readFile(request.outPath, "utf8");
-    // Every thread-local of a worker executable lives in its own TLS block:
-    // ELF uses local-exec for the program's and initial-exec for the
-    // runtime's; Darwin's thread-local variables have one model.
+    // Every thread-local of a worker executable lives in its own TLS block
+    // (the runtime links statically): ELF uses local-exec for the program's
+    // and the runtime's; Darwin's thread-local variables have one model.
     const plain = /^@[-$._A-Za-z0-9]+ = (internal|external) thread_local global /m;
     if (models) {
       expect(llvm).not.toMatch(plain);
+      expect(llvm).not.toContain("initialexec");
       expect(llvm).toMatch(/^@[-$._A-Za-z0-9]+ = internal thread_local\(localexec\) global /m);
-      expect(llvm).toMatch(/^@[-$._A-Za-z0-9]+ = external thread_local\(initialexec\) global /m);
+      expect(llvm).toMatch(/^@[-$._A-Za-z0-9]+ = external thread_local\(localexec\) global /m);
     } else {
       expect(llvm).toMatch(plain);
       expect(llvm).not.toContain("thread_local(");
