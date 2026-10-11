@@ -400,6 +400,10 @@ export interface LlvmTargetOptions {
   /** Emit retain/release fast paths inline (the `speed` posture). Off, every
    * retain and release is a runtime call. */
   inlineRc?: boolean;
+  /** Define `scr_detached_exit` so the Linux runtime hands the address-space
+   * teardown after `process.exit` to a helper process (`--detached-exit`).
+   * Executables only; the runtime's weak default keeps it off. */
+  detachedExit?: boolean;
 }
 
 export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
@@ -527,6 +531,7 @@ export class LlEmitter {
   private readonly executableTls: boolean;
   private readonly emitLibraryIdentity: boolean;
   private readonly runtimeAbiMarker: boolean;
+  private readonly detachedExit: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
    * first-use order, the runtime ABI’s determinism discipline. */
   private readonly literals = new Map<string, { sym: string; len: number }>();
@@ -835,6 +840,7 @@ export class LlEmitter {
       !/apple|darwin|windows|mingw|cygwin|win32/.test(options.targetTriple || process.platform);
     this.emitLibraryIdentity = options.emitLibraryIdentity !== false;
     this.runtimeAbiMarker = options.runtimeAbiMarker === true;
+    this.detachedExit = options.detachedExit === true;
     this.rcHelpers = options.inlineRc === true ? new Set() : null;
     // ScrCycHdr.color stays 12 bytes behind a wasm32 object and 16 bytes
     // behind a 64-bit object. The wasm32 header pads before color so its
@@ -1920,6 +1926,10 @@ export class LlEmitter {
       ...(this.stackChecks?.size ? [`declare void @scr_stack_guard_init()`] : []),
       ...(this.runtimeAbiMarker && this.mod.lib === undefined
         ? [`declare void @${RUNTIME_ABI_MARKER}()`]
+        : []),
+      // Overrides the runtime's weak default (scr_lib.c).
+      ...(this.detachedExit && this.mod.lib === undefined
+        ? [`@scr_detached_exit = constant i8 1`]
         : []),
     );
     for (const d of this.decls) out.push(d);
