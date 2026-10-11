@@ -983,6 +983,29 @@ export interface IrModule {
    * emissions stay conformance-identical by construction. Absent on every
    * executable build (the backends emit main() exactly as always). */
   lib?: IrLibSection;
+  /** Contract types (@scriptc/types) the frontend verified against every
+   * write in the program (ir/contract-check.ts). Backends may rely on them
+   * unconditionally. Absent when the program writes no contract. */
+  contracts?: IrContracts;
+}
+
+/** Verified contract facts, keyed by IR names. */
+export interface IrContracts {
+  /** Int32 class field families: `${topmost declaring class}\0${field}`. */
+  int32Fields?: string[];
+  /** Int32 parameters: `${function}\0${localId}`. */
+  int32Params?: string[];
+  /** Functions whose every return is an int32. */
+  int32Returns?: string[];
+  /** Int32 locals (`${function}\0${localId}`, including every capture of a
+   * captured binding) and module globals (`\0${globalId}`). */
+  int32Locals?: string[];
+  /** Functions that cannot throw (NoThrow). */
+  noThrow?: string[];
+  /** Immutable module constants built from fresh literals: the backend
+   * makes their graphs immortal once initialized, and reads through them
+   * need no reference counting. */
+  immortalGlobals?: string[];
 }
 
 export type IrFfiValueParamClass =

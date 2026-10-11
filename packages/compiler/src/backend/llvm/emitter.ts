@@ -733,6 +733,9 @@ export class LlEmitter {
   private readonly initializerBindings: ReturnType<typeof findInitializerBindings>;
   /** Whole-program int32 storage and parameter/result facts. */
   readonly int32Slots: Int32Slots;
+  /** Immutable module constants (contract types) whose graphs become
+   * immortal once initialized: their reads need no reference counting. */
+  readonly immortalGlobals: ReadonlySet<string>;
   private numericLocals = new Map<string, IrLocal>();
   private captureIds = new Set<string>();
   /** Active induction bindings retain their width independently of size_t. */
@@ -820,6 +823,7 @@ export class LlEmitter {
     this.constantNumericTables = findConstantNumericTables(mod);
     this.initializerBindings = findInitializerBindings(mod);
     this.int32Slots = analyzeInt32Slots(mod);
+    this.immortalGlobals = new Set(mod.contracts?.immortalGlobals ?? []);
     this.finalFields = analyzeFinalFields(mod);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.ffiExtendNarrowIntegers =
@@ -5609,6 +5613,14 @@ export class LlEmitter {
         }
         B.line(`store ${this.llType(b.type)} ${v.name}, ptr ${b.slot}`);
         this.storeIntegerView(s.localId, v, s.value);
+        if (b.kind === "global" && this.immortalGlobals.has(s.localId)) {
+          // An Immutable module constant (contracts/check.ts proved it is
+          // fresh, publishable and never written): its graph becomes
+          // immortal, so reads skip reference counting and the collector
+          // never visits it.
+          for (const line of this.publishWalkers.emitPublish(v.name, v.type, s.loc))
+            B.line(line.trimStart());
+        }
         break;
       }
       case "exprStmt":

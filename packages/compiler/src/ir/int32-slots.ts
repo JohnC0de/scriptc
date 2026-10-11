@@ -54,6 +54,14 @@ export class Int32Slots {
   readonly provenWrites = new Set<IrExpr>();
   /** Disqualified candidates and the first reason, for tests. */
   readonly reasons = new Map<string, string>();
+  /** Slots an Int32 contract pins (`field:`, `param:`, `ret:`, `box:` keys):
+   * the contract check proved every write, so they are never dropped. */
+  private readonly pinned = new Set<string>();
+  /** Int32 contract locals (`function\0localId`) and globals (`\0id`). */
+  private readonly int32Locals = new Set<string>();
+  /** Drops the analysis attempted on pinned slots. The contract check and
+   * this analysis use the same range proofs, so this stays empty. */
+  readonly pinViolations: string[] = [];
 
   constructor(private readonly classes: ReadonlyMap<string, IrClassDef> = new Map()) {}
 
@@ -89,7 +97,8 @@ export class Int32Slots {
       this.fields.size === 0 &&
       this.returns.size === 0 &&
       this.paramFacts.size === 0 &&
-      this.boxes.size === 0
+      this.boxes.size === 0 &&
+      this.int32Locals.size === 0
     )
       return {};
     const result: IntegerSlotFacts = {
@@ -97,6 +106,11 @@ export class Int32Slots {
       call: (callee) => (this.returns.has(callee) ? INT32_RANGE : null),
       boxed: (localId) => (this.hasBox(this.boxGroup(fnName, localId)) ? INT32_RANGE : null),
     };
+    if (this.int32Locals.size > 0)
+      result.locals = (localId) =>
+        this.int32Locals.has(`${fnName}\0${localId}`) || this.int32Locals.has(`\0${localId}`)
+          ? INT32_RANGE
+          : null;
     const params = this.paramFacts.get(fnName);
     if (params) result.params = params;
     return result;
@@ -108,11 +122,27 @@ export class Int32Slots {
 
   /* ── construction (analyzeInt32Slots only) ── */
 
+  pin(key: string): void {
+    this.pinned.add(key);
+  }
+  isPinnedField(family: string): boolean {
+    return this.pinned.has(`field:${family}`);
+  }
+  addInt32Local(key: string): void {
+    this.int32Locals.add(key);
+  }
+  private refusePinned(key: string): boolean {
+    if (!this.pinned.has(key)) return false;
+    this.pinViolations.push(key);
+    return true;
+  }
+
   addBox(group: string, members: readonly string[]): void {
     this.boxes.add(group);
     for (const member of members) this.boxGroupOf.set(member, group);
   }
   dropBox(group: string): boolean {
+    if (this.refusePinned(`box:${group}`)) return false;
     return this.boxes.delete(group);
   }
   hasBox(group: string | null): boolean {
@@ -123,6 +153,7 @@ export class Int32Slots {
     this.fields.add(family);
   }
   dropField(family: string): boolean {
+    if (this.refusePinned(`field:${family}`)) return false;
     return this.fields.delete(family);
   }
   hasFamily(family: string): boolean {
@@ -134,6 +165,7 @@ export class Int32Slots {
     params.set(localId, INT32_RANGE);
   }
   dropParam(fnName: string, localId: string): boolean {
+    if (this.refusePinned(`param:${fnName}\0${localId}`)) return false;
     const params = this.paramFacts.get(fnName);
     if (!params?.delete(localId)) return false;
     if (params.size === 0) this.paramFacts.delete(fnName);
@@ -146,6 +178,7 @@ export class Int32Slots {
     this.returns.add(fnName);
   }
   dropReturn(fnName: string): boolean {
+    if (this.refusePinned(`ret:${fnName}`)) return false;
     return this.returns.delete(fnName);
   }
   hasReturn(fnName: string): boolean {
@@ -337,15 +370,12 @@ export function dynamicFieldStores(
   return { all: dynWritesAll, names: dynWritten };
 }
 
-export function analyzeInt32Slots(mod: IrModule): Int32Slots {
+/** The f64 class field families a runtime store through a live dynamic view
+ * can write: the class reaches checked-dynamic code (directly or through
+ * another exposed type), and some dynamic store in the program can name the
+ * field. */
+export function dynamicallyStoredFamilies(mod: IrModule, slots: Int32Slots): Set<string> {
   const classes = new Map((mod.classes ?? []).map((c) => [c.name, c]));
-  const slots = new Int32Slots(classes);
-  if (mod.lib) return slots;
-  const reason = (key: string, why: string): void => {
-    if (!slots.reasons.has(key)) slots.reasons.set(key, why);
-  };
-
-  /* ── candidate fields ── */
   const children = new Map<string, string[]>();
   for (const cls of classes.values())
     if (cls.base) {
@@ -363,33 +393,6 @@ export function analyzeInt32Slots(mod: IrModule): Int32Slots {
     }
     return out;
   };
-  const genericFamilies = new Set<string>();
-  for (const cls of classes.values())
-    if (cls.genericOf !== undefined) {
-      genericFamilies.add(cls.name);
-      genericFamilies.add(cls.genericOf);
-    }
-  const plainClass = (cls: IrClassDef): boolean => {
-    for (let c: IrClassDef | undefined = cls; c; c = c.base ? classes.get(c.base) : undefined) {
-      if (c.runtime || genericFamilies.has(c.name)) return false;
-      if (c.base && !classes.has(c.base)) return false;
-    }
-    return true;
-  };
-  const dropFamily = (family: string, why: string): void => {
-    reason(`field:${family}`, why);
-    slots.dropField(family);
-  };
-  for (const cls of classes.values())
-    for (const field of cls.fields) {
-      if (field.type.kind !== "f64" || field.name.startsWith("%")) continue;
-      const family = slots.family(cls.name, field.name)!;
-      if (plainClass(cls)) {
-        if (!slots.reasons.has(`field:${family}`)) slots.addField(family);
-      } else dropFamily(family, "runtime-provided or generic class");
-    }
-
-  /* ── dynamic, reflective and runtime exposure ── */
   const records = new Map((mod.records ?? []).map((r) => [r.id, r]));
   const unions = new Map((mod.unions ?? []).map((u) => [u.id, u]));
   const exposedClasses = new Set<string>();
@@ -463,6 +466,7 @@ export function analyzeInt32Slots(mod: IrModule): Int32Slots {
         if (s.kind === "throw") expose(s.value.type);
       },
     });
+  const families = new Set<string>();
   for (const cls of classes.values()) {
     if (!exposeAll && !exposedClasses.has(cls.name)) continue;
     for (const field of cls.fields)
@@ -471,12 +475,28 @@ export function analyzeInt32Slots(mod: IrModule): Int32Slots {
         !field.name.startsWith("%") &&
         (dynWritesAll || dynWritten.has(field.name))
       )
-        dropFamily(slots.family(cls.name, field.name)!, "dynamic stores can name the field");
+        families.add(slots.family(cls.name, field.name)!);
   }
+  return families;
 
-  /* ── functions: escapes, parameter and return candidates ── */
+}
+
+/** How functions can be reached besides direct calls: as values (closures,
+ * the entry, constructors behind class values: `valueEscaped`), through
+ * virtual dispatch (`virtualTargets`), or as vtable entries the runtime
+ * calls (`runtimeVirtual`: methods of runtime-rooted hierarchies). */
+export function functionCallFacts(
+  mod: IrModule,
+  classes: ReadonlyMap<string, IrClassDef>,
+  subtree: (className: string) => string[],
+): {
+  valueEscaped: Set<string>;
+  virtualTargets: Set<string>;
+  runtimeVirtual: (name: string) => boolean;
+} {
   const functions = new Map(mod.functions.map((fn) => [fn.name, fn]));
   const escaped = new Set<string>();
+  const virtualTargets = new Set<string>();
   const seenObjects = new Set<object>();
   const scan = (
     value: unknown,
@@ -520,9 +540,9 @@ export function analyzeInt32Slots(mod: IrModule): Int32Slots {
     walkFunction(fn, {
       expr: (e) => {
         if (e.kind !== "virtualCall") return;
-        for (const name of subtree(e.className)) escaped.add(`%${name}.${e.method}`);
+        for (const name of subtree(e.className)) virtualTargets.add(`%${name}.${e.method}`);
         for (let c = classes.get(e.className); c; c = c.base ? classes.get(c.base) : undefined)
-          escaped.add(`%${c.name}.${e.method}`);
+          virtualTargets.add(`%${c.name}.${e.method}`);
       },
     });
   // A class value can reach `new` through its construct thunk; one that
@@ -563,8 +583,91 @@ export function analyzeInt32Slots(mod: IrModule): Int32Slots {
         if (e.kind === "classRef" && !testedOnly.has(e)) escaped.add(`%${e.className}.constructor`);
       },
     });
-  const virtual = (name: string): boolean =>
+  const runtimeVirtual = (name: string): boolean =>
     runtimePrefixes.some((prefix) => name.startsWith(prefix));
+  return { valueEscaped: escaped, virtualTargets, runtimeVirtual };
+}
+
+export function analyzeInt32Slots(mod: IrModule): Int32Slots {
+  const classes = new Map((mod.classes ?? []).map((c) => [c.name, c]));
+  const slots = new Int32Slots(classes);
+  if (mod.lib) return slots;
+  const reason = (key: string, why: string): void => {
+    if (!slots.reasons.has(key)) slots.reasons.set(key, why);
+  };
+  // Int32 contracts (ir/contract-check.ts proved every write): pinned
+  // candidates the fixpoint below never drops, plus local facts.
+  const contracts = mod.contracts;
+  for (const family of contracts?.int32Fields ?? []) {
+    slots.pin(`field:${family}`);
+    slots.addField(family);
+  }
+  for (const key of contracts?.int32Params ?? []) {
+    const cut = key.indexOf("\0");
+    slots.pin(`param:${key}`);
+    slots.addParam(key.slice(0, cut), key.slice(cut + 1));
+  }
+  for (const fnName of contracts?.int32Returns ?? []) {
+    slots.pin(`ret:${fnName}`);
+    slots.addReturn(fnName);
+  }
+  for (const key of contracts?.int32Locals ?? []) slots.addInt32Local(key);
+
+  /* ── candidate fields ── */
+  const children = new Map<string, string[]>();
+  for (const cls of classes.values())
+    if (cls.base) {
+      const list = children.get(cls.base);
+      if (list) list.push(cls.name);
+      else children.set(cls.base, [cls.name]);
+    }
+  const subtree = (name: string): string[] => {
+    const out: string[] = [];
+    const stack = [name];
+    while (stack.length) {
+      const next = stack.pop()!;
+      out.push(next);
+      for (const child of children.get(next) ?? []) stack.push(child);
+    }
+    return out;
+  };
+  const genericFamilies = new Set<string>();
+  for (const cls of classes.values())
+    if (cls.genericOf !== undefined) {
+      genericFamilies.add(cls.name);
+      genericFamilies.add(cls.genericOf);
+    }
+  const plainClass = (cls: IrClassDef): boolean => {
+    for (let c: IrClassDef | undefined = cls; c; c = c.base ? classes.get(c.base) : undefined) {
+      if (c.runtime || genericFamilies.has(c.name)) return false;
+      if (c.base && !classes.has(c.base)) return false;
+    }
+    return true;
+  };
+  const dropFamily = (family: string, why: string): void => {
+    reason(`field:${family}`, why);
+    slots.dropField(family);
+  };
+  for (const cls of classes.values())
+    for (const field of cls.fields) {
+      if (field.type.kind !== "f64" || field.name.startsWith("%")) continue;
+      const family = slots.family(cls.name, field.name)!;
+      if (plainClass(cls)) {
+        if (!slots.reasons.has(`field:${family}`)) slots.addField(family);
+      } else dropFamily(family, "runtime-provided or generic class");
+    }
+
+  /* ── dynamic, reflective and runtime exposure ── */
+  for (const family of dynamicallyStoredFamilies(mod, slots)) {
+    if (slots.isPinnedField(family)) continue;
+    dropFamily(family, "dynamic stores can name the field");
+  }
+
+  /* ── functions: escapes, parameter and return candidates ── */
+  const functions = new Map(mod.functions.map((fn) => [fn.name, fn]));
+  const calls = functionCallFacts(mod, classes, subtree);
+  const escaped = new Set([...calls.valueEscaped, ...calls.virtualTargets]);
+  const virtual = calls.runtimeVirtual;
 
   const paramKey = (fnName: string, localId: string): string => `param:${fnName}\0${localId}`;
   const dropParam = (fnName: string, localId: string, why: string): boolean => {
