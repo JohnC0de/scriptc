@@ -4038,7 +4038,7 @@ export class LlEmitter {
       // guard from its thread-specific-data slot at the runtime-validated
       // offset instead, and call out only when the runtime found no slot.
       this.declare(`@scr_stack_guard_tsd = external dso_local global i64`);
-      this.declare(`declare ptr @scr_stack_guard_get()`);
+      this.declare(`declare i64 @scr_stack_guard_get()`);
       const offset = B.tmp();
       const direct = B.tmp();
       const likely = B.tmp();
@@ -4068,8 +4068,11 @@ export class LlEmitter {
       }
       test(guard);
       B.startBlock(slow);
+      // uintptr_t scr_stack_guard_get(void): an i64 in the C ABI.
+      const raw = B.tmp();
       const fallback = B.tmp();
-      B.line(`${fallback} = call ptr @scr_stack_guard_get()`);
+      B.line(`${raw} = call i64 @scr_stack_guard_get()`);
+      B.line(`${fallback} = inttoptr i64 ${raw} to ptr`);
       test(fallback);
     } else {
       const tl = this.mod.workers === true ? "thread_local " : "";

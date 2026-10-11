@@ -307,7 +307,7 @@ test.each([
       // from its thread-specific-data slot, with an out-of-line fallback.
       expect(depth).not.toContain("ptr @scr_stack_guard\n");
       expect(depth).toContain("load i64, ptr @scr_stack_guard_tsd");
-      expect(depth).toContain("call ptr @scr_stack_guard_get()");
+      expect(depth).toContain("call i64 @scr_stack_guard_get()");
       if (access === "tpidrro") {
         expect(depth).toContain('@llvm.read_register.i64(metadata !{!"tpidrro_el0"})');
       } else {
