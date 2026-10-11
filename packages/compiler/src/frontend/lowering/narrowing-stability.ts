@@ -146,8 +146,22 @@ export class NarrowingStability {
       if (
         !(contextual.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) &&
         !checker.isTypeAssignableTo(declared, contextual)
-      )
-        return null;
+      ) {
+        // A slot that takes the declared type minus null/undefined after an
+        // absence test (`if (acc !== null) return acc`): the checker's
+        // narrowing can also hold an arm an assignment chose before the
+        // call that stored another one. Restore every present arm, the way
+        // a binding narrowed only by the test reads.
+        if (classNarrowing) return null;
+        const present = checker.getNonNullableType(declared);
+        if (
+          present === declared ||
+          !checker.isTypeAssignableTo(narrowedTs, present) ||
+          !checker.isTypeAssignableTo(present, contextual)
+        )
+          return null;
+        return this.trusted(node) ? null : present;
+      }
     }
     return this.trusted(node) ? null : declared;
   }
@@ -838,11 +852,55 @@ function widePosition(node: ts.Expression): WidePosition | null {
     return "context";
   // Only slots whose type IS the contextual type: an array or object
   // literal (or an unannotated arrow body) infers its own type from the
-  // narrowed element instead.
+  // narrowed element instead, unless the literal itself sits in a typed
+  // slot (`const xs: Expr[] = [x]`, `{ value }` passed as a parameter).
   if (ts.isReturnStatement(parent)) return "context";
+  if (
+    (ts.isArrayLiteralExpression(parent) ||
+      (ts.isPropertyAssignment(parent) && parent.initializer === child) ||
+      ts.isShorthandPropertyAssignment(parent)) &&
+    typedLiteral(parent)
+  )
+    return "context";
   if (ts.isVariableDeclaration(parent) && parent.initializer === child && parent.type)
     return "context";
   return null;
+}
+
+/** The array or object literal holding `parent` (an element's literal or a
+ * property assignment) is itself lowered against a declared slot type. */
+function typedLiteral(
+  parent: ts.ArrayLiteralExpression | ts.PropertyAssignment | ts.ShorthandPropertyAssignment,
+): boolean {
+  let literal: ts.Node | undefined = ts.isArrayLiteralExpression(parent) ? parent : parent.parent;
+  while (literal) {
+    let slot: ts.Node | undefined = literal.parent;
+    while (slot && ts.isParenthesizedExpression(slot)) {
+      literal = slot;
+      slot = slot.parent;
+    }
+    if (!slot) return false;
+    if (ts.isVariableDeclaration(slot)) return slot.initializer === literal && !!slot.type;
+    if (ts.isCallExpression(slot) || ts.isNewExpression(slot))
+      return slot.arguments?.some((arg) => arg === literal) ?? false;
+    if (ts.isBinaryExpression(slot))
+      return slot.operatorToken.kind === ts.SyntaxKind.EqualsToken && slot.right === literal;
+    if (ts.isReturnStatement(slot)) {
+      let fn: ts.Node | undefined = slot.parent;
+      while (fn && !ts.isFunctionLike(fn)) fn = fn.parent;
+      return fn !== undefined && ts.isFunctionLike(fn) && fn.type !== undefined;
+    }
+    if (ts.isArrayLiteralExpression(slot)) {
+      literal = slot;
+      continue;
+    }
+    if (ts.isPropertyAssignment(slot) && slot.initializer === literal) {
+      literal = slot.parent;
+      continue;
+    }
+    return false;
+  }
+  return false;
 }
 
 /** The plain member read or method call `node` is the receiver of

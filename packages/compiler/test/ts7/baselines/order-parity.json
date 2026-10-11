@@ -15748,6 +15748,12 @@
     "<repo>/tests/corpus/4650-stale-property-narrowing.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4652-stale-closure-binding-narrowing.ts": {
+   "order": [
+    "<repo>/tests/corpus/4652-stale-closure-binding-narrowing.ts"
+   ],
+   "diags": []
   }
  }
 }
