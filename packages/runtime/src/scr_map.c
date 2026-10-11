@@ -518,15 +518,51 @@ static __attribute__((noinline)) void scr_map_leave_dense(ScrMap *m) {
 }
 
 /* Drop tombstones, preserving insertion order. Only legal when no iteration
- * is active (the forEach desugar's indices would shift). */
-static void scr_map_compact(ScrMap *m) {
-  size_t w = 0;
+ * is active (the forEach desugar's indices would shift).
+ *
+ * Index tables are sized by the most entries a map has held, so a map that
+ * shrank keeps rebuilding (and clearing) a table sized for its peak. A
+ * bucket table more than eight times what the survivors need shrinks to
+ * twice that, leaving room to double before it grows again. With `reindex`
+ * the direct index also follows the surviving keys: it shrinks to cover the
+ * largest one, and keys that became sparse move back to hashing (at twice
+ * the spread that admits them, so churn cannot flip modes). The append path
+ * passes false: it holds a slot of the current direct index. */
+static void scr_map_compact(ScrMap *m, bool reindex) {
+  size_t w = 0, top = 0;
+  bool dense = m->ndense != 0;
   for (size_t r = 0; r < m->nentries; r++) {
-    if (m->entries[r].hash) m->entries[w++] = m->entries[r];
+    if (!m->entries[r].hash) continue;
+    if (dense) {
+      size_t k = (size_t)scr_map_slot_to_f64(m->entries[r].key);
+      if (k > top) top = k;
+    }
+    m->entries[w++] = m->entries[r];
   }
   m->nentries = w;
-  if (m->nbuckets > 0) scr_map_rebuild_buckets(m, m->nbuckets);
-  else if (m->ndense) scr_map_fill_dense(m);
+  if (m->nbuckets > 0) {
+    size_t want = 16;
+    while (want < 2 * (w + 1)) want *= 2;
+    scr_map_rebuild_buckets(m, m->nbuckets / 8 > want ? 2 * want : m->nbuckets);
+    return;
+  }
+  if (!dense) return;
+  if (reindex) {
+    if (w == 0) {
+      free(m->dense);
+      m->dense = NULL;
+      m->ndense = 0;
+      return;
+    }
+    size_t limit = scr_map_dense_limit(w);
+    if (top / 2 >= limit) {
+      scr_map_leave_dense(m);
+      return;
+    }
+    size_t need = scr_map_dense_size(top);
+    if (need < m->ndense) scr_map_dense_alloc(m, need);
+  }
+  scr_map_fill_dense(m);
 }
 
 static void scr_map_grow_entries(ScrMap *m) {
@@ -548,7 +584,7 @@ static void scr_map_reserve_append(ScrMap *m) {
   if (m->ndense) {
     /* Directly indexed: the table is sized by keys, not entry count. */
     if (m->nentries < m->ecap) return;
-    if (m->iter_depth == 0 && m->nlive <= m->nentries / 2) scr_map_compact(m);
+    if (m->iter_depth == 0 && m->nentries > 0 && m->nlive <= m->nentries / 2) scr_map_compact(m, false);
     if (m->nentries == m->ecap) scr_map_grow_entries(m);
     return;
   }
@@ -557,7 +593,7 @@ static void scr_map_reserve_append(ScrMap *m) {
        m->nbuckets >= 2 * (m->nentries + 1))) return;
   if (m->iter_depth == 0 && m->nentries > 0 &&
       (m->nbuckets == 0 ? m->nlive < m->nentries : m->nlive <= m->nentries / 2)) {
-    scr_map_compact(m);
+    scr_map_compact(m, false);
   }
   if (m->nentries == m->ecap) scr_map_grow_entries(m);
   if (m->nbuckets == 0 && m->nentries < SCR_MAP_LINEAR_LIMIT) return;
@@ -701,10 +737,27 @@ void scr_map_trace_v(void *m, ScrTraceVisit visit, void *ctx) {
 
 double scr_map_size(const ScrMap *m) { return (double)m->nlive; }
 
+/* Storage clear() keeps regardless of how many entries it removed. */
+#define SCR_MAP_CLEAR_KEEP 256
+
+/* clear() costs time proportional to the entries it walks (live entries
+ * and tombstones appended since the last reset), never to the peak size of
+ * the index tables:
+ *  - the direct index is zero exactly at the absent keys (deletes clear
+ *    their slots), so only the live entries' slots are reset;
+ *  - the bucket table is reset only when entries pointed into it, and only
+ *    while it is proportional to them;
+ *  - storage far larger than the entries just removed is freed, returning
+ *    the map to its initial empty state the way V8 reallocates a cleared
+ *    table. Regrowth is amortized against the insertions that need it.
+ * Clearing an empty map does no work beyond, once, freeing such storage. */
 void scr_map_clear(ScrMap *m) {
-  for (size_t e = 0; e < m->nentries; e++) {
+  size_t walked = m->nentries;
+  uint32_t *dense = m->ndense ? m->dense : NULL;
+  for (size_t e = 0; e < walked; e++) {
     if (!m->entries[e].hash) continue;
     m->entries[e].hash = 0;
+    if (dense) dense[(size_t)scr_map_slot_to_f64(m->entries[e].key)] = 0;
     scr_map_release_key(m, m->entries[e].key);
     scr_map_release_val(m, m->entries[e].val);
   }
@@ -714,12 +767,29 @@ void scr_map_clear(ScrMap *m) {
      * entries so its indices stay stable — entries added by the callback
      * after the clear append past them and ARE visited (Node-exact). */
     m->nentries = 0;
+    if (m->ecap > SCR_MAP_CLEAR_KEEP && m->ecap / 8 > walked) {
+      free(m->entries);
+      m->entries = NULL;
+      m->ecap = 0;
+    }
   }
-  if (m->ndense) memset(m->dense, 0, m->ndense * sizeof *m->dense);
+  /* Without either index, a map is a linear scan; dead entries kept for an
+   * active iteration are skipped by every later rebuild. */
+  if (m->ndense > SCR_MAP_CLEAR_KEEP && m->ndense / 32 > walked) {
+    free(m->dense);
+    m->dense = NULL;
+    m->ndense = 0;
+  }
   if (m->nbuckets) {
-    bool compact = scr_map_compact_buckets(m->nbuckets);
-    memset(m->buckets, compact ? 0 : 0xff,
-           m->nbuckets * (compact ? sizeof(uint32_t) : sizeof(size_t)));
+    if (m->nbuckets > SCR_MAP_CLEAR_KEEP && m->nbuckets / 8 > walked) {
+      free(m->buckets);
+      m->buckets = NULL;
+      m->nbuckets = 0;
+    } else if (walked) {
+      bool compact = scr_map_compact_buckets(m->nbuckets);
+      memset(m->buckets, compact ? 0 : 0xff,
+             m->nbuckets * (compact ? sizeof(uint32_t) : sizeof(size_t)));
+    }
   }
 }
 
@@ -733,13 +803,25 @@ bool scr_map_has_str(const ScrMap *m, const ScrStr *key) {
   return scr_map_find_str(m, key) != SCR_MAP_EMPTY;
 }
 
+/* Tombstones beyond this share of the entries are compacted on delete, so
+ * iteration and later rebuilds cost O(live) rather than O(peak). V8 shrinks
+ * an ordered hash table at the same occupancy. Small maps keep theirs. */
+#define SCR_MAP_SHRINK_MIN 64
+
 static bool scr_map_delete_found(ScrMap *m, size_t e) {
   if (e == SCR_MAP_EMPTY) return false;
+  uint64_t key = m->entries[e].key, val = m->entries[e].val;
   m->entries[e].hash = 0; /* bucket slot stays: probe chains intact */
   m->nlive--;
-  if (m->ndense) m->dense[(size_t)scr_map_slot_to_f64(m->entries[e].key)] = 0;
-  scr_map_release_key(m, m->entries[e].key);
-  scr_map_release_val(m, m->entries[e].val);
+  if (m->ndense) m->dense[(size_t)scr_map_slot_to_f64(key)] = 0;
+  /* Each such compaction follows deletes of three quarters of the entries,
+   * so it is amortized constant per delete. It runs before the releases:
+   * they may drop the last reference to this map. */
+  if (m->iter_depth == 0 && m->nentries >= SCR_MAP_SHRINK_MIN && m->nlive < m->nentries / 4) {
+    scr_map_compact(m, true);
+  }
+  scr_map_release_key(m, key);
+  scr_map_release_val(m, val);
   return true;
 }
 
@@ -1245,7 +1327,7 @@ void scr_map_iter_exit(ScrMap *m) {
    * active they are safe to drop now (bounds memory under forEach-heavy
    * add/delete workloads). */
   if (m->iter_depth == 0 && m->nlive <= m->nentries / 2 && m->nentries >= 16) {
-    scr_map_compact(m);
+    scr_map_compact(m, true);
   }
 }
 
