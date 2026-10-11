@@ -15878,6 +15878,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4640-bitwise-identity-ranges.ts": {
+   "order": [
+    "<repo>/tests/corpus/4640-bitwise-identity-ranges.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/contract-immutable.ts": {
    "order": [
     "<repo>/tests/diagnostics/contract-immutable.ts"

@@ -12,7 +12,12 @@ import { emitStringInputs } from "./string-lifetimes.js";
 import { emitStringParts, numberPart, stringParts } from "./string-construction.js";
 import { emitBorrowedInputs } from "./borrowed-inputs.js";
 import { exactInteger, widenInteger, integerNumber } from "./integer-values.js";
-import { integerArithmeticRange } from "../../ir/integer-ranges.js";
+import {
+  bitwiseIdentityOperand,
+  integerArithmeticRange,
+  withinInt32,
+  withinUint32,
+} from "../../ir/integer-ranges.js";
 import { emitArrayValues } from "./expr-containers.js";
 import { emitCheckedRemainder, emitSignedIntegerRemainder } from "./integer-remainder.js";
 import { emitDenseArrayGet, emitDenseArrayState } from "./dense-array-access.js";
@@ -273,6 +278,25 @@ export function emitOperatorExpr(
             `bin:${e.op}:${e.left.type.kind}:${e.right.type.kind}`,
             e.loc,
           );
+        }
+        // `x | 0` and the other identity forms over an operand the range
+        // analysis proves an int32 (a uint32 for `>>>`) return that operand:
+        // the conversion is the identity and ranges exclude -0, so the
+        // operand's double is the result bit for bit. Its integer views stay.
+        const identity = bitwiseIdentityOperand(e);
+        if (identity !== null) {
+          const operand = identity === "left" ? e.left : e.right;
+          const value = identity === "left" ? l : r;
+          const range = host.integerRanges.get(operand);
+          if (e.op === ">>>" ? withinUint32(range) : withinInt32(range)) {
+            const uint32 = host.emitToUint32(value.name, operand, value.uint32);
+            return {
+              name: value.name,
+              type: e.type,
+              uint32,
+              ...(value.integer ? { integer: value.integer } : {}),
+            };
+          }
         }
         const left = host.emitToUint32(l.name, e.left, l.uint32);
         let right = host.emitToUint32(r.name, e.right, r.uint32);
