@@ -17,6 +17,11 @@ export interface WalkBorrowHost {
   /** Parameters that may become candidates; once calling conventions are
    * fixed, only borrowed parameters qualify. Defaults to every parameter. */
   parameterAllowed?(localId: string): boolean;
+  /** For bodies that may write the heap: whether a walk only reads
+   * locations the whole body never writes, given the current candidates
+   * (whose own rebinding releases nothing). Absent: the body preserves
+   * every edge. */
+  unwritten?(value: IrExpr, candidates: ReadonlySet<string>): boolean;
 }
 
 export interface WalkFacts {
@@ -34,7 +39,9 @@ export interface WalkFacts {
  * calling convention.
  *
  * Soundness rests on the whole body preserving heap edges (the caller
- * passes only functions in ReferenceEffects.functions): neither the body
+ * passes only functions in ReferenceEffects.functions, or supplies
+ * `unwritten` to admit only walks over locations the body never writes;
+ * the argument below then applies to those locations): neither the body
  * nor anything it calls removes a field, element or global reference, so
  * every object reachable from a parameter at entry stays reachable (and
  * alive) until the function returns. Such a local therefore needs no
@@ -133,6 +140,10 @@ export function analyzeWalks(fn: IrFunction, host: WalkBorrowHost): WalkFacts {
       case "fieldGet":
       case "recordGet":
         return host.borrowsWithoutOwning(e) && walk(e.obj);
+      // A required element of a walked array (the read still traps when the
+      // element is missing).
+      case "arrayGet":
+        return host.borrowsWithoutOwning(e) && walk(e.arr);
       case "unionNarrow":
       case "downcast":
       case "upcast":
@@ -155,12 +166,20 @@ export function analyzeWalks(fn: IrFunction, host: WalkBorrowHost): WalkFacts {
         return false;
     }
   };
-  const walkOrThrow = (e: IrExpr): boolean =>
-    (e.kind === "libCall" && e.fn === "error.nodeThrow") || walk(e);
+  const isThrow = (e: IrExpr): boolean => e.kind === "libCall" && e.fn === "error.nodeThrow";
+  const walkOrThrow = (e: IrExpr): boolean => isThrow(e) || walk(e);
   for (let changed = true; changed;) {
     changed = false;
     for (const id of candidates) {
-      if (definitions.get(id)!.every((value) => value === null || walk(value))) continue;
+      if (
+        definitions
+          .get(id)!
+          .every(
+            (value) =>
+              value === null || (walk(value) && host.unwritten?.(value, candidates) !== false),
+          )
+      )
+        continue;
       candidates.delete(id);
       changed = true;
     }
@@ -169,6 +188,11 @@ export function analyzeWalks(fn: IrFunction, host: WalkBorrowHost): WalkFacts {
   const returnsWalk =
     !guarded &&
     returns.length > 0 &&
-    returns.every((value) => value !== null && walkOrThrow(value));
+    returns.every(
+      (value) =>
+        value !== null &&
+        walkOrThrow(value) &&
+        (isThrow(value) || host.unwritten?.(value, candidates) !== false),
+    );
   return { locals: result, returnsWalk };
 }

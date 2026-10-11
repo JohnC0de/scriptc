@@ -159,9 +159,10 @@ import {
 } from "./map-read-lifetimes.js";
 import { emitBorrowedFieldSequence, guardedValue } from "./borrowed-receivers.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
-import { analyzeWalks, findWalkBorrows } from "./walk-borrows.js";
+import { analyzeWalks, findWalkBorrows, type WalkBorrowHost } from "./walk-borrows.js";
 import { findReboundParameters } from "./rebound-parameters.js";
 import { ReferenceEffects } from "./reference-effects.js";
+import { ReferenceWrites, type Writes } from "./reference-writes.js";
 import { LlvmDebugInfo } from "./debug-info.js";
 import { StackCallbacks } from "./stack-callbacks.js";
 import { findLoopArrayBorrows } from "./loop-array-borrows.js";
@@ -583,6 +584,12 @@ export class LlEmitter {
    * fiberless-async analysis scans it for suspension entry points. */
   private readonly fnDefText = new Map<string, string>();
   readonly referenceEffects: ReferenceEffects;
+  /** Field-sensitive reference writes (null in debug builds). */
+  referenceWrites: ReferenceWrites | null = null;
+  private readonly borrowedReturnKeyCache = new Map<string, string[]>();
+  /** The statement list being emitted and the current index, for blocks
+   * whose bindings end with the list (emitBlock and function bodies). */
+  private stmtCursor: { stmts: IrStmt[]; index: number } | null = null;
   readonly optionalArrayReads: OptionalArrayReads;
   readonly checkedNarrows: CheckedNarrows;
   callArrayReads = new Map<IrExpr, LocalArrayRead>();
@@ -891,6 +898,15 @@ export class LlEmitter {
       (call) => this.optionalArrayReads.get(call) !== null,
       mod.classes ?? [],
     );
+    if (this.debug === null)
+      this.referenceWrites = new ReferenceWrites(
+        this.fnByName,
+        mod.classes ?? [],
+        (call) => this.optionalArrayReads.get(call) !== null,
+        new Set((mod.globals ?? []).map((g) => g.id)),
+        { unions: mod.unions, records: mod.records },
+        this.immutableFields,
+      );
     const walkParameters = new Map<string, Set<number>>();
     if (this.debug === null) {
       const host = {
@@ -898,8 +914,9 @@ export class LlEmitter {
         borrowsWithoutOwning: (e: IrExpr) => this.borrowsWithoutOwning(e),
       };
       for (const fn of this.fnByName.values()) {
-        if (!this.referenceEffects.functions.has(fn.name)) continue;
-        const walks = findWalkBorrows(fn, host);
+        const preserving = this.referenceEffects.functions.has(fn.name);
+        if (!preserving && this.referenceWrites === null) continue;
+        const walks = findWalkBorrows(fn, preserving ? host : this.unwrittenWalkHost(fn, host));
         if (walks.size === 0) continue;
         this.walkBorrowsByFunction.set(fn.name, walks);
         const indexes = new Set<number>();
@@ -4948,6 +4965,7 @@ export class LlEmitter {
     const numericFn = withInitializerBindings(fn, initializerBindings);
     this.numericLocals = new Map(numericFn.locals.map((l) => [l.id, l]));
     this.borrowedParameters.clear();
+    this.referenceWrites?.enter(fn);
     this.reboundOwnerSlots.clear();
     this.projectedParameters.clear();
     const projectedParameterIndexes = this.callLifetimes.parameters.get(fn.name);
@@ -4988,6 +5006,7 @@ export class LlEmitter {
             this.callLifetimes,
             this.referenceEffects,
             this.optionalArrayReads,
+            this.referenceWrites,
           )
         : new Set();
     this.localArrayReads = findLocalArrayReads(
@@ -5192,7 +5211,7 @@ export class LlEmitter {
     }
     if (this.stackChecks?.has(fn.name)) this.emitStackCheck();
     if (this.workerEntryPolls?.has(fn.name)) this.emitPendingCheck();
-    this.emitStmts(fn.body);
+    this.emitStmts(fn.body, true);
     // Implicit exit of a void function: release the function scope unless
     // the body already terminated its final block (return, or a throw
     // whose unwind released everything down to depth 0).
@@ -5395,15 +5414,202 @@ export class LlEmitter {
       : this.immutableFields.recordField(e.shapeId, e.field);
   }
 
+  /** A projection read whose locations nothing writes while a borrowed
+   * read of it is in use (ReferenceWrites), given the writes of that
+   * extent. The root binding itself must stay alive across it too, which
+   * its own location (`l:`, `g:`, `bx`) covers. */
+  unwrittenRead(e: IrExpr, writes: Writes): boolean {
+    const rw = this.referenceWrites;
+    if (rw === null) return false;
+    const keys = rw.readKeys(e, (call) => this.borrowedReturnKeys(call.callee));
+    return keys !== null && !rw.conflicts(keys, writes);
+  }
+
+  /** A stable binding initialized by a projection can borrow it when the
+   * rest of its block (its whole lifetime) writes none of the projection's
+   * locations: the source edge then keeps the value alive, and uses that
+   * escape still retain their own copies. */
+  private unwrittenAlias(s: IrStmt & { kind: "varDecl" }): boolean {
+    const cursor = this.stmtCursor;
+    const rw = this.referenceWrites;
+    if (rw === null || s.init === null || cursor === null || cursor.stmts[cursor.index] !== s)
+      return false;
+    if (
+      !this.plainReference(s.init.type) ||
+      !this.canBorrowReceiver(s.init) ||
+      !this.unownedWalk(s.init)
+    )
+      return false;
+    const writes = rw.union([rw.expr(s.init), rw.stmts(cursor.stmts.slice(cursor.index + 1))]);
+    return this.unwrittenRead(s.init, writes);
+  }
+
+  /** An optional element read into a projection-only local can borrow the
+   * element when the rest of the block writes no array element and none of
+   * the locations keeping the array alive (which must itself be read
+   * without a frame owner). */
+  private unwrittenLocalArrayRead(s: IrStmt & { kind: "varDecl" }, read: LocalArrayRead): boolean {
+    const cursor = this.stmtCursor;
+    const rw = this.referenceWrites;
+    if (rw === null || s.init === null || cursor === null || cursor.stmts[cursor.index] !== s)
+      return false;
+    if (!this.unownedWalk(read.array)) return false;
+    const keys = rw.readKeys(read.array);
+    if (keys === null || rw.expr(read.index) !== null) return false;
+    const writes = rw.union([rw.expr(s.init), rw.stmts(cursor.stmts.slice(cursor.index + 1))]);
+    return !rw.conflicts(["a", ...keys], writes);
+  }
+
+  /** An optional element read passed to a projection-only parameter can
+   * borrow the element when the callee and later arguments (`writes`)
+   * write no array element and nothing keeping the array alive. */
+  unwrittenCallArrayRead(read: LocalArrayRead, writes: Writes): boolean {
+    const rw = this.referenceWrites;
+    if (rw === null) return false;
+    const keys = rw.readKeys(read.array);
+    if (keys === null || rw.expr(read.index) !== null) return false;
+    return !rw.conflicts(["a", ...keys], writes);
+  }
+
+  /** `return x` of a local whose slot is an owned scope entry of the same
+   * type: the return can take over the local's reference. */
+  private movableReturn(
+    value: IrExpr | null,
+  ): { scope: LlScopeEntry[]; entry: LlScopeEntry; index: number } | null {
+    if (value === null || value.kind !== "varRef" || !isRefCounted(value.type)) return null;
+    if (this.currentBorrowedReturn || this.currentWasiCoro !== null) return null;
+    const binding = this.binding(value.localId);
+    if (binding.kind !== "local" || binding.local === undefined || binding.local.boxed) return null;
+    if (!typeEquals(binding.type, value.type) || !typeEquals(this.currentReturnType, value.type))
+      return null;
+    for (const scope of this.scopes) {
+      const index = scope.findIndex((entry) => entry.slot === binding.slot);
+      if (index < 0) continue;
+      const entry = scope[index]!;
+      if (entry.boxed || entry.lazy || !typeEquals(entry.type, value.type)) return null;
+      return { scope, entry, index };
+    }
+    return null;
+  }
+
+  /** A walk host for a body that may write the heap: each walk must read
+   * only locations the whole body (with its callees) never writes;
+   * rebinding the walk locals themselves releases nothing. */
+  private unwrittenWalkHost(fn: IrFunction, host: WalkBorrowHost): WalkBorrowHost {
+    return {
+      ...host,
+      unwritten: (value, candidates) =>
+        this.referenceWrites?.unwrittenWalk(fn, value, candidates, (call) =>
+          this.borrowedReturnKeys(call.callee),
+        ) ?? false,
+    };
+  }
+
+  /** emitReadReceiver yields a plain pointer for `e` that no statement
+   * frame owns, so it can outlive the statement (walk-borrows' walks, from
+   * any unboxed plain-pointer binding, plus element reads). */
+  private unownedWalk(e: IrExpr): boolean {
+    switch (e.kind) {
+      case "varRef": {
+        const binding = this.binding(e.localId);
+        if (binding.kind === "global") return this.plainReference(binding.type);
+        return (
+          binding.kind === "local" &&
+          binding.local !== undefined &&
+          !binding.local.boxed &&
+          !binding.local.tdz &&
+          this.plainReference(binding.local.type) &&
+          !this.stringSlices.has(e.localId) &&
+          !this.storedSplits.has(e.localId) &&
+          !this.localUnionStorage.has(e.localId)
+        );
+      }
+      case "fieldGet":
+      case "recordGet":
+        return this.borrowsWithoutOwning(e) && this.unownedWalk(e.obj);
+      case "unionNarrow":
+      case "downcast":
+      case "upcast":
+        return this.borrowsWithoutOwning(e) && this.unownedWalk(e.value);
+      case "unionWrap":
+        if (!this.borrowsWithoutOwning(e)) return false;
+        return e.value.kind === "unitLit" || this.unownedWalk(e.value);
+      case "ternary": {
+        const arm = (v: IrExpr): boolean =>
+          (v.kind === "libCall" && v.fn === "error.nodeThrow") || this.unownedWalk(v);
+        return this.borrowsWithoutOwning(e) && arm(e.then) && arm(e.else_);
+      }
+      case "call":
+        return (
+          this.borrowsWithoutOwning(e) &&
+          e.args.every((arg) => !isRefCounted(arg.type) || this.unownedWalk(arg))
+        );
+      case "arrayGet":
+        return (
+          !this.isStackUnionSource(e) &&
+          this.optionalArrayReads.get(e) === null &&
+          this.unownedWalk(e.arr)
+        );
+      case "seqExpr": {
+        const guarded = guardedValue(e);
+        return guarded !== null && this.unownedWalk(guarded);
+      }
+      default:
+        return false;
+    }
+  }
+
+  /** Every location a borrowed-return callee's walks can read (its body's
+   * field, record and element reads, through nested borrowed returns). */
+  private borrowedReturnKeys(callee: string): string[] | null {
+    if (!this.borrowedReturns.has(callee)) return null;
+    const known = this.borrowedReturnKeyCache.get(callee);
+    if (known) return known;
+    const rw = this.referenceWrites!;
+    const keys = new Set<string>();
+    const seen = new Set([callee]);
+    const pending = [callee];
+    while (pending.length > 0) {
+      const fn = this.fnByName.get(pending.pop()!);
+      if (!fn) continue;
+      everyStmtList(fn.body, {
+        stmt: () => true,
+        expr: (e) => {
+          if (e.kind === "fieldGet") keys.add(rw.fieldKey(e.className, e.field));
+          else if (e.kind === "recordGet") {
+            keys.add(`r:${e.field}`);
+            keys.add("r:*");
+          } else if (e.kind === "arrayGet") keys.add("a");
+          else if (e.kind === "call" && this.borrowedReturns.has(e.callee) && !seen.has(e.callee)) {
+            seen.add(e.callee);
+            pending.push(e.callee);
+          }
+          return true;
+        },
+      });
+    }
+    const result = [...keys];
+    this.borrowedReturnKeyCache.set(callee, result);
+    return result;
+  }
+
   // ── statements ──────────────────────────────────────────────────────────
 
-  private emitStmts(stmts: IrStmt[]): void {
-    for (const s of stmts) {
-      // Statements after a terminator are unreachable (dead code after
-      // return/break/continue). Skip them so no dropped SSA definition
-      // can leak forward.
-      if (this.B.isTerminated()) return;
-      this.emitStmt(s);
+  private emitStmts(stmts: IrStmt[], scoped = false): void {
+    const saved = this.stmtCursor;
+    const cursor = scoped ? { stmts, index: 0 } : null;
+    try {
+      for (let i = 0; i < stmts.length; i++) {
+        // Statements after a terminator are unreachable (dead code after
+        // return/break/continue). Skip them so no dropped SSA definition
+        // can leak forward.
+        if (this.B.isTerminated()) return;
+        if (cursor) cursor.index = i;
+        this.stmtCursor = cursor;
+        this.emitStmt(stmts[i]!);
+      }
+    } finally {
+      this.stmtCursor = saved;
     }
   }
 
@@ -5416,7 +5622,7 @@ export class LlEmitter {
     const scope: LlScopeEntry[] = [];
     this.scopes.push(scope);
     setup?.(scope);
-    this.emitStmts(stmts);
+    this.emitStmts(stmts, true);
     const ended = endsWithJump(stmts);
     this.scopes.pop();
     if (!ended) this.releaseScope(scope);
@@ -5476,7 +5682,13 @@ export class LlEmitter {
         }
         const localRead = this.localArrayReads.get(s.localId);
         if (localRead) {
-          const owner = emitLocalArrayRead(this, localRead, b.slot);
+          const owner = emitLocalArrayRead(
+            this,
+            !localRead.borrow && this.unwrittenLocalArrayRead(s, localRead)
+              ? { ...localRead, borrow: true }
+              : localRead,
+            b.slot,
+          );
           if (owner) this.scopes[this.scopes.length - 1]!.push(owner);
           break;
         }
@@ -5565,7 +5777,7 @@ export class LlEmitter {
           b.local &&
           isRefCounted(b.type) &&
           this.stableCallBindings.has(s.localId) &&
-          this.canBorrowCallArgument(s.init)
+          (this.canBorrowCallArgument(s.init) || this.unwrittenAlias(s))
         ) {
           const v = this.emitReadReceiver(s.init);
           B.line(`store ptr ${v.name}, ptr ${b.slot}`);
@@ -6466,10 +6678,29 @@ export class LlEmitter {
         // the actual ret. The parked value owns a synthetic slot-backed
         // scope entry during each copy so a throwing finally releases it.
         let v: LlValue | null = null;
-        if (s.value !== null && this.currentBorrowedReturn) {
+        const moved = this.finallyStack.length === 0 ? this.movableReturn(s.value) : null;
+        if (moved !== null) {
+          // Returning an owned local hands its reference to the caller: no
+          // retain now and no release of the local below.
+          const t = B.tmp();
+          B.line(`${t} = load ptr, ptr ${moved.entry.slot}`);
+          v = { name: t, type: s.value!.type };
+          moved.scope.splice(moved.scope.indexOf(moved.entry), 1);
+          this.releaseForJump(0, 0);
+          moved.scope.splice(moved.index, 0, moved.entry);
+        } else if (s.value !== null && this.currentBorrowedReturn) {
           // A borrowed-return body hands back its walk without a reference
-          // (it has no try statements, so no finally can intervene).
-          v = this.emitReadReceiver(s.value);
+          // (it has no try statements, so no finally can intervene). An
+          // optional element read lends the element its array keeps alive.
+          const read = this.optionalArrayReads.get(s.value);
+          if (read) {
+            const slot = B.slot();
+            B.entryAllocas.push(`${slot} = alloca ptr`);
+            emitLocalArrayRead(this, { ...read, borrow: true }, slot);
+            const t = B.tmp();
+            B.line(`${t} = load ptr, ptr ${slot}`);
+            v = { name: t, type: s.value.type };
+          } else v = this.emitReadReceiver(s.value);
         } else if (s.value !== null) {
           v = this.emitExpr(s.value);
           this.moveTemp(v);
@@ -6501,7 +6732,7 @@ export class LlEmitter {
           this.scopes = savedScopes;
           this.finallyStack = savedFinally;
           this.tryStack = savedTry;
-        } else {
+        } else if (moved === null) {
           this.releaseForJump(0, 0);
         }
         if (!B.isTerminated()) {
@@ -7375,6 +7606,10 @@ export class LlEmitter {
       if (result.owner) this.ownSlot(result.owner.slot, result.owner.type);
       return result.value;
     }
+    // A borrowed-return helper (such as an optional element read) lends its
+    // result like any borrowed-return call.
+    if (e.kind === "call" && this.borrowedReturns.has(e.callee) && this.canBorrowReceiver(e))
+      return emitBorrowedResultCall(this, e);
     const arrayRead = this.optionalArrayReads.get(e);
     if (arrayRead) return emitProjectedArrayRead(this, arrayRead);
     const narrow = this.checkedNarrows.get(e);
@@ -7698,17 +7933,20 @@ export class LlEmitter {
       const indexes = this.callLifetimes.borrowed.get(fn.name);
       return new Set(fn.params.filter((_, i) => indexes?.has(i)).map((p) => p.localId));
     };
-    const hostFor = (fn: IrFunction) => {
+    const hostFor = (fn: IrFunction): WalkBorrowHost => {
       const allowed = borrowedIds(fn);
-      return {
+      const host = {
         pointerLocal: (local: IrLocal) => pointer(local.type),
         borrowsWithoutOwning: (e: IrExpr) => this.borrowsWithoutOwning(e),
         borrowedReturn: (callee: string) => this.borrowedReturns.has(callee),
         parameterAllowed: (id: string) => allowed.has(id),
       };
+      return this.referenceEffects.functions.has(fn.name) ? host : this.unwrittenWalkHost(fn, host);
     };
-    const preserving = [...this.fnByName.values()].filter((fn) =>
-      this.referenceEffects.functions.has(fn.name),
+    // With ReferenceWrites, a body that writes none of its walks' locations
+    // qualifies like one that preserves every edge.
+    const preserving = [...this.fnByName.values()].filter(
+      (fn) => this.referenceEffects.functions.has(fn.name) || this.referenceWrites !== null,
     );
     const candidates = preserving.filter((fn) => {
       if (!pointer(fn.returnType) || fn.async || fn.generator || fn.captures) return false;
@@ -7728,6 +7966,8 @@ export class LlEmitter {
         if (this.borrowedReturns.has(fn.name)) continue;
         if (!analyzeWalks(fn, hostFor(fn)).returnsWalk) continue;
         this.borrowedReturns.add(fn.name);
+        // Nested borrowed returns extend the locations a caller depends on.
+        this.borrowedReturnKeyCache.clear();
         changed = true;
       }
     }
@@ -7752,6 +7992,14 @@ export class LlEmitter {
         return this.nullableFieldGet(e) === null;
       case "recordGet":
         return true;
+      // emitReadReceiver lends a required element of a borrowed array when
+      // computing the index removes no edge.
+      case "arrayGet":
+        return (
+          e.arr.type.kind === "array" &&
+          this.optionalArrayReads.get(e) === null &&
+          this.referenceEffects.preserves(e.index)
+        );
       case "unionNarrow":
         return this.nullableUnions.has(e.unionId);
       case "downcast":

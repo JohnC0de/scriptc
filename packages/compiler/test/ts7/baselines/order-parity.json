@@ -10493,24 +10493,6 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/missing-read-lambda-results.ts": {
-   "order": [
-    "<repo>/tests/corpus/missing-read-lambda-results.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/missing-read-narrowed-storage.ts": {
-   "order": [
-    "<repo>/tests/corpus/missing-read-narrowed-storage.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/missing-read-number-conversions.ts": {
-   "order": [
-    "<repo>/tests/corpus/missing-read-number-conversions.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/module-fallback-functions/main.js": {
    "order": [
     "<repo>/tests/corpus/module-fallback-functions/platform.js",
@@ -15794,6 +15776,54 @@
   "<repo>/tests/corpus/4602-constructor-escape-order.ts": {
    "order": [
     "<repo>/tests/corpus/4602-constructor-escape-order.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4630-reference-write-call-arguments.ts": {
+   "order": [
+    "<repo>/tests/corpus/4630-reference-write-call-arguments.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4631-reference-write-aliases.ts": {
+   "order": [
+    "<repo>/tests/corpus/4631-reference-write-aliases.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4632-reference-write-loops-and-walks.ts": {
+   "order": [
+    "<repo>/tests/corpus/4632-reference-write-loops-and-walks.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4633-reference-write-callbacks-returns.ts": {
+   "order": [
+    "<repo>/tests/corpus/4633-reference-write-callbacks-returns.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4634-optional-element-borrowed-returns.ts": {
+   "order": [
+    "<repo>/tests/corpus/4634-optional-element-borrowed-returns.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/missing-read-lambda-results.ts": {
+   "order": [
+    "<repo>/tests/corpus/missing-read-lambda-results.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/missing-read-narrowed-storage.ts": {
+   "order": [
+    "<repo>/tests/corpus/missing-read-narrowed-storage.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/missing-read-number-conversions.ts": {
+   "order": [
+    "<repo>/tests/corpus/missing-read-number-conversions.ts"
    ],
    "diags": []
   },
