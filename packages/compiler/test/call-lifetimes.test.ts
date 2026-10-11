@@ -269,15 +269,22 @@ console.log(work());
   expect(facts.borrowed.get("relay")).toEqual(new Set([0, 1]));
   expect(facts.parameters.has("keep")).toBe(false);
   const llvm = emitLlvmModule(mod);
+  // An append only adds an edge, so `keep` preserves every heap edge, borrows
+  // every reference parameter and returns one of them: it is a borrowed-return
+  // function. Its body retains only the element stored into the array; the
+  // returned parameter goes back +0 (the caller still owns it) and the owned
+  // adapter retains it before releasing its parameters.
   const keep = body(llvm, "sc_bf_keep");
-  expect(keep.match(/@sc_retain_Item/g)).toHaveLength(2);
+  expect(keep.match(/@sc_retain_Item/g)).toHaveLength(1);
   expect(keep).not.toContain("@scr_arr_retain_v");
   expect(keep).not.toContain("@scr_arr_release");
   const relay = body(llvm, "sc_bf_relay");
-  expect(relay).toContain("@sc_bf_keep");
+  expect(relay).toMatch(/call ptr @sc_bf_keep\([^)]*\) ; borrowed result/);
   expect(relay).not.toContain("@sc_retain_Item");
   expect(relay).not.toContain("@scr_arr_retain_v");
   const owned = body(llvm, "sc_f_keep");
+  expect(owned.match(/@sc_retain_Item/g)).toHaveLength(1);
+  expect(owned.indexOf("@sc_retain_Item")).toBeLessThan(owned.indexOf("@sc_release_Item"));
   expect(owned).toContain("@sc_release_Item");
   expect(owned).toContain("@scr_arr_release");
 });
@@ -322,11 +329,15 @@ console.log(alias(new Item()).value, snapshot(new Item()).value);
   // The rebound parameter keeps borrowing (its new value lives in an owner
   // slot), but the alias saved before the rebinding must own its value.
   // `new Item()` calls the borrowed constructor body, so no retain transfers
-  // the fresh instance into it: the saved alias and the returned value.
+  // the fresh instance into it. The saved alias retains once, and `return
+  // saved` moves that owned scope entry into the result instead of retaining
+  // it again and releasing the local at scope exit: the only releases are the
+  // rebound parameter's owner slot (before the store and at exit).
   const snapshot = body(llvm, "sc_bf_snapshot");
-  expect(snapshot.match(/@sc_retain_Item/g)).toHaveLength(2);
+  expect(snapshot.match(/@sc_retain_Item/g)).toHaveLength(1);
   expect(snapshot).toContain("@sc_bf__x25_Item_constructor");
-  expect(snapshot).toContain("@sc_release_Item");
+  expect(snapshot.match(/@sc_release_Item/g)).toHaveLength(2);
+  expect(snapshot).toMatch(/(%t\d+) = load ptr, ptr %sc_l_saved_0\n[^]*ret ptr \1\n/);
 });
 
 test("unchanged captured parameters are boxed when a closure first needs them", async () => {
