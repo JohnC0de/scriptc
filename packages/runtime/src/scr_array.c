@@ -40,7 +40,7 @@ static const ScrArrExt scr_arr_no_ext;
 
 ScrArrExt *scr_arr_ext(ScrArr *a) {
   if (!a->ext) {
-    a->ext = calloc(1, sizeof(ScrArrExt));
+    a->ext = scr_mem_calloc(sizeof(ScrArrExt));
     if (!a->ext) scr_arr_oom();
   }
   return a->ext;
@@ -678,7 +678,7 @@ static void scr_arr_gc_free(void *a0) {
   scr_arr_sparse_free(SCR_AX(a)->sparse);
   for (size_t i = 0; i < SCR_AX(a)->prop_len; i++) free(SCR_AX(a)->props[i].key);
   free(SCR_AX(a)->props);
-  free(a->ext);
+  scr_mem_free(a->ext);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays--;
 #endif
@@ -750,7 +750,7 @@ static void scr_arr_destroy(void *object) {
     scr_arr_sparse_free(SCR_AX(a)->sparse);
     for (size_t i = 0; i < SCR_AX(a)->prop_len; i++) free(SCR_AX(a)->props[i].key);
     free(SCR_AX(a)->props);
-    free(a->ext);
+    scr_mem_free(a->ext);
 #ifdef SCR_RC_AUDIT
     scr_live_arrays--;
 #endif
