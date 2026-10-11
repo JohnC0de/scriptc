@@ -50,7 +50,7 @@ try {
       return `@native_literal_${index}`;
     },
     sizeType: request.bits === 32 ? "i32" : "i64",
-    cycleColorOffset: request.bits === 32 ? 12 : 16,
+    cycleBufferedOffset: 6,
     tracedShapes: traced.shapes,
     tracedUnions: traced.unions,
     recordsById: new Map((mod.records ?? []).map((record) => [record.id, record])),
