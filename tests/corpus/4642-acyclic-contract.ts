@@ -1,7 +1,7 @@
 // Acyclic contract types (@scriptc/types): scriptc proves these classes and
 // object types cannot lie on a reference cycle, so their objects carry no
 // cycle-collector header and are freed by reference counting alone.
-import type { Acyclic } from "@scriptc/types";
+import type { Acyclic, Int32 } from "@scriptc/types";
 import type * as sc from "@scriptc/types";
 
 class Cons implements Acyclic {
@@ -13,7 +13,7 @@ class Cons implements Acyclic {
   }
 }
 
-class Tree implements Acyclic<Tree> {
+class Tree implements Acyclic {
   readonly left: Tree | null;
   readonly right: Tree | null;
   readonly value: number;
@@ -34,6 +34,13 @@ class Counter implements sc.Acyclic {
   constructor(label: string) {
     this.label = label;
   }
+}
+
+// `implements Acyclic` names an interface only @scriptc/types declares, so
+// other object types (here a Record) keep their layouts, and the Int32
+// field of a class stored in one stays checkable.
+class Slot implements Acyclic {
+  index: Int32 = 0;
 }
 
 interface Point extends Acyclic {
@@ -62,3 +69,8 @@ console.log(counter.label, counter.count);
 const segments: Segment[] = [];
 for (let i = 0; i < 5; i++) segments.push({ from: { x: i, y: 0 }, to: { x: i, y: i * i }, label: `s${i}` });
 console.log(segments.map((s) => `${s.label}:${s.to.y - s.from.y}`).join(" "));
+
+const slots: Record<string, Slot> = { a: new Slot() };
+for (let i = 0; i < 3; i++) slots["a"]!.index = (slots["a"]!.index + 2) | 0;
+slots["b"] = new Slot();
+console.log(Object.keys(slots).join(","), slots["a"]!.index, slots["b"]!.index);

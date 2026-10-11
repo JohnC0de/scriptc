@@ -369,6 +369,28 @@ function analyzeCycles(
     }
     return null;
   };
+  /** BFS distances from `start` over `next` within one component; `via`
+   * is the neighbor one step closer to `start`. */
+  const distances = (
+    start: Node,
+    next: (n: Node) => readonly Node[],
+    component: number,
+  ): Map<Node, { distance: number; via: Node | null }> => {
+    const seen = new Map<Node, { distance: number; via: Node | null }>([
+      [start, { distance: 0, via: null }],
+    ]);
+    const queue = [start];
+    for (let i = 0; i < queue.length; i++) {
+      const at = queue[i]!;
+      const distance = seen.get(at)!.distance + 1;
+      for (const m of next(at))
+        if (m.component === component && !seen.has(m)) {
+          seen.set(m, { distance, via: at });
+          queue.push(m);
+        }
+    }
+    return seen;
+  };
   const explainNode = (n: Node): CycleExplanation | null => {
     if (!n.traced) return null;
     const component = n.component;
@@ -387,22 +409,42 @@ function analyzeCycles(
         const found = path(n, (m) => m === lead, inside);
         if (found) return intrinsic(lead, found.steps);
       }
-      for (const from of members)
+      // The shortest cycle through `n` and a mutable internal edge: BFS
+      // distances from `n` forward and to `n` backward, within the component.
+      const forward = distances(n, (m) => [...m.edges.keys()], component);
+      const backward = distances(n, (m) => m.reverse, component);
+      let best: { from: Node; to: Node; length: number } | null = null;
+      for (const from of members) {
+        const there = forward.get(from);
+        if (there === undefined) continue;
         for (const [to, mutable] of from.edges) {
-          if (!mutable || to.component !== component) continue;
-          const none: { steps: CycleStep[] } = { steps: [] };
-          const there = from === n ? none : path(n, (m) => m === from, inside);
-          const back = to === n ? none : path(to, (m) => m === n, inside);
-          if (!there || !back) continue;
-          return {
-            kind: "cycle",
-            steps: [
-              ...there.steps,
-              { from: from.name, label: from.labels?.get(to) ?? { kind: "arm" } },
-              ...back.steps,
-            ],
-          };
+          const back = backward.get(to);
+          if (!mutable || back === undefined) continue;
+          const length = there.distance + 1 + back.distance;
+          if (best === null || length < best.length) best = { from, to, length };
         }
+      }
+      if (best !== null) {
+        const steps: CycleStep[] = [];
+        for (let at: Node = best.from; at !== n;) {
+          const previous = forward.get(at)!.via!;
+          steps.unshift({
+            from: previous.name,
+            label: previous.labels?.get(at) ?? { kind: "arm" },
+          });
+          at = previous;
+        }
+        steps.push({
+          from: best.from.name,
+          label: best.from.labels?.get(best.to) ?? { kind: "arm" },
+        });
+        for (let at: Node = best.to; at !== n;) {
+          const next = backward.get(at)!.via!;
+          steps.push({ from: at.name, label: at.labels?.get(next) ?? { kind: "arm" } });
+          at = next;
+        }
+        return { kind: "cycle", steps };
+      }
     }
     const found = path(
       n,

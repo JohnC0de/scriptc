@@ -182,7 +182,7 @@ function unsupported(out: ContractAnnotations, node: ts.Node, marker: ContractMa
         "SC7006",
         locOf(node),
         "the Acyclic contract is not checked in this position (Acyclic is checked on classes, interfaces and object type aliases)",
-        "write `class C implements Acyclic`, `interface I extends Acyclic` or `type T = Acyclic<{ ... }>`",
+        "write `class C implements Acyclic` or `interface I extends Acyclic` (without a type argument), or `type T = Acyclic<{ ... }>`",
       ),
     );
     return;
@@ -222,6 +222,9 @@ function placeHeritage(
     owner === undefined
   )
     return unsupported(out, node, marker);
+  // `implements Acyclic<C>` would make the class implement C's own type,
+  // which the lowering treats as a protocol of C.
+  if ((node.typeArguments?.length ?? 0) > 0) return unsupported(out, node, marker);
   const note = (name: string): ContractNote => ({ marker, loc: locOf(node), name });
   if (
     (ts.isClassDeclaration(owner) || ts.isClassExpression(owner)) &&

@@ -48,4 +48,9 @@ export type Immutable<T> = T extends (...args: never[]) => unknown
  * every reference field is assigned only in the constructor, and none holds
  * a function), or reports the cycle that can form. Its objects then carry
  * no cycle-collector header and are freed by reference counting alone. */
-export type Acyclic<T extends object = Record<never, never>> = T;
+export type Acyclic<T extends object = AcyclicObject> = T;
+
+/** What `implements Acyclic` and `extends Acyclic` name: an empty interface
+ * only this package declares, so the clause adds no members and refers to
+ * nothing else in the program. */
+export interface AcyclicObject {}
