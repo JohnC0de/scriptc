@@ -897,7 +897,10 @@ export class LlEmitter {
     this.nullableFields = new NullableRefFields(mod.classes ?? [], this.boxedUnionsById);
     // Optional array reads also cover nullable unions: emitLocalArrayRead
     // then yields the (borrowed or owned) element pointer, not a stack box.
-    this.optionalArrayReads = new OptionalArrayReads(this.fnByName, this.unionsById);
+    // Arrays of such a union are read the same way.
+    this.optionalArrayReads = new OptionalArrayReads(this.fnByName, this.unionsById, (id) =>
+      this.nullableUnions.has(id),
+    );
     this.checkedNarrows = new CheckedNarrows(this.fnByName);
     this.referenceEffects = new ReferenceEffects(
       this.fnByName,
@@ -5136,12 +5139,14 @@ export class LlEmitter {
       this.callLifetimes,
       this.optionalArrayReads,
       this.loopArrayBorrows,
+      this.debug === null ? this.referenceEffects : undefined,
     );
     this.callArrayReads = findCallArrayReads(
       fn,
       this.optionalArrayReads,
       this.referenceEffects.functions,
       this.callLifetimes,
+      this.debug === null ? this.referenceEffects : undefined,
     );
     this.scalarStringSlices =
       this.debug === null ? findScalarStringSlices(fn, this.callLifetimes) : new Map();

@@ -15877,6 +15877,12 @@
     "<repo>/tests/corpus/constant-module-globals/main.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts": {
+   "order": [
+    "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts"
+   ],
+   "diags": []
   }
  }
 }
