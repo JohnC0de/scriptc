@@ -122,7 +122,7 @@ export function emitBytesIndex(
   const nonnegative = B.tmp();
   const belowLen = B.tmp();
   const inRange = B.tmp();
-  B.line(`${lenF64} = uitofp ${host.sizeType} ${len} to double`);
+  B.line(`${lenF64} = sitofp ${host.sizeType} ${len} to double`);
   B.line(`${nonnegative} = fcmp oge double ${index}, ${f64Lit(0)}`);
   B.line(`${belowLen} = fcmp olt double ${index}, ${lenF64}`);
   B.line(`${inRange} = and i1 ${nonnegative}, ${belowLen}`);
@@ -137,7 +137,7 @@ export function emitBytesIndex(
   const roundTrip = B.tmp();
   const integral = B.tmp();
   B.line(`${idx} = fptoui double ${index} to ${host.sizeType}`);
-  B.line(`${roundTrip} = uitofp ${host.sizeType} ${idx} to double`);
+  B.line(`${roundTrip} = sitofp ${host.sizeType} ${idx} to double`);
   B.line(`${integral} = fcmp oeq double ${roundTrip}, ${index}`);
   B.condBr(integral, valid, invalid);
 
@@ -177,7 +177,7 @@ export function emitBytesLength(
   const count = bytes && size !== 1 ? B.tmp() : len;
   if (count !== len) B.line(`${count} = shl ${host.sizeType} ${len}, ${Math.log2(size)}`);
   const out = B.tmp();
-  B.line(`${out} = uitofp ${host.sizeType} ${count} to double`);
+  B.line(`${out} = sitofp ${host.sizeType} ${count} to double`);
   return { name: out, type: F64 };
 }
 
@@ -371,15 +371,14 @@ export function emitToUint32(
   B.condBr(finite, finiteLabel, nonfiniteLabel);
 
   B.startBlock(finiteLabel);
-  host.declare(`declare double @llvm.trunc.f64(double)`);
-  const truncated = B.tmp();
+  // Only magnitudes above 2^53 reach this block, and every such double is
+  // already an integer: no truncation is needed before the reduction.
   const residue = B.tmp();
   const negative = B.tmp();
   const wrapped = B.tmp();
   const normalized = B.tmp();
   const finiteU32 = B.tmp();
-  B.line(`${truncated} = call double @llvm.trunc.f64(double ${value})`);
-  B.line(`${residue} = frem double ${truncated}, ${f64Lit(4294967296)}`);
+  B.line(`${residue} = frem double ${value}, ${f64Lit(4294967296)}`);
   B.line(`${negative} = fcmp olt double ${residue}, ${f64Lit(0)}`);
   B.line(`${wrapped} = fadd double ${residue}, ${f64Lit(4294967296)}`);
   B.line(`${normalized} = select i1 ${negative}, double ${wrapped}, double ${residue}`);
