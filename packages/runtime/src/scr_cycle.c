@@ -354,9 +354,8 @@ static SCR_TL size_t scr_cyc_live_after[SCR_CYC_NGENS];
 #endif
 
 /* Per level, doublings of the growth fraction (see scr_cyc_adapt_growth),
- * and the run of growth-triggered passes at that level whose yield asked for
- * a wider fraction than the current one. Only the mature and old entries are
- * used.
+ * and whether the last growth-triggered pass at that level asked for a wider
+ * fraction than the current one. Only the mature and old entries are used.
  *
  * The fraction is capped at 16 (shift 6): after passes at a level stop
  * finding garbage, the heap may grow to 17 times its size after the last
@@ -500,10 +499,23 @@ static size_t scr_cyc_backlog_threshold(unsigned gen) {
  *
  * Narrowing takes effect at once: a pass that finds garbage again moves the
  * fraction straight to what its yield asks for. Widening waits for two
- * passes in a row that asked for it and then moves one doubling per pass. A
- * program that discards older structures at a steady rate sees its passes
- * alternate between finding the garbage just aged into the level and finding
- * it still younger, and a single miss says little. */
+ * passes in a row that asked for it. A program that discards older
+ * structures at a steady rate sees its passes alternate between finding the
+ * garbage just aged into the level and finding it still younger, and a
+ * single miss says little.
+ *
+ * How far a qualifying pass widens depends on what the level's passes walk.
+ * A full pass walks the whole heap, and a heap that grows for a whole run
+ * gets only a handful of them, so widening a doubling per pass spent the
+ * largest walks on the way to the cap (a run with seven full passes never
+ * reached it). The old level therefore widens two doublings per qualifying
+ * pass, never past what the pass asked for: passes that keep finding
+ * nothing reach the cap of 16 on the fourth pass instead of the sixth, while
+ * the heap is still small. A mature pass walks only what was promoted since
+ * the last one, so its total walking hardly depends on how passes are
+ * spaced, and the mature level keeps widening a doubling per pass, which
+ * lets less young garbage float. */
+#define SCR_CYC_OLD_WIDEN_STEP 2
 static void scr_cyc_adapt_growth(unsigned gen, size_t growth,
                                  size_t reclaimed) {
   unsigned want = 0, max = scr_cyc_growth_max_shift();
@@ -512,9 +524,11 @@ static void scr_cyc_adapt_growth(unsigned gen, size_t growth,
   if (want <= scr_cyc_growth_shift[gen]) {
     scr_cyc_growth_shift[gen] = (unsigned char)want;
     scr_cyc_growth_streak[gen] = 0;
-  } else if (++scr_cyc_growth_streak[gen] >= 2) {
-    scr_cyc_growth_streak[gen] = 2;
-    scr_cyc_growth_shift[gen]++;
+  } else if (scr_cyc_growth_streak[gen]) {
+    unsigned shift = scr_cyc_growth_shift[gen] + (gen == SCR_CYC_OLD ? SCR_CYC_OLD_WIDEN_STEP : 1);
+    scr_cyc_growth_shift[gen] = (unsigned char)(shift < want ? shift : want);
+  } else {
+    scr_cyc_growth_streak[gen] = 1;
   }
 }
 

@@ -454,25 +454,38 @@ static size_t grow_dead_cycle_until_full_pass(size_t old_garbage) {
   return 0;
 }
 
-/* Passes that keep finding nothing widen the old level's fraction one
- * doubling at a time up to the configured cap and no further: once there, a
- * dead cycle goes exactly when the heap has grown the cap past the floor,
- * not one doubling earlier (a narrower cap) and not later (a wider or
- * missing one). A pass that then finds old garbage narrows the fraction at
- * once. Runs last: it leaves the fraction narrowed but not at the base. */
+/* Passes that keep finding nothing widen the old level's fraction up to the
+ * configured cap and no further, two doublings per pass once two passes in a
+ * row have asked: at the cap a dead cycle goes exactly when the heap has
+ * grown the cap past the floor, not one doubling earlier (a narrower cap)
+ * and not later (a wider or missing one). A pass that finds old garbage
+ * narrows the fraction at once, and a single pass that finds nothing after
+ * it does not widen it again. From where the ring below narrows it (two
+ * doublings under any cap of 4 or more, the base fraction under 1 and 2),
+ * the second pass in a row that finds nothing reaches the cap; widening a
+ * doubling per pass would not. Runs last: it leaves the fraction narrowed
+ * but not at the base. */
 static void check_growth_cap_bounds_floating_garbage(void) {
   enum { FLOOR = 4096 };
   size_t cap = configured_growth_cap();
   /* Passes wait for the release trigger, and dead rings float until the
    * next restricted pass, so allow two nursery's worth. */
   size_t slack = 2 * configured_nursery_threshold() + 2;
-  size_t rounds = 2; /* two passes asking to widen before the first doubling */
-  for (size_t c = cap; c >= 1; c /= 2) rounds++; /* one per doubling up to cap */
-  for (size_t i = 0; i < rounds; i++) grow_dead_cycle_until_full_pass(0);
+  size_t narrowed = FLOOR + FLOOR * cap / 2 + slack;
   size_t due = FLOOR + FLOOR * cap;
+  /* The previous test left the fraction at the cap. Old garbage narrows it
+   * (see below); the pass after that is the first to find nothing and must
+   * not widen it; the second in a row widens it to the cap. */
+  grow_dead_cycle_until_full_pass(FLOOR / 2 - 64);
   size_t live = grow_dead_cycle_until_full_pass(0);
-  check(live > due, "the growth fraction stopped widening below the cap");
+  check(live <= narrowed, "a pass that found old garbage did not narrow the growth fraction");
+  live = grow_dead_cycle_until_full_pass(0);
+  check(live <= narrowed, "a single pass that found nothing widened the growth fraction");
+  live = grow_dead_cycle_until_full_pass(0);
+  check(live > due, "two passes in a row that found nothing did not widen to the cap");
   check(live <= due + slack, "the growth fraction widened past the cap");
+  live = grow_dead_cycle_until_full_pass(0);
+  check(live > due && live <= due + slack, "the growth fraction left the cap");
 
   /* At any cap, old garbage of an eighth of the floor or more is a yield
    * that asks for at least one doubling less (this ring asks for two below
@@ -480,8 +493,7 @@ static void check_growth_cap_bounds_floating_garbage(void) {
   live = grow_dead_cycle_until_full_pass(FLOOR / 2 - 64);
   check(live > due && live <= due + slack, "a capped pass came early or late");
   live = grow_dead_cycle_until_full_pass(0);
-  check(live <= FLOOR + FLOOR * cap / 2 + slack,
-        "a pass that found old garbage did not narrow the growth fraction");
+  check(live <= narrowed, "a pass that found old garbage did not narrow the growth fraction");
 }
 
 static void check_deep_ring(void) {

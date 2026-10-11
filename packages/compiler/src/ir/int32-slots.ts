@@ -271,15 +271,16 @@ function walkFunction(
   for (const s of fn.body) stmt(s);
 }
 
-/** The class and record field names checked-dynamic code can store into a
- * live typed-ref capsule (a capsule commit rewrites every other field with
- * its unchanged snapshot value). `all`: some runtime helper that can store
- * an arbitrary property receives a dynamic value, or the program has a
- * dynamic island; otherwise only literal-keyed `dyn.keySet`/`dyn.keyDelete`
- * name fields, collected in `names`. */
-export function dynamicFieldStores(mod: IrModule): { all: boolean; names: Set<string> } {
-  const records = new Map((mod.records ?? []).map((r) => [r.id, r]));
-  const unions = new Map((mod.unions ?? []).map((u) => [u.id, u]));
+/** The class field names that runtime stores through live dynamic views
+ * (typed-ref capsules) can write: every name when `all` (islands, jsval
+ * values, or a dynamic store whose key is not a literal), otherwise the
+ * literal keys of `dyn.keySet`/`dyn.keyDelete`. A view commits a store back
+ * into the instance's native field slots, which the IR does not show. */
+export function dynamicFieldStores(
+  mod: IrModule,
+  records = new Map((mod.records ?? []).map((r) => [r.id, r])),
+  unions = new Map((mod.unions ?? []).map((u) => [u.id, u])),
+): { all: boolean; names: Set<string> } {
   const dynTypes = new Map<IrType, boolean>();
   const dynNamed = new Map<string, boolean>();
   const dynish = (type: IrType): boolean => {
@@ -436,7 +437,7 @@ export function analyzeInt32Slots(mod: IrModule): Int32Slots {
   // writes every field from the view, which holds the exact snapshot value
   // of any property no store named. So reaching dynamic code disqualifies
   // exactly the field names some dynamic store in the program can name.
-  const { all: dynWritesAll, names: dynWritten } = dynamicFieldStores(mod);
+  const { all: dynWritesAll, names: dynWritten } = dynamicFieldStores(mod, records, unions);
   for (const fn of mod.functions)
     walkFunction(fn, {
       expr: (e) => {
