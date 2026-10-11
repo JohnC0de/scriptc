@@ -390,8 +390,9 @@ function analyzeCycles(
       for (const from of members)
         for (const [to, mutable] of from.edges) {
           if (!mutable || to.component !== component) continue;
-          const there = from === n ? { steps: [] } : path(n, (m) => m === from, inside);
-          const back = to === n ? { steps: [] } : path(to, (m) => m === n, inside);
+          const none: { steps: CycleStep[] } = { steps: [] };
+          const there = from === n ? none : path(n, (m) => m === from, inside);
+          const back = to === n ? none : path(to, (m) => m === n, inside);
           if (!there || !back) continue;
           return {
             kind: "cycle",

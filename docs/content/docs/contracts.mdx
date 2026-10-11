@@ -116,7 +116,7 @@ scriptc recognizes a contract where it is written as the annotation of a declara
   <dt><code>Immutable&lt;T&gt;</code></dt>
   <dd>Parameters, variables, class instance fields and function results.</dd>
   <dt><code>Acyclic</code></dt>
-  <dd>Classes (<code>class C implements Acyclic</code>), interfaces (<code>interface I extends Acyclic</code>) and object type aliases (<code>type T = Acyclic&lt;&#123; ... &#125;&gt;</code>).</dd>
+  <dd>Classes (<code>class C implements Acyclic</code>), interfaces (<code>interface I extends Acyclic</code>) and object type aliases (<code>type T = Acyclic&lt;...&gt;</code> over an object type).</dd>
 </dl>
 
 A contract anywhere else (a type alias, an interface member, an element or type argument such as `Int32[]`, a function type) would promise something scriptc does not check, so the build reports it with SC7006.
