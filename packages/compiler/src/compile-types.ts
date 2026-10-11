@@ -34,6 +34,11 @@ export interface CompileBaseOptions {
   /** Windows PE executable subsystem. Console is the default; GUI suppresses
    * automatic console-window creation. Only valid for Windows executables. */
   windowsSubsystem?: WindowsSubsystem;
+  /** On Linux, hand the address-space teardown after `process.exit` to a
+   * helper process so the parent sees the exit sooner. The helper keeps the
+   * executable mapped and the memory charged for up to ~100 ms after exit.
+   * Executables only; no effect on other platforms. */
+  detachedExit?: boolean;
   /** --npm-static: package names whose shipped, unminified JS compiles
    * STATICALLY as program modules (inference types the bodies; statements
    * the lowering cannot prove become runtime fences). "auto" opts in every

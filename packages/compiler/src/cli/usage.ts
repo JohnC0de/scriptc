@@ -42,6 +42,11 @@ Options:
       --windows-subsystem <console|gui>
                      Windows executable subsystem (default: console). gui
                      prevents Windows from opening a console window
+      --detached-exit
+                     Linux: after process.exit, free the program's memory in
+                     a helper process so the parent sees the exit sooner. The
+                     helper keeps the executable mapped and its memory charged
+                     for up to ~100 ms after exit (opt in; --emit=exe only)
       --keep-llvm    keep generated LLVM IR beside the executable (default)
       --no-keep-llvm delete generated LLVM IR after compiling
       --emit-ir      also write IR beside an executable or library archive;
@@ -81,6 +86,7 @@ export const CLI_OPTIONS = {
   optimization: { type: "string" },
   strip: { type: "boolean", default: false },
   "windows-subsystem": { type: "string" },
+  "detached-exit": { type: "boolean", default: false },
   "keep-llvm": { type: "boolean", default: true },
   "emit-ir": { type: "boolean", default: false },
   sanitize: { type: "boolean", default: false },
