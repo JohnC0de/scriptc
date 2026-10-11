@@ -1114,7 +1114,9 @@ void scr_run_exit_listeners(double code) {
 #endif
     scr_exit_ls[i].fn(scr_exit_ls[i].cb, code);
 #ifdef SCR_WORKERS
-    if (scr_context_stopping()) break;
+    /* The listener may have unwound for a stop request (checkpoint installs
+     * the sentinel its cell may not show yet). */
+    if (scr_context_checkpoint()) break;
 #endif
     if (scr_exc_pending()) {
       /* Node: a throw in an 'exit' listener is fatal (exit code 7). */

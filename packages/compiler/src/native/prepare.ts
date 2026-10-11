@@ -284,6 +284,7 @@ export function prepareNativeExecutable(
           runtimeAbiMarker: outputKind === "obj" || outputKind === "exe",
           objectAudit: options.sanitize === true,
           ...(options.optimization === "speed" ? { inlineRc: true } : {}),
+          ...(options.detachedExit === true && outputKind === "exe" ? { detachedExit: true } : {}),
           ...(options.optimization === "dev" && !options.strip
             ? { debugSources: prepared.sourceTexts }
             : {}),

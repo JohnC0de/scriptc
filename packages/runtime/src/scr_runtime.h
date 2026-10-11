@@ -290,11 +290,26 @@ void scr_context_stop(int code);
 bool scr_context_stopping(void);
 bool scr_context_checkpoint(void);
 bool scr_context_quiet(void);
-/* The process-wide exception alert that emitted pending checks of worker
- * executables test inline (scr_exception.c): nonzero while some script
- * thread may have an exception pending in its active cell or must stop. */
+#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__CYGWIN__) && !defined(__wasi__)
+/* ELF worker executables (the LLVM emitter's executableTls targets): every
+ * script thread owns an exact pending word in the executable's static TLS
+ * block, which emitted pending checks load with one thread-pointer-relative
+ * access and no out-of-line slow path (scr_exception.c). */
+#define SCR_EXC_FLAG 1
+#define SCR_EXC_FLAG_PENDING 1u /* the active cell's kind is not NONE */
+#define SCR_EXC_FLAG_STOP 2u    /* the context must stop (never cleared) */
+extern SCR_TL _Atomic uint32_t scr_exc_flag;
+/* Requests the stop of the thread that owns `flag` (scr_worker.c holds the
+ * owner's word only while its script runs). */
+void scr_exc_flag_request_stop(_Atomic uint32_t *flag);
+#else
+/* The process-wide exception alert that emitted pending checks of other
+ * worker executables test inline (scr_exception.c): nonzero while some
+ * script thread may have an exception pending in its active cell or must
+ * stop. */
 extern _Atomic uint32_t scr_exc_alert;
 void scr_exc_alert_add(int delta); /* worker.terminate() references */
+#endif
 void scr_exc_alert_thread_exit(void);
 void scr_loop_context_shutdown(void);
 extern SCR_TL void (*scr_context_report_error)(void);
@@ -322,6 +337,22 @@ bool scr_context_is_main(void);
 extern SCR_TL uintptr_t scr_stack_guard;
 void scr_stack_guard_init(void);
 void scr_stack_overflow(void);
+#if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(__APPLE__) && \
+    (defined(__aarch64__) || defined(__x86_64__))
+/* Darwin worker executables: reading a thread-local variable calls its TLV
+ * thunk, so the emitted entry checks read the running stack's guard from a
+ * pthread thread-specific-data slot instead, addressed from the thread
+ * pointer (TPIDRRO_EL0 on arm64, %gs on x86-64) plus this byte offset.
+ * scr_stack_guard_init validates the slot on first use; zero means the
+ * direct read is unavailable and the checks call scr_stack_guard_get. */
+#define SCR_STACK_GUARD_TSD 1
+extern uintptr_t scr_stack_guard_tsd;
+uintptr_t scr_stack_guard_get(void);
+void scr_stack_guard_set(uintptr_t guard);
+#define SCR_STACK_GUARD_SET(guard) scr_stack_guard_set(guard)
+#else
+#define SCR_STACK_GUARD_SET(guard) (scr_stack_guard = (guard))
+#endif
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
 #define SCR_STACK_RESERVE_MAX ((size_t)2 << 20)
@@ -3154,6 +3185,10 @@ bool scr_process_kill_named(double pid, const ScrStr *signal);
 /* fflush stdout, then _Exit((int)code): no atexit handlers run — the RC
  * audit is deliberately skipped (exiting mid-program leaves live values). */
 void scr_process_exit(double code);
+/* Nonzero hands the address-space teardown after scr_process_exit to a
+ * helper process (Linux, `--detached-exit`). scr_lib.c defines a weak 0;
+ * the program object of such an executable defines it as 1. */
+extern const unsigned char scr_detached_exit;
 void scr_process_set_exit_code(double code);
 double scr_process_exit_code_or_zero(void);
 /* process._exiting: true once the exit sequence began (process.exit or
@@ -4085,6 +4120,7 @@ ScrStr *scr_os_tmpdir(void);
 ScrStr *scr_os_release(void); /* uname(2) release — +1 fresh */
 ScrStr *scr_os_type(void);    /* uname(2) sysname — +1 fresh */
 double scr_os_totalmem(void); /* total physical memory, bytes */
+double scr_os_available_parallelism(void); /* uv_available_parallelism: CPUs this process may use, >= 1 */
 /* os.userInfo()'s field trio (pw_name / pw_shell / pw_dir — the passwd
  * home, not the $HOME cascade). +1 fresh; abort on lookup failure. */
 ScrStr *scr_os_user_name(void);
