@@ -811,7 +811,14 @@ export class LlEmitter {
     this.ffiExtendNarrowIntegers =
       options.wasi === true || ffiExtendsNarrowIntegers(options.targetTriple);
     this.wasi = options.wasi === true;
-    this.inlineTrunc = /^(x86_64|amd64)\b/i.test(options.targetTriple ?? "");
+    // An empty triple targets the host, as for executableTls below: the
+    // Node-hosted CLI passes none, the native CLI passes its toolchain's, and
+    // both must emit the same module for the same target.
+    this.inlineTrunc =
+      !this.wasi &&
+      (options.targetTriple
+        ? /^(x86_64|amd64)\b/i.test(options.targetTriple)
+        : process.arch === "x64");
     this.executableTls =
       mod.workers === true &&
       mod.lib === undefined &&
@@ -1925,7 +1932,7 @@ export class LlEmitter {
         // The branch must dominate fptoui: NaN/out-of-range conversion
         // would produce poison. Fractional indices also need a fallback.
         `  %index = fptoui double %i to ${this.sizeType}`,
-        `  %roundtrip = uitofp ${this.sizeType} %index to double`,
+        `  %roundtrip = sitofp ${this.sizeType} %index to double`,
         `  %integer = fcmp oeq double %roundtrip, %i`,
         `  br i1 %integer, label %read, label %fallback`,
         `read:`,
@@ -2759,14 +2766,14 @@ export class LlEmitter {
         `entry:`,
         `  %ndp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 19`,
         `  %nd = load ${sz}, ptr %ndp`,
-        `  %ndf = uitofp ${sz} %nd to double`,
+        `  %ndf = sitofp ${sz} %nd to double`,
         `  %lo = fcmp oge double %k, 0.0`,
         `  %hi = fcmp olt double %k, %ndf`,
         `  %in = and i1 %lo, %hi`,
         `  br i1 %in, label %direct, label %outside`,
         `direct:`,
         `  %i = fptoui double %k to ${sz}`,
-        `  %back = uitofp ${sz} %i to double`,
+        `  %back = sitofp ${sz} %i to double`,
         `  %int = fcmp oeq double %back, %k`,
         `  br i1 %int, label %slot, label %miss`,
         `slot:`,
@@ -5626,7 +5633,7 @@ export class LlEmitter {
         B.line(`${lenPtr} = getelementptr inbounds %ScrArr, ptr ${arr.name}, i32 0, i32 1`);
         this.markMemoryPointer(lenPtr, "array:header");
         B.line(`${len} = load ${this.sizeType}, ptr ${lenPtr}${this.fieldAliasAttachment(lenPtr)}`);
-        B.line(`${lenNumber} = uitofp ${this.sizeType} ${len} to double`);
+        B.line(`${lenNumber} = sitofp ${this.sizeType} ${len} to double`);
         B.line(`${same} = fcmp oeq double ${length.name}, ${lenNumber}`);
         B.condBr(same, done, resize);
         B.startBlock(resize);
@@ -6255,7 +6262,7 @@ export class LlEmitter {
           B.line(
             `${rawLen} = load ${this.sizeType}, ptr ${lenPtr}${this.fieldAliasAttachment(lenPtr)}`,
           );
-          B.line(`${len} = uitofp ${this.sizeType} ${rawLen} to double`);
+          B.line(`${len} = sitofp ${this.sizeType} ${rawLen} to double`);
           B.line(`${inBounds} = fcmp olt double ${i}, ${len}`);
           cur = i;
         }
