@@ -522,6 +522,10 @@ export class LlEmitter {
   /** Source loops enclosing the statement being emitted in the current
    * function body. */
   private loopDepth = 0;
+  /** Darwin worker executables read the stack guard from a pthread
+   * thread-specific-data slot off the thread pointer (scr_runtime.h's
+   * SCR_STACK_GUARD_TSD): the architecture names the access sequence. */
+  private readonly stackGuardTsd: "aarch64" | "x86_64" | null;
   private readonly emitLibraryIdentity: boolean;
   private readonly runtimeAbiMarker: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
@@ -816,6 +820,15 @@ export class LlEmitter {
       mod.lib === undefined &&
       !this.wasi &&
       !/apple|darwin|windows|mingw|cygwin|win32/.test(options.targetTriple || process.platform);
+    const host = options.targetTriple || `${process.arch}-${process.platform}`;
+    this.stackGuardTsd =
+      mod.workers === true && mod.lib === undefined && !this.wasi && /apple|darwin/.test(host)
+        ? /^(arm64|aarch64)/.test(host)
+          ? "aarch64"
+          : /^(x86_64|amd64|x64)/.test(host)
+            ? "x86_64"
+            : null
+        : null;
     this.emitLibraryIdentity = options.emitLibraryIdentity !== false;
     this.runtimeAbiMarker = options.runtimeAbiMarker === true;
     this.rcHelpers = options.inlineRc === true ? new Set() : null;
@@ -4004,22 +4017,65 @@ export class LlEmitter {
    * throw Node's RangeError and unwind like any other pending exception. */
   private emitStackCheck(): void {
     const B = this.B;
-    const tl = this.mod.workers === true ? "thread_local " : "";
-    this.declare(`@scr_stack_guard = external ${tl}global ptr`);
     this.declare(`declare ptr @llvm.stacksave.p0()`);
     this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
     this.declare(`declare void @scr_stack_overflow()`);
-    const sp = B.tmp();
-    const guard = B.tmp();
-    const low = B.tmp();
-    const cold = B.tmp();
-    B.line(`${sp} = call ptr @llvm.stacksave.p0()`);
-    B.line(`${guard} = load ptr, ptr @scr_stack_guard`);
-    B.line(`${low} = icmp ult ptr ${sp}, ${guard}`);
-    B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${low}, i1 false)`);
     const over = B.newLabel("stack.over");
     const ok = B.newLabel("stack.ok");
-    B.condBr(cold, over, ok);
+    const sp = B.tmp();
+    B.line(`${sp} = call ptr @llvm.stacksave.p0()`);
+    const test = (guard: string): void => {
+      const low = B.tmp();
+      const cold = B.tmp();
+      B.line(`${low} = icmp ult ptr ${sp}, ${guard}`);
+      B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${low}, i1 false)`);
+      B.condBr(cold, over, ok);
+    };
+    if (this.stackGuardTsd !== null) {
+      // A Darwin thread-local access is a call to its TLV thunk: read the
+      // guard from its thread-specific-data slot at the runtime-validated
+      // offset instead, and call out only when the runtime found no slot.
+      this.declare(`@scr_stack_guard_tsd = external dso_local global i64`);
+      this.declare(`declare ptr @scr_stack_guard_get()`);
+      const offset = B.tmp();
+      const direct = B.tmp();
+      const likely = B.tmp();
+      B.line(`${offset} = load i64, ptr @scr_stack_guard_tsd`);
+      B.line(`${direct} = icmp ne i64 ${offset}, 0`);
+      B.line(`${likely} = call i1 @llvm.expect.i1(i1 ${direct}, i1 true)`);
+      const fast = B.newLabel("stack.tsd");
+      const slow = B.newLabel("stack.tlv");
+      B.condBr(likely, fast, slow);
+      B.startBlock(fast);
+      const guard = B.tmp();
+      if (this.stackGuardTsd === "aarch64") {
+        this.declare(`declare i64 @llvm.read_register.i64(metadata)`);
+        const thread = B.tmp();
+        const base = B.tmp();
+        const slot = B.tmp();
+        const address = B.tmp();
+        B.line(`${thread} = call i64 @llvm.read_register.i64(metadata !{!"tpidrro_el0"})`);
+        B.line(`${base} = and i64 ${thread}, -8`);
+        B.line(`${slot} = add i64 ${base}, ${offset}`);
+        B.line(`${address} = inttoptr i64 ${slot} to ptr`);
+        B.line(`${guard} = load ptr, ptr ${address}`);
+      } else {
+        const address = B.tmp();
+        B.line(`${address} = inttoptr i64 ${offset} to ptr addrspace(256)`);
+        B.line(`${guard} = load ptr, ptr addrspace(256) ${address}`);
+      }
+      test(guard);
+      B.startBlock(slow);
+      const fallback = B.tmp();
+      B.line(`${fallback} = call ptr @scr_stack_guard_get()`);
+      test(fallback);
+    } else {
+      const tl = this.mod.workers === true ? "thread_local " : "";
+      this.declare(`@scr_stack_guard = external ${tl}global ptr`);
+      const guard = B.tmp();
+      B.line(`${guard} = load ptr, ptr @scr_stack_guard`);
+      test(guard);
+    }
     B.startBlock(over);
     B.line(`call void @scr_stack_overflow()`);
     this.emitUnwind();

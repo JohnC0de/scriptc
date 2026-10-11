@@ -337,6 +337,22 @@ bool scr_context_is_main(void);
 extern SCR_TL uintptr_t scr_stack_guard;
 void scr_stack_guard_init(void);
 void scr_stack_overflow(void);
+#if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(__APPLE__) && \
+    (defined(__aarch64__) || defined(__x86_64__))
+/* Darwin worker executables: reading a thread-local variable calls its TLV
+ * thunk, so the emitted entry checks read the running stack's guard from a
+ * pthread thread-specific-data slot instead, addressed from the thread
+ * pointer (TPIDRRO_EL0 on arm64, %gs on x86-64) plus this byte offset.
+ * scr_stack_guard_init validates the slot on first use; zero means the
+ * direct read is unavailable and the checks call scr_stack_guard_get. */
+#define SCR_STACK_GUARD_TSD 1
+extern uintptr_t scr_stack_guard_tsd;
+uintptr_t scr_stack_guard_get(void);
+void scr_stack_guard_set(uintptr_t guard);
+#define SCR_STACK_GUARD_SET(guard) scr_stack_guard_set(guard)
+#else
+#define SCR_STACK_GUARD_SET(guard) (scr_stack_guard = (guard))
+#endif
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
 #define SCR_STACK_RESERVE_MAX ((size_t)2 << 20)

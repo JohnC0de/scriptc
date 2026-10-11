@@ -281,6 +281,43 @@ console.log(mix(1, 2), spin(5));
 );
 
 test.each([
+  ["arm64-apple-macosx14.0.0", "tpidrro"],
+  ["x86_64-apple-macosx14.0.0", "gs"],
+  ["x86_64-unknown-linux-gnu", "tls"],
+])("worker stack checks for %s read the guard through %s", async (target, access) => {
+  vi.stubEnv("SCRIPTC_TARGET", target);
+  const request = await fixture(
+    worker +
+      "\nfunction depth(n: number): number { return n < 1 ? 0 : depth(n - 1) + 1; }\nconsole.log(depth(9));\n",
+  );
+  const result = await compile(request.entry, request);
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  if (result.ok) {
+    const llvm = await readFile(request.outPath, "utf8");
+    const start = llvm.search(/^define [^\n]*@sc_f_depth\(/m);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const depth = llvm.slice(start, llvm.indexOf("\n}\n", start));
+    expect(depth).toContain("call ptr @llvm.stacksave.p0()");
+    if (access === "tls") {
+      // ELF: one thread-pointer-relative load of the thread-local guard.
+      expect(depth).toContain("load ptr, ptr @scr_stack_guard");
+      expect(depth).not.toContain("@scr_stack_guard_tsd");
+    } else {
+      // Darwin: a thread-local access calls the TLV thunk, so the guard comes
+      // from its thread-specific-data slot, with an out-of-line fallback.
+      expect(depth).not.toContain("ptr @scr_stack_guard\n");
+      expect(depth).toContain("load i64, ptr @scr_stack_guard_tsd");
+      expect(depth).toContain("call ptr @scr_stack_guard_get()");
+      if (access === "tpidrro") {
+        expect(depth).toContain('@llvm.read_register.i64(metadata !{!"tpidrro_el0"})');
+      } else {
+        expect(depth).toMatch(/load ptr, ptr addrspace\(256\) %/);
+      }
+    }
+  }
+});
+
+test.each([
   ["x86_64-unknown-linux-gnu", true],
   ["aarch64-unknown-linux-gnu", true],
   ["arm64-apple-macosx14.0.0", false],
