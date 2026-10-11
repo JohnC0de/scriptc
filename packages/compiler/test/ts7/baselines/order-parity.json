@@ -14530,6 +14530,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-arena-reuse.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/native-worker-buffer-consumers.ts": {
    "order": [
     "<repo>/tests/corpus/native-worker-buffer-consumers.ts"

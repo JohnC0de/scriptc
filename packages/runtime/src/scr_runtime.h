@@ -473,8 +473,9 @@ void scr_cyc_free(void *obj); /* frees the block, header included */
  * of SCR_SA_ARENAS equal slices of a single process-wide reservation, so
  * the owning arena of any block is address arithmetic. A thread claims an
  * arena on its first allocation and parks it (free lists and bump pointers
- * intact, memory never unmapped) when it exits; the next thread to claim
- * it continues from there. Script objects stay on their thread, so a free
+ * intact) when it exits; the next thread to claim it continues from there.
+ * On Linux an exiting thread that carved much first returns the pages of
+ * its arena that hold only free blocks (scr_alloc.c). Script objects stay on their thread, so a free
  * normally hits the caller's own arena inline. A block freed by another
  * thread goes to the owning arena's lock-free remote list, which the owner
  * drains on its slow path; published (immortal) objects are never freed,
@@ -574,6 +575,8 @@ _Static_assert(offsetof(ScrSaState, span) == 8 && offsetof(ScrSaState, shift) ==
 void scr_sa_free_foreign(void *p);
 /* The calling script thread is done with its arena (worker exit). */
 void scr_sa_thread_park(void);
+/* Waits until the arenas of exited threads are trimmed (tests). */
+void scr_sa_wait_trims(void);
 #define SCR_SA_FREE_FOREIGN(p) scr_sa_free_foreign(p)
 #else
 #define SCR_SA_FREE_FOREIGN(p) free(p)
