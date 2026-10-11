@@ -46,6 +46,8 @@ describe("output option compatibility", () => {
     [{ emit: "llvm", windowsSubsystem: "gui" }, /windows-subsystem/],
     [{ emit: "obj", strip: true }, /strip/],
     [{ emit: "llvm", strip: true }, /strip/],
+    [{ emit: "obj", detachedExit: true }, /detached-exit/],
+    [{ emit: "llvm", detachedExit: true }, /detached-exit/],
   ] as const)("rejects %j", (override, message) => {
     const result = resolveOutputOptions("build", { ...BASE, ...override });
     expect(result).toEqual({ ok: false, message: expect.stringMatching(message) });

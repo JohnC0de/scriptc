@@ -10,6 +10,7 @@ export interface OutputOptionValues {
   optimization?: string;
   strip?: boolean;
   windowsSubsystem?: string;
+  detachedExit?: boolean;
   ffi?: string;
 }
 
@@ -68,6 +69,9 @@ export function resolveOutputOptions(
   }
   if (values.strip && emit !== "exe") {
     return { ok: false, message: `--strip is only supported with --emit=exe` };
+  }
+  if (values.detachedExit && emit !== "exe") {
+    return { ok: false, message: `--detached-exit is only supported with --emit=exe` };
   }
   if (emit === "ir" && backend !== undefined) {
     return {
