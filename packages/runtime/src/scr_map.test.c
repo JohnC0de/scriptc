@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MODEL_CAP 20000
 
@@ -227,10 +228,253 @@ static void modes(void) {
   scr_map_release(set);
 }
 
+/* clear() and delete must cost time proportional to the entries they
+ * touch, not to the largest size the map ever had. Each case grows the
+ * index tables to about a million slots, then times many small rounds
+ * against the same rounds on a fresh map: a clear that resets the whole
+ * table (megabytes per call), or iteration over the tombstones of the old
+ * peak, is hundreds of times slower and exceeds the bound early. The bound
+ * is relative, so machine speed and sanitizers do not matter. */
+#define BIG_KEYS (1 << 20)
+#define SMALL_ROUNDS 50000
+
+typedef void (*Round)(ScrMap *map, size_t round, void *ctx);
+
+static double cpu_seconds(void) {
+  return (double)clock() / CLOCKS_PER_SEC;
+}
+
+/* CPU seconds for SMALL_ROUNDS rounds; stops early once over budget. */
+static double timed_rounds(ScrMap *map, Round round, void *ctx, double budget) {
+  double start = cpu_seconds();
+  for (size_t r = 0; r < SMALL_ROUNDS; r++) {
+    round(map, r, ctx);
+    if (r % 1024 == 1023 && cpu_seconds() - start > budget) break;
+  }
+  return cpu_seconds() - start;
+}
+
+static void expect_proportional(const char *what, ScrMap *fresh, ScrMap *grown, Round round, void *ctx) {
+  double base = timed_rounds(fresh, round, ctx, INFINITY);
+  double budget = 20 * base + 0.05;
+  double spent = timed_rounds(grown, round, ctx, budget);
+  if (spent > budget) {
+    fprintf(stderr, "%s: cost follows the peak size (%.3f s, fresh map %.3f s)\n", what, spent, base);
+    exit(1);
+  }
+}
+
+/* keys: 0 directly indexed integers, 1 sparse integers (hashed). */
+static double cost_key(unsigned keys, size_t i) {
+  return keys == 0 ? (double)i : (double)i * 1000003.0;
+}
+
+/* clear() an empty map, add up to six keys, clear() again. */
+static void number_round(ScrMap *map, size_t round, void *ctx) {
+  unsigned keys = *(unsigned *)ctx;
+  scr_map_clear(map);
+  size_t n = round % 7;
+  for (size_t i = 0; i < n; i++) scr_map_set_f64_f64(map, cost_key(keys, round + i), (double)i);
+  assert(scr_map_size(map) == (double)n);
+  scr_map_clear(map);
+}
+
+static void clear_cost_numbers(unsigned keys) {
+  ScrMap *map = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  for (size_t i = 0; i < BIG_KEYS; i++) scr_map_set_f64_f64(map, cost_key(keys, i), (double)i);
+  assert(keys == 0 ? map->ndense >= BIG_KEYS : map->nbuckets >= 2 * BIG_KEYS);
+  scr_map_clear(map);
+  assert(scr_map_size(map) == 0 && scr_map_iter_count(map) == 0 && !scr_map_has_f64(map, cost_key(keys, 1)));
+  ScrMap *fresh = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  expect_proportional(keys == 0 ? "dense clear" : "hashed clear", fresh, map, number_round, &keys);
+  scr_map_release(fresh);
+  /* Storage sized for the old peak is gone; the map is reusable. */
+  assert(map->ndense <= 256 && map->nbuckets <= 256 && map->ecap <= 256);
+  for (size_t i = 0; i < 100; i++) scr_map_set_f64_f64(map, cost_key(keys, 99 - i), (double)i);
+  size_t j = 0;
+  for (size_t i = 0; i < (size_t)scr_map_iter_count(map); i++) {
+    if (!scr_map_iter_live(map, (double)i)) continue;
+    assert(scr_map_iter_key_f64(map, (double)i) == cost_key(keys, 99 - j));
+    assert(scr_map_iter_val_f64(map, (double)i) == (double)j);
+    j++;
+  }
+  assert(j == 100 && !scr_map_has_f64(map, cost_key(keys, 100)));
+  scr_map_release(map);
+}
+
+static ScrStr *key_str(size_t i) {
+  char buf[32];
+  int len = snprintf(buf, sizeof buf, "k%zu", i);
+  return scr_str_new(buf, (size_t)len);
+}
+
+enum { STRING_KEYS = 1 << 18 };
+
+static void string_round(ScrMap *map, size_t round, void *ctx) {
+  ScrStr **keys = ctx;
+  scr_map_clear(map);
+  size_t n = round % 7;
+  for (size_t i = 0; i < n; i++) scr_map_set_str_f64(map, keys[(round + i) % STRING_KEYS], (double)i);
+  assert(scr_map_size(map) == (double)n);
+  scr_map_clear(map);
+}
+
+static void clear_cost_strings(void) {
+  ScrStr **keys = malloc(STRING_KEYS * sizeof *keys);
+  assert(keys);
+  for (size_t i = 0; i < STRING_KEYS; i++) keys[i] = key_str(i);
+  ScrMap *map = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  for (size_t i = 0; i < STRING_KEYS; i++) scr_map_set_str_f64(map, keys[i], (double)i);
+  assert(map->nbuckets >= 2 * STRING_KEYS);
+  scr_map_clear(map);
+  ScrMap *fresh = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  expect_proportional("string clear", fresh, map, string_round, keys);
+  scr_map_release(fresh);
+  assert(map->nbuckets <= 256 && map->ecap <= 256);
+  for (size_t i = 0; i < 10; i++) scr_map_set_str_f64(map, keys[i], (double)i);
+  for (size_t i = 0; i < 20; i++) assert(scr_map_has_str(map, keys[i]) == (i < 10));
+  scr_map_release(map);
+  for (size_t i = 0; i < STRING_KEYS; i++) scr_str_release(keys[i]);
+  free(keys);
+}
+
+/* Walk the entries the way the forEach desugar does. */
+static void iterate_round(ScrMap *map, size_t round, void *ctx) {
+  (void)round;
+  size_t count = 0;
+  for (size_t i = 0; i < (size_t)scr_map_iter_count(map); i++) count += scr_map_iter_live(map, (double)i);
+  assert(count == *(size_t *)ctx);
+}
+
+/* Deleting almost everything compacts the entries and index tables, so
+ * iteration costs O(live), and keys left far apart move back to hashing
+ * instead of keeping a huge direct index. */
+static void delete_shrinks(void) {
+  ScrMap *map = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  ScrMap *fresh = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  for (size_t i = 0; i < BIG_KEYS; i++) scr_map_set_f64_f64(map, (double)i, (double)i);
+  for (size_t i = 0; i + 10 < BIG_KEYS; i++) assert(scr_map_delete_f64(map, (double)i));
+  for (size_t i = BIG_KEYS - 10; i < BIG_KEYS; i++) scr_map_set_f64_f64(fresh, (double)i, (double)i);
+  assert(scr_map_size(map) == 10);
+  size_t live = 10;
+  expect_proportional("iteration after deletes", fresh, map, iterate_round, &live);
+  assert(scr_map_iter_count(map) <= 4 * 10 + 64);
+  assert(!map->ndense); /* ten keys near 2^20: hashed */
+  for (size_t i = BIG_KEYS - 10; i < BIG_KEYS; i++) assert(scr_map_has_f64(map, (double)i));
+  assert(!scr_map_has_f64(map, 0) && !scr_map_has_f64(map, BIG_KEYS - 11));
+  scr_map_release(fresh);
+  scr_map_release(map);
+
+  /* Small survivors keep a direct index sized for them. */
+  map = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  for (size_t i = 0; i < BIG_KEYS; i++) scr_map_set_f64_f64(map, (double)i, (double)i);
+  for (size_t i = BIG_KEYS; i-- > 20;) assert(scr_map_delete_f64(map, (double)i));
+  assert(scr_map_size(map) == 20 && map->ndense && map->ndense <= 64);
+  for (size_t i = 0; i < 40; i++) assert(scr_map_has_f64(map, (double)i) == (i < 20));
+  scr_map_release(map);
+
+  /* A copy indexes its own keys, not the source's peak (here a quarter of
+   * the entries survive, too many to compact the source yet). */
+  map = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  for (size_t i = 0; i < 4096; i++) scr_map_set_f64_f64(map, (double)i, (double)i);
+  for (size_t i = 1024; i < 4096; i++) assert(scr_map_delete_f64(map, (double)i));
+  assert(map->ndense == 4096 && scr_map_iter_count(map) == 4096);
+  ScrMap *copy = scr_map_clone(map, false);
+  assert(copy->ndense == 1024 && scr_map_size(copy) == 1024);
+  double out;
+  for (size_t i = 0; i < 1100; i++) {
+    assert(scr_map_get_f64_f64(copy, (double)i, &out) == (i < 1024));
+    if (i < 1024) assert(out == (double)i);
+  }
+  scr_map_release(copy);
+  scr_map_release(map);
+}
+
+/* Grow-and-drain cycles against the ordered model: the map repeatedly
+ * grows large and is drained by random deletes, deletes in insertion
+ * order, clear, or deletes during an iteration that also appends, so
+ * compaction on delete, index shrinking, the move back to hashing and
+ * clear's storage release all run under the Map contract. */
+static double drain_key(unsigned flavor, size_t cycle, size_t i) {
+  switch (flavor) {
+  case 0: return (double)(next() % 4000); /* dense */
+  case 1: return (double)(cycle * 3000 + i); /* a moving dense window */
+  default: return (double)(next() % 64) * 1000003.0 + (double)(next() % 3); /* hashed */
+  }
+}
+
+static void fuzz_drain(unsigned flavor) {
+  static Model model;
+  model.n = 0;
+  ScrMap *map = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  for (size_t cycle = 0; cycle < 16; cycle++) {
+    size_t grow = 1 + next() % 3000;
+    for (size_t i = 0; i < grow; i++) {
+      double k = drain_key(flavor, cycle, i), v = (double)(next() % 1000);
+      scr_map_set_f64_f64(map, k, v);
+      model_set(&model, k, v);
+    }
+    check_same(map, &model);
+    size_t keep = next() % 40;
+    switch (next() % 4) {
+    case 0:
+      while (model.n > keep) {
+        double k = model.key[next() % model.n];
+        assert(scr_map_delete_f64(map, k) && model_delete(&model, k));
+      }
+      break;
+    case 1:
+      while (model.n > keep) {
+        double k = model.key[0];
+        assert(scr_map_delete_f64(map, k) && model_delete(&model, k));
+      }
+      break;
+    case 2:
+      scr_map_clear(map);
+      model.n = 0;
+      if (next() % 2) scr_map_clear(map);
+      break;
+    default: {
+      /* Delete the visited entry with probability 3/4 and sometimes append
+       * a fresh key, which the same iteration must still visit. */
+      size_t cursor = 0, added = 0;
+      scr_map_iter_enter(map);
+      for (size_t i = 0; i < (size_t)scr_map_iter_count(map); i++) {
+        if (!scr_map_iter_live(map, (double)i)) continue;
+        double k = scr_map_iter_key_f64(map, (double)i);
+        assert(cursor < model.n && same_value_zero(k, model.key[cursor]));
+        if (added < 200 && next() % 8 == 0) {
+          double fresh = 1e7 + (double)(cycle * 1000 + added++);
+          scr_map_set_f64_f64(map, fresh, 1);
+          model_set(&model, fresh, 1);
+        }
+        if (next() % 4) {
+          assert(scr_map_delete_f64(map, k) && model_delete(&model, k));
+        } else {
+          cursor++;
+        }
+      }
+      assert(cursor == model.n);
+      scr_map_iter_exit(map);
+      break;
+    }
+    }
+    check_same(map, &model);
+    for (size_t i = 0; i < 64; i++) probe(map, &model, drain_key(flavor, cycle, i));
+    for (size_t i = 0; i < model.n; i++) probe(map, &model, model.key[i]);
+  }
+  scr_map_release(map);
+}
+
 int main(void) {
   modes();
   iterate_while_mutating();
   for (unsigned flavor = 0; flavor < 5; flavor++) fuzz(flavor);
+  clear_cost_numbers(0);
+  clear_cost_numbers(1);
+  clear_cost_strings();
+  delete_shrinks();
+  for (unsigned flavor = 0; flavor < 3; flavor++) fuzz_drain(flavor);
   puts("number-key maps passed");
   return 0;
 }

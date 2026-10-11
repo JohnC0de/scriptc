@@ -11,6 +11,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { resolveBuildCacheRoot } from "../backend/cache-root.js";
+import { writeTextPartsSync } from "./text-file.js";
+
+/** UTF-8 bytes one native compiler string can hold (the runtime's
+ * SCR_STR_MAX_CAP). Exceeding it traps rather than throwing, so payloads
+ * decoded as one string are bounded by it up front. */
+export const NATIVE_STRING_BYTES = 0x7fffffff;
 
 export function contentDigest(value: string | Uint8Array): string {
   const hash = createHash("sha256");
@@ -29,9 +35,11 @@ export class NativeCache {
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
   }
 
-  read(family: string, key: string): Buffer | null {
+  /** Entries larger than `maxBytes` are misses. */
+  read(family: string, key: string, maxBytes = Infinity): Buffer | null {
     try {
       const path = join(this.root, family, key);
+      if (maxBytes < Infinity && statSync(path).size > maxBytes) return null;
       const bytes = readFileSync(path);
       if (contentDigest(bytes) !== readFileSync(path + ".sha256", "utf8").trim()) return null;
       return bytes;
@@ -64,6 +72,31 @@ export class NativeCache {
       const path = join(directory, key);
       // Concurrent writers publish identical content under the same key;
       // a reader between the two renames simply treats it as a miss.
+      renameSync(join(stage, "payload"), path);
+      renameSync(join(stage, "digest"), path + ".sha256");
+    } catch {
+      /* Cache failures never change a build's result. */
+    } finally {
+      try {
+        if (stage !== null) rmSync(stage, { recursive: true, force: true });
+      } catch {
+        /* Cleanup is best effort too. */
+      }
+    }
+  }
+
+  /** Publish text parts without joining them into one string. */
+  writeParts(family: string, key: string, parts: readonly string[]): void {
+    let stage: string | null = null;
+    try {
+      const directory = join(this.root, family);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      stage = mkdtempSync(join(directory, ".write-"));
+      writeTextPartsSync(join(stage, "payload"), parts);
+      const hash = createHash("sha256");
+      for (const part of parts) hash.update(part);
+      writeFileSync(join(stage, "digest"), hash.digest("hex") + "\n");
+      const path = join(directory, key);
       renameSync(join(stage, "payload"), path);
       renameSync(join(stage, "digest"), path + ".sha256");
     } catch {

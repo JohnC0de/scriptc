@@ -1,6 +1,12 @@
 import { expect, test } from "vitest";
 import { F64, VOID, type IrStmt, type IrModule } from "./ir.js";
-import { IR_VERSION, deserializeModule, serializeModule } from "./serialize.js";
+import {
+  IR_VERSION,
+  deserializeModule,
+  deserializeModuleBytes,
+  serializeModule,
+  serializeModuleParts,
+} from "./serialize.js";
 
 function numbers(values: number[]): IrModule {
   const loc = { file: "numbers.ts", start: 0, end: 0 };
@@ -123,4 +129,72 @@ test("compact artifacts keep JSON's circular-data refusal", () => {
   mod.functions[0]!.body.push(block);
   expect(() => serializeModule(mod)).toThrow(TypeError);
   expect(() => serializeModule(mod, true)).toThrow(TypeError);
+});
+
+/** A module whose strings contain every byte the function splitter must not
+ * mistake for structure. */
+function structuralStrings(): IrModule {
+  const mod = numbers([NaN, -0, 1.5, Infinity]);
+  const tricky = 'q"\\"],[{"functions":[]}\\, \n\t😀é\\';
+  mod.sourceFile = tricky + '"functions":[';
+  const base = mod.functions[0]!;
+  mod.functions = [
+    base,
+    { ...base, name: tricky, loc: { file: tricky, start: -0, end: 2 } },
+    { ...base, name: "]", body: [] },
+    { ...base, name: "\\" },
+  ];
+  mod.globals = [{ id: "%g.functions", name: "functions", type: F64, mutable: false }];
+  return mod;
+}
+
+test("compact parts are exactly the single-root JSON encoding", () => {
+  const mod = structuralStrings();
+  const parts = serializeModuleParts(mod);
+  expect(parts.length).toBe(2 + mod.functions.length * 2 - 1);
+  const sentinels = (_key: string, value: unknown): unknown =>
+    typeof value !== "number"
+      ? value
+      : Number.isNaN(value)
+        ? { $nonfinite: "nan" }
+        : value === Infinity
+          ? { $nonfinite: "inf" }
+          : value === -Infinity
+            ? { $nonfinite: "-inf" }
+            : Object.is(value, -0)
+              ? { $nonfinite: "-0" }
+              : value;
+  expect(parts.join("")).toBe(JSON.stringify(mod, sentinels));
+  expect(serializeModule(mod, true)).toBe(parts.join(""));
+});
+
+test("byte decoding splits functions without being misled by string contents", () => {
+  const mod = structuralStrings();
+  for (const text of [serializeModule(mod, true), serializeModule(mod)]) {
+    const decoded = deserializeModuleBytes(Buffer.from(text, "utf8"));
+    expect(decoded).toEqual(mod);
+    expect(decoded).toEqual(deserializeModule(text));
+    expect(Object.is(decoded.functions[1]!.loc.start, -0)).toBe(true);
+  }
+  mod.functions = [];
+  expect(deserializeModuleBytes(Buffer.from(serializeModule(mod, true)))).toEqual(mod);
+  expect(deserializeModuleBytes(Buffer.from(serializeModule(mod)))).toEqual(mod);
+});
+
+test("byte decoding keeps the whole-document errors and version refusal", () => {
+  const text = serializeModule(structuralStrings(), true);
+  for (const broken of [text.slice(0, -1), text.slice(0, text.length - 40), text + "]", "[]", ""]) {
+    let expected: unknown;
+    try {
+      deserializeModule(broken);
+    } catch (error) {
+      expected = error;
+    }
+    expect(expected).toBeInstanceOf(Error);
+    expect(() => deserializeModuleBytes(Buffer.from(broken))).toThrow();
+  }
+  const older = text.replace(`"irVersion":${IR_VERSION}`, `"irVersion":${IR_VERSION - 1}`);
+  expect(() => deserializeModuleBytes(Buffer.from(older))).toThrow("IR version mismatch");
+  const sentinel = text.replace('"nan"', '"future"');
+  expect(() => deserializeModuleBytes(Buffer.from(sentinel))).toThrow("Invalid IR number sentinel");
 });
