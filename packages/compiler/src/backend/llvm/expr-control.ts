@@ -290,9 +290,18 @@ export function emitControlExpr(
         isRefCounted(narrowed) &&
         host.canBorrowReceiver(e.receiver) &&
         host.referenceEffects.preserves(e.body);
+      // An optional array read of a nullable-pointer union is the element
+      // pointer itself, read inline and owned by the statement frame until
+      // the body finishes; the bind slot borrows it like an emitExpr value.
+      const nullableRead =
+        !borrowReceiver &&
+        !multiple &&
+        host.nullableUnions.has(def.id) &&
+        host.optionalArrayReads.get(e.receiver) !== null;
       // A single present arm is only tested and extracted (+1) before the
       // body runs, so a fresh receiver box can stay on the stack.
-      const stacked = !borrowReceiver && !multiple && host.canStackReceiver(e.receiver);
+      const stacked =
+        !borrowReceiver && !nullableRead && !multiple && host.canStackReceiver(e.receiver);
       let r: LlValue;
       const nullableField = borrowReceiver ? host.nullableFieldGet(e.receiver) : null;
       if (nullableField !== null && e.receiver.kind === "fieldGet") {
@@ -307,7 +316,7 @@ export function emitControlExpr(
           name: host.nullableUnions.get(def.id) ? p : host.stackNullableBox(p, nullableField),
           type: e.receiver.type,
         };
-      } else if (borrowReceiver || stacked) r = host.emitReadReceiver(e.receiver);
+      } else if (borrowReceiver || stacked || nullableRead) r = host.emitReadReceiver(e.receiver);
       else r = host.emitExpr(e.receiver);
       // The bind slot borrows a ref payload whenever something else keeps it
       // alive until the body finishes: the borrowed projection above, or the
