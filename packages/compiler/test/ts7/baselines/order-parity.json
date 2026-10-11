@@ -15802,6 +15802,12 @@
     "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts": {
+   "order": [
+    "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts"
+   ],
+   "diags": []
   }
  }
 }

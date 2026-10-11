@@ -62,7 +62,7 @@ void scr_init(void);
 /* Program objects emitted by the bundled LLVM helper reference this symbol.
  * Its versioned spelling makes a mismatched manual runtime link fail before
  * the program can start. */
-void scr_runtime_abi_v10(void);
+void scr_runtime_abi_v11(void);
 void scr_runtime_workers_v8(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -1533,6 +1533,13 @@ typedef struct ScrArr {
   ScrTraceFn elem_trace;
   uint64_t *data;
   uint8_t *present; /* one state per dense slot; heap arrays share data allocation */
+  /* Rarely used storage (sparse indices, noncanonical numeric properties,
+   * match-result metadata) lives out of line: NULL until first needed, so
+   * the common dense array stays small. */
+  struct ScrArrExt *ext;
+} ScrArr;
+
+typedef struct ScrArrExt {
   struct ScrArrSparseSlot *sparse;
   size_t sparse_len;
   size_t sparse_cap;
@@ -1540,7 +1547,7 @@ typedef struct ScrArr {
   size_t prop_len;
   size_t prop_cap;
   struct ScrDyn *metadata; /* heterogeneous named properties of match results */
-} ScrArr;
+} ScrArrExt;
 /* The LLVM backend's inline retain/release read elem_trace through its
  * mirrored %ScrArr type (field 6) to decide mark-live / candidate buffering
  * exactly like scr_arr_retain and scr_arr_release. */
@@ -1582,6 +1589,11 @@ static inline ScrArr *scr_arr_retain(ScrArr *a) {
  * non-NULL) feed the candidate-root buffer like every headered type. */
 void scr_arr_release(ScrArr *a);
 void scr_arr_copy_metadata(ScrArr *a, struct ScrDyn *target);
+/* The array's out-of-line storage, allocated (zeroed) on first use. */
+ScrArrExt *scr_arr_ext(ScrArr *a);
+/* Swaps the sparse slots and numeric properties of two arrays; each keeps
+ * its own match metadata (refresh of a cached typed view, llvm/dyn.ts). */
+void scr_arr_swap_indexed_ext(ScrArr *a, ScrArr *b);
 
 /* Trace entry point for cycle-capable arrays — stored in their collector
  * header and passed wherever a container stores an ARRAY payload's RC entry
