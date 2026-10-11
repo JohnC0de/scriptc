@@ -81,15 +81,6 @@ void __sanitizer_finish_switch_fiber(void *fake_stack_save, const void **bottom_
 #endif
 #endif
 
-/* ASan inflates stack frames severalfold (unoptimized locals + redzones),
- * so the sanitized lane gets proportionally bigger fiber stacks — same
- * headroom DISCIPLINE, instrumented scale. Keep the island's stack budget
- * (scr_island.c) at half of whichever size is active. 8MB under ASan is
- * the measured need: an engine call costs 64–96KB there, and a real
- * embedded graph entered FROM A FIBER (a commander action awaiting
- * generateText — zod parses inside promise chains) nests dozens of engine
- * frames; native POSIX stacks are mapped and committed lazily, so idle
- * fibers pay address space, not RSS. */
 #ifdef SCR_ASAN_FIBERS
 #define SCR_FIBER_STACK (8 * 1024 * 1024)
 #else
@@ -591,8 +582,6 @@ void scr_als_ctx_release(ScrAlsCtx *c) {
   free(c);
 }
 
-
-
 static SCR_TL ScrCtx scr_loop_ctx; /* the main stack (scheduler home) */
 static SCR_TL ScrFiber *scr_current = NULL;
 static SCR_TL long scr_fibers_live = 0;
@@ -612,10 +601,6 @@ static void scr_fiber_track(ScrFiber *fiber) { (void)fiber; }
 
 long scr_abandoned_fiber_count(void) { return scr_fibers_abandoned; }
 
-/* True while executing on an async fiber (vs the main stack). The island
- * sizes its engine stack budget per stack: fibers are small and fixed,
- * the main stack is the process's megabytes (scr_island.c isl_entry). */
-bool scr_on_fiber(void) { return scr_current != NULL; }
 void *scr_fiber_self(void) { return scr_current; }
 
 #ifdef __wasi__
@@ -677,8 +662,6 @@ static SCR_TL unsigned long scr_timer_seq = 0;
  * and by ref/unref. */
 static SCR_TL size_t scr_reffed_timers = 0;
 
-/* Exported: the island's timer machinery (scr_web.c) shares this clock so
- * its deadlines are comparable with the loop's. */
 double scr_now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -873,10 +856,6 @@ double scr_set_interval(ScrClosure *cb, double ms) {
   return (double)id;
 }
 
-/* A one-shot timer WITH a clear handle — the island's setTimeout (its
- * clearTimeout must cancel, unlike the static surface's clear-less
- * setTimeout). Rides the interval id space so scr_clear_interval serves
- * both; repeat_ms 0 keeps it one-shot at the firing site. */
 double scr_set_timeout_handle(ScrClosure *cb, double ms) {
   ms = scr_timer_coerce_ms(ms);
   unsigned long id = scr_interval_next_id++;
@@ -1046,10 +1025,6 @@ void scr_nticks_teardown(void) {
   scr_nt_tail = NULL;
 }
 
-/* Releases every armed timer — the island teardown calls this before the
- * engine dies so closures holding engine callbacks free first and the
- * counting allocator's zero-live audit holds (the loop only exits with
- * entries still armed on the uncaught/unhandled paths). */
 static void scr_immediates_teardown(void);
 void scr_timers_teardown(void) {
   for (size_t i = 0; i < scr_ntimers; i++) scr_closure_release(scr_timers[i].cb);
@@ -1931,10 +1906,6 @@ void scr_promise_rethrow_top_level(ScrPromise *p) {
   if (p->state == SCR_PROM_REJECTED) scr_promise_rethrow(p);
 }
 
-
-
-
-
 /* Fulfillment storers, called by the compiled trampolines / resolve thunks. */
 void scr_promise_fulfill_f64(ScrPromise *p, double v) {
   if (p->state != SCR_PROM_PENDING) return; /* first settle wins */
@@ -1987,14 +1958,6 @@ ScrStr *scr_await_str(ScrPromise *p) {
   return scr_await_settled(p) && p->payload ? scr_str_retain((ScrStr *)p->payload) : NULL;
 }
 
-/* REJECTS `p` with the exception pending in the ACTIVE cell (moved out —
- * the cell resets, so the caller returns to the engine/loop with a clean
- * cell) and wakes waiters; the rejection enters the unhandled ledger like
- * any other. The island → static promise bridge's rejection half: its
- * settle callback converts the engine reason into a pending exception
- * (the exception bridge's one conversion), then lands it here. A no-op
- * with nothing pending; an already-settled `p` just clears the cell
- * (first settle wins, like resolve-then-throw). */
 void scr_promise_reject_pending(ScrPromise *p) {
   if (!scr_exc_pending()) return;
   if (p->state == SCR_PROM_PENDING) {
@@ -2907,26 +2870,6 @@ static void scr_resume_fiber(ScrFiber *f) {
  * the wake pipe and fd 0 directly. */
 #define SCR_SIGNAL_POLL_MS 50.0
 
-/* The external io hook (scr_runtime.h): the dynamic island registers
- * engine-job draining + fetch transfer polling here. Static builds never
- * set it — both slots stay NULL and the loop is byte-identical in
- * behavior. */
-static SCR_TL bool (*scr_io_pending_fn)(void) = NULL;
-static SCR_TL void (*scr_io_poll_fn)(double max_wait_ms) = NULL;
-
-void scr_loop_set_io(bool (*pending)(void), void (*poll)(double)) {
-  scr_io_pending_fn = pending;
-  scr_io_poll_fn = poll;
-}
-
-/* The island's earliest armed timer deadline (HUGE_VAL when none): caps
- * the sleep below so an armed AbortSignal.timeout fires on time while
- * the loop waits on socket readiness — without keeping the loop alive by
- * itself (the liveness test never consults it, Node's unref'd timer). */
-static SCR_TL double (*scr_island_deadline_fn)(void) = NULL;
-
-void scr_loop_set_island_deadline(double (*fn)(void)) { scr_island_deadline_fn = fn; }
-
 /* The net hook (scr_net.c, when linked — the events-hook shape):
  * `pending` keeps the loop alive while servers/sockets are live,
  * `dispatch` fires at every turn top, and `pollfd` is the unit's poller
@@ -3197,7 +3140,6 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
           /* spawn failures settle regardless: their 'error' is a
            * next-tick event, delivered even on an unref'd child */
           scr_children_failed_pending() ||
-          (scr_io_pending_fn != NULL && scr_io_pending_fn()) ||
           (scr_events_pending_fn != NULL && scr_events_pending_fn()) ||
           (scr_net_pending_fn != NULL && scr_net_pending_fn()) ||
           (scr_dgram_pending_fn != NULL && scr_dgram_pending_fn()) ||
@@ -3217,7 +3159,6 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
     if (scr_stream_pending_fn != NULL && scr_stream_pending_fn()) continue;
     if (scr_nt_head != NULL) continue;
     bool kids = scr_children_pending();
-    bool io = scr_io_pending_fn != NULL && scr_io_pending_fn();
     bool events = scr_events_pending_fn != NULL && scr_events_pending_fn();
     bool net = scr_net_pending_fn != NULL && scr_net_pending_fn();
     bool dgram = scr_dgram_pending_fn != NULL && scr_dgram_pending_fn();
@@ -3232,7 +3173,7 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
      * Children follow the same rule: an unref'd child is still REAPED
      * while the loop runs (kids drives the sweeps and sleeps above) but
      * only reffed ones keep the process alive. */
-    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !io && !events && !net && !dgram && !watch && !ffi && !renames && !crypto && !workers) break;
+    if (scr_reffed_timers == 0 && scr_reffed_immediates == 0 && !scr_children_reffed_pending() && !events && !net && !dgram && !watch && !ffi && !renames && !crypto && !workers) break;
     /* Sleep to the earliest deadline, then run every due timer (each may
      * enqueue microtasks, which the next iteration drains first). Who
      * sleeps depends on what is pending:
@@ -3257,12 +3198,6 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
      * wait exactly like the portable child fallback so completion is noticed
      * promptly even when another poller owns the sleep. */
     if (renames && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
-    /* An armed island timer (AbortSignal.timeout) caps the sleep: it must
-     * fire on time even while the poller waits on socket readiness. */
-    if (scr_island_deadline_fn != NULL) {
-      double isl_due = scr_island_deadline_fn();
-      if (isl_due < due) due = isl_due;
-    }
     /* Pending immediates are always-ready work: no sleep — run due timers
      * (Node's timers phase precedes check), then the check phase below. */
     if (scr_pending_immediates > 0) due = now;
@@ -3279,22 +3214,12 @@ static bool scr_loop_run_pass(ScrPromise *top_level, bool first_checkpoint) {
 #endif
     bool evw = scr_events_watching_fn != NULL && scr_events_watching_fn();
 #ifdef SCR_WORKERS
-    if (workers && scr_workers_wait_fn && !io && !kids && !evw && !net && !dgram && !watch && !ffi && !renames && !crypto) {
+    if (workers && scr_workers_wait_fn && !kids && !evw && !net && !dgram && !watch && !ffi && !renames && !crypto) {
       scr_workers_wait_fn(due > now ? due - now : 0);
       now = scr_now_ms();
     } else
 #endif
-    if (io) {
-      if (kids && due > now + SCR_CHILD_POLL_MS) due = now + SCR_CHILD_POLL_MS;
-      /* Signals/stdin/net can't wake curl's fd wait (and its poll retries
-       * on EINTR), so they re-impose a coarser cap — bounded Ctrl-C and
-       * socket latency during a fetch, without the reap-granularity
-       * cost. */
-      else if ((evw || net || dgram || watch || ffi || workers) && due > now + SCR_SIGNAL_POLL_MS) due = now + SCR_SIGNAL_POLL_MS;
-      scr_io_poll_fn(due > now ? due - now : 0);
-      now = scr_now_ms();
-      if (scr_ready_len > 0) continue; /* io callbacks woke fibers */
-    } else if (evw || net || dgram || watch || ffi || workers) {
+    if (evw || net || dgram || watch || ffi || workers) {
 #if defined(_WIN32) || defined(__wasi__)
       /* The win32 arm, and WASI hosts whose poll_oneoff adapters do not
        * reliably wake for a closed inherited stdin pipe: the sleep is a capped nanosleep and
@@ -3548,20 +3473,6 @@ bool scr_loop_run(ScrPromise *top_level) {
   return rejection_failed;
 }
 
-/* The island's half of the unhandled-rejection report (scr_island.c
- * registers it at engine boot): called with print=true when the static
- * ledger below reported nothing — one report, one voice, like Node's
- * first-unhandled-rejection death. Returns whether the island had any.
- * Static builds never set it. */
-static SCR_TL bool (*scr_island_rejections_fn)(bool print) = NULL;
-static SCR_TL int (*scr_island_jobs_drain_fn)(void) = NULL;
-
-void scr_loop_set_island_rejections(bool (*fn)(bool print),
-                                    int (*drain_jobs)(void)) {
-  scr_island_rejections_fn = fn;
-  scr_island_jobs_drain_fn = drain_jobs;
-}
-
 /* ── process.on('unhandledRejection') ─────────────────────────────────
  * Dyn listeners are called per never-observed rejection at the completed
  * nextTick/microtask checkpoint. A registered listener suppresses the
@@ -3578,16 +3489,6 @@ SCR_TL bool (*scr_urj_deliver_fn)(ScrPromise *p) = NULL;
  * Snapshot the ledger: a listener can reject another promise, but that
  * new rejection belongs to the NEXT checkpoint rather than this report. */
 bool scr_report_unhandled_rejections(void) {
-  /* Static fibers drain before engine jobs in this runtime's documented
-   * island ordering. Complete BOTH halves of that microtask checkpoint
-   * before deciding either rejection ledger; engine reactions can attach
-   * a handler to a rejection that would otherwise look unhandled here.
-   * A host callback can wake a static fiber/tick, in which case the loop
-   * must drain that work before reporting too. */
-  if (scr_island_jobs_drain_fn != NULL) {
-    scr_island_jobs_drain_fn();
-    if (scr_ready_len > 0 || scr_nt_head != NULL) return false;
-  }
   bool any = false;
   bool crashed = false;
   size_t report_count = scr_nunhandled;
@@ -3658,10 +3559,6 @@ bool scr_report_unhandled_rejections(void) {
   if (crashed) {
     scr_exc_print_uncaught();
     return true;
-  }
-  if (scr_island_rejections_fn != NULL) {
-    bool island = scr_island_rejections_fn(!any);
-    any = any || island;
   }
   /* main returns 1 on a reported rejection — the 'exit' listeners (atexit)
    * must see that code, like Node's. */

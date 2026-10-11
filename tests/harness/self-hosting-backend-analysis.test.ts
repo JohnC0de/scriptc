@@ -66,7 +66,7 @@ test("the production optimization and backend analysis pipeline lowers entirely 
       "--input-type=module",
       "--eval",
       `import { analyze } from ${JSON.stringify(sourceApi)};
-     const { coverage } = analyze(process.argv[1], { dynamic: false });
+     const { coverage } = analyze(process.argv[1], {});
      console.log(JSON.stringify({ preflightFailed: coverage.preflightFailed, diagnostics: coverage.diagnostics, stats: coverage.stats }));`,
       entry,
     ],
@@ -77,7 +77,6 @@ test("the production optimization and backend analysis pipeline lowers entirely 
   expect(coverage.diagnostics).toEqual([]);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(3800);
   expect(coverage.stats.statementsFailed).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -94,7 +93,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: executable("stage"),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize,
       });
@@ -145,7 +143,6 @@ for (const backend of ["llvm"] as const) {
           outDir: dir,
           outPath: irPath,
           outputKind: "ir",
-          dynamic: false,
         });
         if (!emitted.ok)
           throw new Error(emitted.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

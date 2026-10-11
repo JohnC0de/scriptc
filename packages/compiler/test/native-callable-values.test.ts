@@ -59,7 +59,6 @@ console.log(handle.fd);
       );
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         sanitize,
         outDir: dir,
         outPath: join(dir, "program"),
@@ -109,24 +108,23 @@ function stopped(value) {
   return { done() { return "wrong"; } };
 }
 try { console.log(stopped("0").done()); }
-catch (error) { console.log(String(error).includes("SC2011")); }
+catch (error) { console.log(String(error).includes("SC2009")); }
 const first = { inspect };
 const second = { inspect };
 console.log(typeof first.inspect, first.inspect === second.inspect);
 for (const callback of [first.inspect, second.inspect]) {
   try { callback({}); }
-  catch (error) { console.log(String(error).includes("SC2011")); }
+  catch (error) { console.log(String(error).includes("SC2009")); }
 }
 `,
       );
       const entry = join(dir, "main.js");
       writeFileSync(entry, 'import "callbacks";');
-      const { coverage } = analyze(entry, { dynamic: false, npmStatic: "auto" });
+      const { coverage } = analyze(entry, { npmStatic: "auto" });
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.runtimeFences?.length).toBeGreaterThan(0);
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         npmStatic: "auto",
         sanitize,
         outDir: dir,

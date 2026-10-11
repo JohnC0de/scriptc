@@ -79,12 +79,7 @@ export function lowerArrayHofCall(
   const valueT = arrayValueType(lowerer, elem);
   if (booleanFilter) {
     if (valueT.kind === "union") lowerer.requireTruthyUnion(valueT.unionId, argNode);
-    if (
-      valueT.kind === "dyn" ||
-      valueT.kind === "jsval" ||
-      valueT.kind === "void" ||
-      isUnitType(valueT)
-    ) {
+    if (valueT.kind === "dyn" || valueT.kind === "void" || isUnitType(valueT)) {
       lowerer.badType(argNode, lowerer.typeOf(argNode));
     }
   }
@@ -101,10 +96,8 @@ export function lowerArrayHofCall(
   }
   if (method === "map") requireProducedArrayElement(lowerer, call, "'.map()'", fnRet);
   // JS applies ToBoolean to whatever the predicate answers, so a non-bool
-  // result is not an error — the filter loop wraps the call in the same
-  // toBool an `if` statement would apply. The island/dyn shapes, whose
-  // truthiness needs the engine, and void, whose real answer the ABI has
-  // already discarded, keep the fence. No separate
+  // result is not an error when its truthiness is represented. Void,
+  // whose real answer the ABI has already discarded, keeps the fence. No separate
   // requireTruthyUnion call belongs here: its check (no dyn/caught arm)
   // IS filterPredicateOk's union branch, so it could never speak.
   if (method === "filter" && !filterPredicateOk(lowerer, fnRet)) {
@@ -258,11 +251,6 @@ function truthyFilterCallback(
   return { kind: "closure", fnName: name, captures: [], type: fnT, loc };
 }
 
-/** The predicate result kinds `.filter()` accepts. JS applies ToBoolean to
- * whatever the callback answers, so a bool is not required: the scalars and
- * the reference kinds have constant or by-value answers, checked-dynamic
- * values ask their runtime kind, and a union is fine when every arm does.
- * void/jsval/caught stay out — see below. */
 function filterPredicateOk(lowerer: Lowerer, ret: IrType): boolean {
   if (ret.kind === "bool") return true;
   // VOID is a TYPE erasure, not a runtime value: TS lets a value-returning
@@ -272,10 +260,10 @@ function filterPredicateOk(lowerer: Lowerer, ret: IrType): boolean {
   // falsy would silently answer [] where Node answers [1]. Fenced until
   // the returned value can be preserved through the void ABI.
   // A checked-dynamic value retains its runtime kind, so scr_dyn_truthy can
-  // apply JavaScript ToBoolean exactly. Island and caught values stay out.
+
   if (ret.kind === "void") return false;
   if (ret.kind === "dyn") return true;
-  if (ret.kind === "jsval" || ret.kind === "caught") return false;
+  if (ret.kind === "caught") return false;
   if (ret.kind === "union") {
     const def = lowerer.unions.get(ret.unionId);
     return def !== undefined && def.arms.every((a) => a.kind !== "dyn" && a.kind !== "caught");
@@ -338,7 +326,6 @@ function lowerFastCallback(
     typeEquals(valueT, elem) ||
     elem.kind === "union" ||
     elem.kind === "dyn" ||
-    elem.kind === "jsval" ||
     isUnitType(elem)
   )
     return null;
@@ -528,13 +515,7 @@ export function lowerArrayUnionHofCall(
   const arrays = def.arms as (IrType & { kind: "array" })[];
   const valueArms: IrType[] = [];
   const addValueArm = (type: IrType): boolean => {
-    if (
-      type.kind === "dyn" ||
-      type.kind === "jsval" ||
-      type.kind === "caught" ||
-      type.kind === "void"
-    )
-      return false;
+    if (type.kind === "dyn" || type.kind === "caught" || type.kind === "void") return false;
     if (type.kind === "union") {
       const inner = lowerer.unions.get(type.unionId);
       if (!inner) return false;
@@ -1005,7 +986,7 @@ export function lowerArrayFindLikeCall(
     fnRet.kind === "dyn" ||
     (fnRet.kind === "union" &&
       (lowerer.unions.get(fnRet.unionId)?.arms ?? []).every(
-        (a) => a.kind !== "dyn" && a.kind !== "caught" && a.kind !== "jsval",
+        (a) => a.kind !== "dyn" && a.kind !== "caught",
       ));
   if (!truthyRet) lowerer.badType(argNode, lowerer.typeOf(argNode));
   const last = method === "findLast" || method === "findLastIndex";
@@ -1384,7 +1365,6 @@ export function lowerArrayFlatMapCall(
   const fnRet = fnArg.type.ret;
   if (
     fnRet.kind === "dyn" ||
-    fnRet.kind === "jsval" ||
     (fnRet.kind === "record" && lowerer.shapes.get(fnRet.shapeId)?.tuple)
   ) {
     return {
@@ -2096,12 +2076,10 @@ export function lowerDynArrayFlatMapCall(
     // A DYNAMIC-returning callback (`plugins.flatMap((plugin) =>
     // plugin.languages ?? [])` — the getSupportInfo shape, where the
     // callback's members ride the checked-dynamic tree): the call dispatches on the
-    // RECEIVER's runtime kind (dynInvoke) with the callback boxed —
-    // a wrapped ISLAND receiver runs the ENGINE's own JS-exact
-    // Array.prototype.flatMap (the routed-ops lane), a native dyn
-    // array runs the runtime's flatMap, and non-arrays throw Node's
+    // RECEIVER's runtime kind (dynInvoke) with the callback boxed. A native
+    // dyn array runs the runtime's flatMap, and non-arrays throw Node's
     // TypeError. The result stays dyn, checked per use.
-    if (ret.kind === "dyn" || ret.kind === "jsval") {
+    if (ret.kind === "dyn") {
       const boxed: IrExpr = { kind: "dynFrom", value: fnArg, type: DYN, loc };
       return {
         kind: "dynInvoke",

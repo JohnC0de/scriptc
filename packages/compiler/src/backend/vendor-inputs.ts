@@ -4,7 +4,6 @@ export const MBEDTLS_VERSION = "3.6.7";
 export const ZLIB_VERSION = "1.3.1";
 /** Exact translation-unit membership shared by cache builds and external
  * source-pack recipes. */
-export const QJS_ENGINE_SOURCES = ["dtoa.c", "libregexp.c", "libunicode.c", "quickjs.c"] as const;
 export const LRE_SOURCES = ["libregexp.c", "libunicode.c"] as const;
 export const ZLIB_SOURCES = [
   "adler32.c",

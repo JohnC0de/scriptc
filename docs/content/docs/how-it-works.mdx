@@ -68,14 +68,14 @@ Without `-o`, artifacts are written to `.scriptc/` next to the input. Different 
 
 ### External linking
 
-Program objects define `main` and leave selected `scr_*` runtime functions undefined. A strong reference to `scr_runtime_abi_v8` checks runtime compatibility at link time.
+Program objects define `main` and leave selected `scr_*` runtime functions undefined. A strong reference to `scr_runtime_abi_v9` checks runtime compatibility at link time.
 
 `--print=native-link-info` emits the program object and a JSON recipe containing the runtime pack and link order for external builds. This object ABI is experimental and requires an exact runtime version. See [Native Program Objects](/docs/native-objects) for examples.
 
 ## Native runtime
 
-- **Memory:** Values use reference counting. Acyclic values are freed when their last reference is released, and a cycle collector runs at defined collection points. Some cycles involving opaque native values or the embedded engine can remain allocated.
-- **Concurrency:** `async`/`await` uses stackful fibers. The native event loop schedules microtasks, timers, and I/O, using kqueue on macOS and epoll on Linux. Static tasks and embedded-engine jobs use separate queues; their interleaving can differ from Node.js.
+- **Memory:** Values use reference counting. Acyclic values are freed when their last reference is released, and a cycle collector runs at defined collection points. Some cycles involving opaque native values can remain allocated.
+- **Concurrency:** `async`/`await` uses stackful fibers. The native event loop schedules microtasks, timers, and I/O, using kqueue on macOS and epoll on Linux.
 - **Networking:** Supported `net`, `http`, `https`, `tls`, `dgram`, and `dns` APIs use native implementations. TLS uses vendored mbedTLS.
 - **Numbers:** Values use JavaScript's double-precision representation. Number-to-string formatting uses shortest-roundtrip output and is tested against Node.js.
 - **Regular expressions:** The runtime uses QuickJS's regular-expression bytecode interpreter, linked into programs that use regex operations.
@@ -90,11 +90,11 @@ The sanitizer lane runs the corpus with AddressSanitizer and a reference-count a
 
 Test coverage provides evidence for the cases exercised. It does not establish complete compatibility with Node.js.
 
-## Embedded JavaScript engine
+<span id="embedded-javascript-engine" />
 
-`--dynamic` includes quickjs-ng for npm dependencies and supported `any`-typed code. The engine has its own heap and microtask queue. Conversions between static and dynamic values copy data, and conversions to static types validate it at runtime. A mismatched value raises a catchable `TypeError`.
+## JavaScript at build time
 
-See [npm Dependencies](/docs/dependencies) for package execution, value conversion, and experimental static package options.
+Application and dependency code compile to native instructions. The compiler retains an isolated JavaScript evaluator for `comptime`; its results become native literals. The native compiler uses QuickJS for that build-time evaluator. The runtime retains QuickJS-derived regular-expression and Unicode libraries without linking the JavaScript execution engine into application binaries.
 
 ## Repository layout
 
@@ -116,7 +116,7 @@ See [npm Dependencies](/docs/dependencies) for package execution, value conversi
     </tr>
     <tr>
       <td><code>packages/runtime</code></td>
-      <td>C runtime, reference counting and cycle collection, fibers, event loop, networking, and engine integration.</td>
+      <td>C runtime, reference counting and cycle collection, fibers, event loop, networking,.</td>
     </tr>
     <tr>
       <td><code>packages/runtime-*</code></td>

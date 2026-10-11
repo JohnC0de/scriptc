@@ -1,93 +1,4 @@
-/* node:net — the inbound-networking slice: TCP servers and sockets over
- * the event loop's readiness poller, the first LISTENING capability of
- * the runtime. The poller is the scr_platform.h contract — kqueue on
- * macOS/BSD (scr_loop_kqueue.c, a stateless spelling of the syscall
- * sequences this file inlined historically), epoll+timerfd on Linux
- * (scr_loop_epoll.c). Two Linux-only obligations shape this file's use
- * of the seam: a watched fd is scrp_forget-ed BEFORE close(2) (epoll
- * registrations can outlive a close; the kqueue backend's forget is a
- * no-op so macOS behavior is untouched), and socket sends go through
- * scr_net_send (MSG_NOSIGNAL where it exists) because Linux has no
- * SO_NOSIGPIPE — a write to a closed peer must surface as an 'error'
- * event, never a process-killing SIGPIPE.
- *
- * ── Design note (the server core) ────────────────────────────────────
- *
- * Object model. Two refcounted handle kinds, both LEAN allocations (no
- * cycle header — the child precedent): ScrNetServer (a listener: fd,
- * bound port, connection/error/close listener lists) and ScrNetSocket (a
- * connection: fd, a state machine over the read/write halves, a growable
- * write buffer, data/end/close/error/connect listener lists, an optional
- * pipe destination, and — for accepted sockets — a +1 backref to the
- * owning server so its connection count can gate the server's 'close').
- * Listeners MOVE in (+1) and are released when the handle settles (a
- * socket's 'close' fired, a server's 'close' fired, or the listen/connect
- * failure delivered) — so a listener capturing its own handle cannot
- * cycle past settlement, exactly the ScrChild ownership story. Handles a
- * program abandons at exit are released by the unit's atexit cleanup, so
- * the RC audit never mistakes a process-lifetime server for a leak.
- *
- * Event dispatch. One poller owned by this unit (lazily created), fds all
- * non-blocking. The loop (scr_async.c) calls scr_net_dispatch() at every
- * turn top — the scr_events.c hook shape — which alternates two phases
- * until neither has work: (1) a SWEEP delivering deferred emits
- * ('listening' callbacks, listen/connect failures, socket 'close', then
- * server 'close' — socket-before-server order is what lets a drained
- * server observe its last connection die in the same pass), and (2) a
- * zero-timeout poller drain (accepts, reads, connect completions, write
- * flushes) whose callbacks fire directly, macrotask-style on the main
- * stack. The alternation stops early when a callback enqueued microtasks
- * (scr_loop_has_ready) so promise jobs interleave between event batches,
- * or when a callback threw (the loop surfaces the uncaught exception).
- * Between turns the loop's idle poll(2) watches this unit's poller FD —
- * kqueue and epoll fds both poll readable while events are pending — so socket
- * readiness ends the sleep immediately; while curl's io poll owns the
- * sleep instead (a --dynamic fetch in flight), net latency is capped at
- * the signal-poll granularity, like signals.
- *
- * Read model. Sockets are CONSUMER-DRIVEN like the stdin slice: the read
- * filter is armed only while a consumer exists (a 'data' listener or a
- * pipe destination), one read(2) per arrived chunk, delivered borrowed to
- * the listener snapshot (Node's emit-over-a-copy semantics; `once`
- * entries leave the live list before running) and appended to the pipe
- * destination. EOF fires 'end', then — allowHalfOpen is always false, the
- * Node default — ends the write half; when both halves are done the fd
- * closes and 'close' fires on the next sweep.
- *
- * Write model. write() attempts the syscall immediately when nothing is
- * buffered (the common case: small responses go out in one call) and
- * buffers the remainder with the write filter armed; end() marks the
- * write half ENDING so the FIN (shutdown) goes out when the buffer
- * drains. Backpressure is not modeled — Node's write() returns false and
- * keeps buffering; this write() is void and buffers without bound.
- *
- * Loop liveness. A handle keeps the process alive from listen()/connect()
- * until its 'close' delivers (scr_net_pending — the loop's exhaustion
- * test): a listening server is a live interval, server.close() releases
- * once every accepted connection drains, and an open socket holds the
- * loop like Node's active TCP handle. A server that never listened and a
- * socket already closed hold nothing.
- *
- * Close semantics, Node-matched: server.close() stops accepting NOW
- * (the listening fd closes) and fires close callbacks + 'close' when the
- * connection count reaches zero; socket 'end' precedes 'close';
- * connect/listen failures fire 'error' then 'close' ('error' with no
- * listener prints the error and exits 1 — the unhandled-'error'
- * EventEmitter behavior, the child precedent); listeners registered
- * after settlement release immediately and never fire; 'listening' (the
- * listen callback) is deferred to the next dispatch pass, Node's
- * next-tick emit.
- *
- * The differential harness pattern (tests/harness/server.test.ts): a
- * LISTENING program cannot be compared by stdout alone — something must
- * talk to it. Each fixture binds port 0, reports the real port over
- * stderr (`PORT <n>\n` — stderr is never compared), and a per-case Node
- * driver script issues the same requests against both lanes; the SERVER
- * program's stdout/exit code and the DRIVER's stdout must each match
- * byte-for-byte between the Node lane and the compiled lane. Ephemeral
- * ports never appear in compared output. This is the template TLS/http2
- * lanes inherit.
- */
+
 #include "scr_platform.h"
 #include "scr_runtime.h"
 
@@ -1886,14 +1797,7 @@ static void scr_net_server_accept(ScrNetServer *srv) {
  * 127.0.0.1 — the documented divergence from Node's family autoselect).
  * The connect callback registers as once('connect'). Never throws: every
  * failure is the async 'error' event, like Node. */
-/* Blocking first-answer hostname resolution for the CLIENT bridges (the
- * native fetch, the island's http/https client) — the dns.lookup
- * precedent (scr_dgram.c): getaddrinfo runs AT CALL TIME, first answer
- * wins. Returns +1: the resolved IP string, or a RETAIN of `host` when it
- * is already an IP literal or localhost (scr_net_connect's own arms) or
- * unresolvable — the dial's deferred "getaddrinfo ENOTFOUND host" error
- * is then Node's exact cause shape. node:net's own connect surface stays
- * resolver-less on purpose (Node's async lookup semantics are not this). */
+
 ScrStr *scr_net_blocking_lookup(ScrStr *host /*borrowed*/) {
   if (host->len == 9 && memcmp(host->data, "localhost", 9) == 0) return scr_str_retain(host);
   struct in_addr a4;

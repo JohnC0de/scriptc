@@ -244,7 +244,7 @@ describe("Node 24 fetch compatibility profile", () => {
       if (entry.status === "static") {
         expect(entry.code, `${entry.id}: static rows have no refusal code`).toBeUndefined();
         expect(entry.reason, `${entry.id}: static rows are explained by evidence`).toBeUndefined();
-      } else if (entry.status === "dynamic-only" || entry.status === "unsupported") {
+      } else if (entry.status === "unsupported") {
         expect(entry.code, `${entry.id}: non-static rows use the stdlib fence`).toBe("SC2020");
         expect(entry.reason?.length, `${entry.id}: missing gap rationale`).toBeGreaterThan(0);
       } else {
@@ -253,7 +253,6 @@ describe("Node 24 fetch compatibility profile", () => {
       }
     }
 
-    expect(entries.some((entry) => entry.status === "dynamic-only")).toBe(true);
     expect(entries.some((entry) => entry.status === "unsupported")).toBe(true);
     expect(entries.some((entry) => entry.status === "out-of-scope")).toBe(true);
     expect(profile.inventory.excludedInterfaces.length).toBeGreaterThan(0);

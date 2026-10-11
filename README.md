@@ -7,9 +7,9 @@
   <a href="https://www.npmjs.com/package/scriptc"><img alt="npm downloads per month: scriptc" src="https://img.shields.io/npm/dm/scriptc.svg?style=for-the-badge&amp;labelColor=000000&amp;label=npm%20downloads" height="28"></a>
 </p>
 
-scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. It uses TypeScript's type information to compile supported code to native instructions. Static builds run without Node.js or a JavaScript engine.
+scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. It uses TypeScript's type information to compile supported code to native instructions. Executables run without Node.js or a JavaScript engine.
 
-For npm dependencies and `any`-typed code, enable `--dynamic` to include the embedded [quickjs-ng](https://github.com/quickjs-ng/quickjs) engine. Dependency JavaScript is included at build time.
+Application code and eligible npm dependencies compile to native instructions. Unsupported operations produce diagnostics; there is no runtime JavaScript engine fallback.
 
 scriptc is experimental and supports a subset of JavaScript, TypeScript, and Node.js APIs. See the [limitations](https://scriptc.dev/docs/limitations) and [Node.js compatibility reference](https://scriptc.dev/compatibility) before using it for an existing project.
 
@@ -51,7 +51,7 @@ hello, scriptc
 
 These examples use POSIX shell syntax. On Windows, build `hello.exe` and run it with `.\hello.exe`.
 
-Use `scriptc coverage hello.ts` to check which operations compile statically, require dynamic execution, or are unsupported. See [coverage reports](https://scriptc.dev/docs/coverage) for details.
+Use `scriptc coverage hello.ts` to check which operations compile statically and which operations are unsupported. See [coverage reports](https://scriptc.dev/docs/coverage) for details.
 
 ## Use Node APIs
 
@@ -78,7 +78,7 @@ listening on http://localhost:8080
 
 ## Use npm packages
 
-Pass `--dynamic` to embed an npm package's JavaScript in the executable. The result does not read `node_modules` at runtime.
+Eligible npm packages compile to native code by default. The executable does not read `node_modules` at runtime.
 
 Create `cli.ts`:
 
@@ -90,12 +90,12 @@ console.log(pc.green("hello from scriptc"));
 
 ```console
 $ npm install picocolors
-$ scriptc build cli.ts --dynamic -o cli
+$ scriptc build cli.ts -o cli
 $ ./cli
 hello from scriptc
 ```
 
-Enabling `--dynamic` does not add support for unsupported statically typed calls. See [npm dependencies](https://scriptc.dev/docs/dependencies) for package resolution and the boundary between static and dynamic code.
+Package support is partial. See [npm dependencies](https://scriptc.dev/docs/dependencies) for eligibility, package resolution, and compilation diagnostics.
 
 ## Documentation
 

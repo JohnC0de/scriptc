@@ -36,7 +36,6 @@ import {
   type IrLocal,
   type IrStmt,
   type IrType,
-  JSVAL,
   STRING,
   type SrcLoc,
   UNDEFINED_T,
@@ -51,11 +50,8 @@ import {
   PoisonError,
   boundIdentifiersOf,
   dynFallbackType,
-  importCallHandleType,
   neverTaintedJsType,
   staticImportNamespaceType,
-  stmtUsesIsland,
-  uncheckedOverloadHandleCall,
 } from "./lowerer.js";
 import { enforceLibBoundary, lowerSurplusCalls } from "./lib-boundary.js";
 import {
@@ -171,7 +167,7 @@ import {
   UNSUPPORTED,
   checkerPanicDiag,
   isCheckerPanic,
-  requiresDynamicDiag,
+  unsupportedNativeExecutionDiag,
 } from "../../diagnostics/diagnostic.js";
 import {
   isParseArgsDynTypeName,
@@ -661,14 +657,6 @@ export function lowerStmts(lowerer: Lowerer, stmts: readonly ts.Statement[]): Ir
           enforceLibBoundary(lowerer, rewritten);
           if (!appended) out.push(...rewritten);
         }
-        // Island accounting (--dynamic coverage): a statement that lowered
-        // but carries island constructs compiles DYNAMICALLY — its work
-        // runs in the embedded engine, and the report says so instead of
-        // counting it as static.
-        if (!lowerer.suppressStats && lowered && stmtUsesIsland(lowered)) {
-          lowerer.stats.statementsIsland++;
-          if (sf !== undefined) lowerer.bumpFileStat(sf.fileName, "island");
-        }
         // A JS statement that lowered CLEAN can still have flushed
         // DEFERRED collection diagnostics (a symbol lookup on an alias
         // resolves through flushDeferred — informational here, not a
@@ -740,16 +728,6 @@ export function lowerStmts(lowerer: Lowerer, stmts: readonly ts.Statement[]): Ir
   return out;
 }
 
-/** The TDZ kinds: pointer-backed representations, where the box's empty
- * NULL slot IS the not-yet-initialized sentinel — plus the scalars
- * (f64/bool), whose TDZ boxes store a one-element ARRAY cell so the
- * empty-slot sentinel still works (a scalar slot has no spare state:
- * every bit pattern is a legal value — the setTimeout-handle shape,
- * `clearTimeout(timer)` captured above `const timer = setTimeout(...)`).
- * Checked-dynamic values use ref boxes with their own retain/release;
- * a NULL payload remains distinct from the allocated undefined value.
- * caught/jsval keep their existing capture fences. Unit-only types
- * never carry a useful forward capture. */
 const TDZ_KINDS = new Set<IrType["kind"]>([
   "func",
   "string",
@@ -979,26 +957,7 @@ function varBindingType(lowerer: Lowerer, nameNode: ts.Identifier): IrType | nul
     if (shape && shape.fields.length === 0 && !shape.indexValue && !shape.tuple) type = DYN;
   }
   if (!type) type = dynFallbackType(lowerer, nameNode, lowerer.typeOf(nameNode));
-  // `var p = import("./m")` in a function body: the hoisted slot holds
-  // the island promise/handle — the import expression's only production
-  // (lowerVarDecl's rule for block-scoped bindings).
-  if (
-    lowerer.dynamic &&
-    ts.isVariableDeclaration(nameNode.parent) &&
-    nameNode.parent.name === nameNode
-  ) {
-    type =
-      importCallHandleType(nameNode.parent.initializer) ??
-      // An unchecked-overload call result stores the handle, exactly the
-      // let/const rule (see uncheckedOverloadHandleCall).
-      (uncheckedOverloadHandleCall(lowerer, nameNode.parent.initializer) ? JSVAL : null) ??
-      type;
-  }
-  if (
-    !lowerer.dynamic &&
-    ts.isVariableDeclaration(nameNode.parent) &&
-    nameNode.parent.name === nameNode
-  ) {
+  if (ts.isVariableDeclaration(nameNode.parent) && nameNode.parent.name === nameNode) {
     type = staticImportNamespaceType(lowerer, nameNode.parent.initializer) ?? type;
   }
   if (!type || type.kind === "void") return null;
@@ -1054,7 +1013,7 @@ function hoistVarBinding(lowerer: Lowerer, symbol: ts.Symbol, nameNode: ts.Ident
   lowerer.ctx.scopes[0]!.set(symbol, local);
   // A checked-dynamic slot holds the dyn undefined (a NULL dyn is a
   // trap); everything else rides unassignedSlotInit (interned union arm,
-  // engine undefined for jsval).
+
   const wrapped =
     type.kind === "dyn"
       ? dynUndefinedExpr(locOf(nameNode))
@@ -1099,10 +1058,8 @@ export function predeclareForwardVar(lowerer: Lowerer, symbol: ts.Symbol): boole
   if (!owner) return false;
   const ctx = owner.ctx;
   if (ctx.hoistedVars.has(symbol)) return false; // would have resolved
-  // Only a slot that can hold `undefined` can carry the pre-
-  // initialization reads: an undefined-armed union (the interned arm),
-  // a checked-dynamic binding (the dyn undefined), or a jsval 'any'
-  // binding (the engine's undefined).
+  // Only a slot that can hold `undefined` can carry pre-initialization
+  // reads: an undefined-armed union or a native checked-value binding.
   const type = varBindingType(lowerer, nameNode);
   if (!type) return false;
   const wrapped =
@@ -1789,20 +1746,13 @@ export function lowerDestructuringDecl(
   const parseArgsDynObject =
     init.type.kind === "dyn" &&
     isParseArgsDynCheckerType(lowerer, lowerer.typeOf(decl.initializer));
-  // A TS `any`-origin source whose lowered value is NOT a destructurable
-  // shape (`var { x } = <any>0` — the cast erases to the f64; a dyn
-  // value — the checked-dynamic tree has no destructure): JS reads the properties off
-  // whatever the value is (a number answers undefined) — engine
-  // semantics, the dynamic-family fence. Record and array sources fall
-  // through to their lowerings, island handles to theirs (--dynamic
-  // owns this construct), and JS files keep their per-site runtime
-  // fences unchanged.
+  // An `any`-origin source needs a represented record or array shape for
+  // destructuring. JS files retain their per-site runtime fences.
   if (
     lowerer.anyOrigin(decl.initializer) &&
     !isJsSourceFile(decl.getSourceFile()) &&
     init.type.kind !== "record" &&
-    init.type.kind !== "array" &&
-    init.type.kind !== "jsval"
+    init.type.kind !== "array"
   ) {
     lowerer.anyOpFence("destructuring", decl);
   }
@@ -1826,21 +1776,8 @@ export function lowerDestructuringDecl(
         : `object destructuring of non-record values (the source is '${lowerer.checker.typeToString(lowerer.typeOf(decl.initializer))}'-typed)`,
     );
   }
-  // PRIMITIVE and unit sources (`let { toString } = 1`, `const [c] =
-  // "xy"`, `var [] = null`): JS destructures any value by reading
-  // through its wrapper object — prototype members included — or throws
-  // its TypeError on null/undefined; both live in the engine. When the
-  // pattern has an engine form, --dynamic marshals the value in and
-  // runs the REAL pattern (lowerJsvalBindingPattern); a static build
-  // reports the dynamic-family choice instead of the dead-end type
-  // recitation. STRING sources whose pattern the static path claims
-  // whole (staticStringPattern — code-point positions, `length`
-  // bindings) skip the gate in STATIC builds: lowerBindingPattern's
-  // string branches are exact there, and the diagnostic would report a
-  // dynamic-engine dependency the program does not have. --dynamic
-  // keeps the engine route for every string pattern — the engine binds
-  // undefined past the last code point where the static chars array
-  // inherits the array divergence's trap.
+  // Primitive destructuring requires JS wrapper coercion. Only string
+  // patterns fully handled by staticStringPattern have native lowering.
   if (
     (init.type.kind === "f64" ||
       init.type.kind === "bool" ||
@@ -1848,23 +1785,19 @@ export function lowerDestructuringDecl(
       isUnitType(init.type)) &&
     !isJsSourceFile(decl.getSourceFile()) &&
     !(
-      !lowerer.dynamic &&
       init.type.kind === "string" &&
       staticStringPattern(lowerer, decl.name as ts.ArrayBindingPattern | ts.ObjectBindingPattern)
-    ) &&
-    enginePatternSpec(lowerer, decl.name as ts.ArrayBindingPattern | ts.ObjectBindingPattern) !==
-      null
+    )
   ) {
-    if (!lowerer.dynamic) {
+    {
       lowerer.pushDiag(
-        requiresDynamicDiag(
-          `destructuring '${lowerer.fmt(init.type)}' values (the engine reads through JS's wrapper coercion)`,
+        unsupportedNativeExecutionDiag(
+          `destructuring '${lowerer.fmt(init.type)}' values through JavaScript wrapper coercion`,
           locOf(decl),
         ),
       );
       throw new PoisonError();
     }
-    init = lowerer.coerceToExpected(init, JSVAL);
   }
   const out: IrStmt[] = [];
   // JS: a union source with exactly ONE destructurable arm beside unit
@@ -2936,13 +2869,6 @@ function patternBindingType(lowerer: Lowerer, name: ts.BindingName): IrType | nu
   );
 }
 
-/** The STATIC property name of a destructuring key: identifiers spell
- * themselves, string/numeric-literal keys and COMPUTED keys fold through
- * foldedStringKeyOf — pure single-name expressions only (`{ [k]: v }`
- * where k's checker type spells one property name; tsc late-bound the
- * source's field under exactly that name, and pure keys make skipping
- * the evaluation exact). Null for runtime-valued keys — the callers
- * fence, or route island sources to the engine pattern. */
 function patternKeyNameOf(lowerer: Lowerer, prop: ts.PropertyName): string | null {
   if (ts.isIdentifier(prop) || ts.isPrivateIdentifier(prop)) return prop.text;
   if (ts.isComputedPropertyName(prop)) return lowerer.foldedStringKeyOf(prop.expression);
@@ -3008,16 +2934,6 @@ function checkerStringSource(lowerer: Lowerer, e: ts.Expression): boolean {
   return stringLike(lowerer.typeOf(e));
 }
 
-/** True when a pattern over a STRING source lowers statically whole —
- * every element a form the chars-array/wrapper-read desugars carry.
- * Array patterns take positions, holes, defaults, rest (a nested rest
- * pattern must be an ARRAY pattern — it destructures the packed
- * string[]), and nested patterns, whose elements are single code
- * points and recurse through this same test. Object patterns take
- * `length` bindings — shorthand, renamed, or (dead-)defaulted.
- * Anything else — wrapper methods, computed keys, rest over the
- * wrapper — keeps the engine gate (--dynamic runs the real pattern;
- * a static build reports the dynamic-family choice). */
 function staticStringPattern(
   lowerer: Lowerer,
   pattern: ts.ArrayBindingPattern | ts.ObjectBindingPattern,
@@ -3805,10 +3721,6 @@ function classInstanceRestValue(
   return { kind: "recordLit", fields, type: restT, loc };
 }
 
-/** The fences the island's element-wise object path shares: no rest
- * (surplus packing over a handle) and no defaults (an engine undefined
- * test) — the static positions now take both through their own
- * machinery above. */
 export function checkBindingElement(
   lowerer: Lowerer,
   el: ts.BindingElement,
@@ -3818,362 +3730,16 @@ export function checkBindingElement(
     lowerer.unsupported(
       "SC1031",
       el,
-      "rest elements in destructuring patterns over island sources",
+      "rest elements in destructuring patterns over checked-value sources",
     );
   }
   if (el.initializer && !allowDefault) {
-    lowerer.unsupported("SC1031", el, "defaults in destructuring positions over island sources");
+    lowerer.unsupported(
+      "SC1031",
+      el,
+      "defaults in destructuring positions over checked-value sources",
+    );
   }
-}
-
-/** The JS source text for a pattern default the ENGINE can evaluate —
- * side-effect-free literal data whose value cannot depend on compiled
- * scope: numeric/string/boolean/null literals (unary minus included),
- * provably-undefined expressions, and array/object literals of those.
- * Null for everything else (a default referencing compiled bindings or
- * calling functions has no honest engine form). */
-function transportableDefaultText(lowerer: Lowerer, e: ts.Expression): string | null {
-  while (ts.isParenthesizedExpression(e)) e = e.expression;
-  if (ts.isNumericLiteral(e)) return e.text;
-  if (
-    ts.isPrefixUnaryExpression(e) &&
-    e.operator === ts.SyntaxKind.MinusToken &&
-    ts.isNumericLiteral(e.operand)
-  ) {
-    return `-${e.operand.text}`;
-  }
-  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return JSON.stringify(e.text);
-  if (e.kind === ts.SyntaxKind.TrueKeyword) return "true";
-  if (e.kind === ts.SyntaxKind.FalseKeyword) return "false";
-  if (e.kind === ts.SyntaxKind.NullKeyword) return "null";
-  // Any pure identifier whose CHECKER type is the undefined type holds
-  // undefined (shadowing included — a value of type undefined is
-  // undefined).
-  if (ts.isIdentifier(e) && (lowerer.typeOf(e).flags & ts.TypeFlags.Undefined) !== 0)
-    return "(void 0)";
-  if (ts.isArrayLiteralExpression(e)) {
-    const parts: string[] = [];
-    for (const elem of e.elements) {
-      if (ts.isOmittedExpression(elem)) {
-        parts.push("");
-        continue;
-      }
-      const t = transportableDefaultText(lowerer, elem);
-      if (t === null) return null;
-      parts.push(t);
-    }
-    return `[${parts.join(",")}]`;
-  }
-  if (ts.isObjectLiteralExpression(e)) {
-    const parts: string[] = [];
-    for (const prop of e.properties) {
-      if (!ts.isPropertyAssignment(prop)) return null;
-      let key: string;
-      if (
-        ts.isIdentifier(prop.name) ||
-        ts.isStringLiteral(prop.name) ||
-        ts.isNumericLiteral(prop.name)
-      ) {
-        key = JSON.stringify(prop.name.text);
-      } else {
-        return null;
-      }
-      const t = transportableDefaultText(lowerer, prop.initializer);
-      if (t === null) return null;
-      parts.push(`[${key}]:${t}`);
-    }
-    return `{${parts.join(",")}}`;
-  }
-  return null;
-}
-
-/** A declaration pattern rebuilt as ENGINE source with every bound name
- * renamed __0..__n (pattern order): holes, nesting, rest, and
- * transportable defaults all survive verbatim, so the engine runs the
- * REAL pattern — the iterator protocol on array patterns,
- * RequireObjectCoercible on object patterns, JS's own default rule.
- * Null when any element has no engine form (computed keys — a compiled
- * expression the pattern text cannot carry — or untransportable
- * defaults). */
-function enginePatternSpec(
-  lowerer: Lowerer,
-  pattern: ts.ArrayBindingPattern | ts.ObjectBindingPattern,
-): { text: string; binds: ts.Identifier[]; extras: ts.Expression[] } | null {
-  const binds: ts.Identifier[] = [];
-  const extras: ts.Expression[] = [];
-  // Every name the pattern itself binds, by text: a default referencing
-  // one is JS's earlier-element-in-scope (or TDZ) rule, which the
-  // pre-evaluated extras below cannot honor — those defaults have no
-  // engine form here.
-  const ownNames = new Set<string>();
-  const collectOwn = (p: ts.ArrayBindingPattern | ts.ObjectBindingPattern): void => {
-    for (const el of p.elements) {
-      if (ts.isOmittedExpression(el) || el.name === undefined) continue;
-      if (ts.isIdentifier(el.name)) ownNames.add(el.name.text);
-      else collectOwn(el.name);
-    }
-  };
-  collectOwn(pattern);
-  // A key or default with no literal engine text but a COMPILED-SCOPE
-  // form the engine can run exactly:
-  // - a plain identifier the pattern does not itself bind (`{ p: {} =
-  //   a } = a` with `a: any`) passes in as an extra parameter —
-  //   pre-evaluation of a bare variable read is unobservable (no side
-  //   effects, and the engine call is atomic);
-  // - an identifier bound by an EARLIER element of this pattern spells
-  //   its own temp (`[{ ...a }, b = a]` — the engine's mid-pattern
-  //   scope IS JS's, so the reference reads the just-bound value);
-  //   same-element and later names have no honest form (TDZ vs the
-  //   temps' var-undefined) and bail;
-  // - a CALL of such an identifier over transportable arguments
-  //   (`{ [order(1)]: x } = order(0)` — the evaluation-order corpus)
-  //   spells the call itself, so the engine runs it at exactly JS's
-  //   pattern position: keys in pattern order, defaults lazily. The
-  //   callee marshals through the host-function trampoline.
-  // `boundBefore` is the bind count when the current element's key/
-  // default began — the earlier-element boundary.
-  const tempIndexOf = (name: string, boundBefore: number): number => {
-    for (let i = 0; i < boundBefore; i++) {
-      if (binds[i]!.text === name) return i;
-    }
-    return -1;
-  };
-  const exprText = (init: ts.Expression, boundBefore: number): string | null => {
-    const t = transportableDefaultText(lowerer, init);
-    if (t !== null) return t;
-    let e = init;
-    while (ts.isParenthesizedExpression(e)) e = e.expression;
-    if (ts.isIdentifier(e)) {
-      if (ownNames.has(e.text)) {
-        const idx = tempIndexOf(e.text, boundBefore);
-        return idx >= 0 ? `__${idx}` : null;
-      }
-      extras.push(e);
-      return `__d${extras.length - 1}`;
-    }
-    if (
-      ts.isCallExpression(e) &&
-      !e.questionDotToken &&
-      ts.isIdentifier(e.expression) &&
-      e.typeArguments === undefined
-    ) {
-      const callee = exprText(e.expression, boundBefore);
-      if (callee === null) return null;
-      const args: string[] = [];
-      for (const a of e.arguments) {
-        if (ts.isSpreadElement(a)) return null;
-        const at = exprText(a, boundBefore);
-        if (at === null) return null;
-        args.push(at);
-      }
-      return `${callee}(${args.join(",")})`;
-    }
-    return null;
-  };
-  const target = (name: ts.BindingName): string | null => {
-    if (ts.isIdentifier(name)) {
-      binds.push(name);
-      return `__${binds.length - 1}`;
-    }
-    return build(name);
-  };
-  const build = (p: ts.ArrayBindingPattern | ts.ObjectBindingPattern): string | null => {
-    if (ts.isArrayBindingPattern(p)) {
-      const parts: string[] = [];
-      for (const el of p.elements) {
-        if (ts.isOmittedExpression(el) || el.name === undefined) {
-          parts.push("");
-          continue;
-        }
-        const boundBefore = binds.length;
-        let sub = target(el.name);
-        if (sub === null) return null;
-        if (el.initializer) {
-          const d = exprText(el.initializer, boundBefore);
-          if (d === null) return null;
-          sub = sub + `=${d}`;
-        }
-        parts.push(el.dotDotDotToken ? `...${sub}` : sub);
-      }
-      return `[${parts.join(",")}]`;
-    }
-    const parts: string[] = [];
-    for (const el of p.elements) {
-      if (el.name === undefined) continue;
-      if (el.dotDotDotToken) {
-        const sub = target(el.name);
-        if (sub === null) return null;
-        parts.push(`...${sub}`);
-        continue;
-      }
-      const boundBefore = binds.length;
-      const prop = el.propertyName ?? el.name;
-      let key: string | null = null;
-      if (ts.isIdentifier(prop) || ts.isPrivateIdentifier(prop)) {
-        key = JSON.stringify(prop.text);
-      } else if (
-        ts.isStringLiteral(prop) ||
-        ts.isNumericLiteral(prop) ||
-        ts.isNoSubstitutionTemplateLiteral(prop)
-      ) {
-        key = JSON.stringify(prop.text);
-      } else if (ts.isComputedPropertyName(prop)) {
-        // A computed key: a FOLDABLE one (pure single-name expression)
-        // spells its static name; anything else takes the transportable
-        // form — extras for compiled-scope identifiers, temps for
-        // earlier-bound names, calls run at exactly JS's key position
-        // (pattern order, before the element's read).
-        const folded = lowerer.foldedStringKeyOf(prop.expression);
-        key = folded !== null ? JSON.stringify(folded) : exprText(prop.expression, boundBefore);
-      }
-      if (key === null) {
-        return null; // an unfoldable computed key with no engine form
-      }
-      let sub = target(el.name);
-      if (sub === null) return null;
-      if (el.initializer) {
-        const d = exprText(el.initializer, boundBefore);
-        if (d === null) return null;
-        sub = sub + `=${d}`;
-      }
-      parts.push(`[${key}]:${sub}`);
-    }
-    return `{${parts.join(",")}}`;
-  };
-  const text = build(pattern);
-  return text === null ? null : { text, binds, extras };
-}
-
-/** Declaration-position destructuring over an ISLAND source: the ENGINE
- * runs the real pattern — a synthesized strict-mode
- * `new Function("v", ...)` exactly like the assignment chain's
- * (lowerJsvalDestructuringChain) — and the extracted values bind the
- * declared names: a name whose declared type is a primitive exits
- * eagerly (the island property-read rule), everything else stays a
- * HANDLE whose use sites dispatch to engine ops. Holes, nesting, empty
- * patterns (the object coercion check and the array iterator get+close
- * both run — destructuring undefined throws Node's TypeError at Node's
- * exit), rest, and transportable defaults all ride. False when the
- * pattern has no engine form (the caller fences). */
-export function lowerJsvalBindingPattern(
-  lowerer: Lowerer,
-  pattern: ts.ArrayBindingPattern | ts.ObjectBindingPattern,
-  srcRef: () => IrExpr,
-  isLet: boolean,
-  out: IrStmt[],
-): boolean {
-  const spec = enginePatternSpec(lowerer, pattern);
-  if (!spec) return false;
-  const loc = locOf(pattern);
-  const temps = spec.binds.map((_, i) => `__${i}`);
-  const body =
-    `"use strict";` +
-    (temps.length > 0 ? `var ${temps.join(",")};` : "") +
-    `(${spec.text} = v);return [${temps.join(",")}];`;
-  // Compiled-scope defaults (enginePatternSpec's extras) enter the
-  // synthesized function as additional parameters __d0..__dn, their
-  // values evaluated here and marshaled across.
-  const paramNames = ["v", ...spec.extras.map((_, i) => `__d${i}`)];
-  const helper: IrExpr = {
-    kind: "jsOp",
-    op: "construct",
-    args: [
-      { kind: "jsOp", op: "globalGet", name: "Function", args: [], type: JSVAL, loc },
-      ...paramNames.map((p): IrExpr => ({
-        kind: "jsMarshal",
-        value: { kind: "strLit", value: p, type: STRING, loc },
-        type: JSVAL,
-        loc,
-      })),
-      {
-        kind: "jsMarshal",
-        value: { kind: "strLit", value: body, type: STRING, loc },
-        type: JSVAL,
-        loc,
-      },
-    ],
-    type: JSVAL,
-    loc,
-  };
-  const extraArgs = spec.extras.map((e) => lowerer.jsvalIn(lowerer.lowerExpr(e), e));
-  const run: IrExpr = {
-    kind: "jsOp",
-    op: "callFn",
-    args: [helper, srcRef(), ...extraArgs],
-    type: JSVAL,
-    loc,
-  };
-  if (spec.binds.length === 0) {
-    out.push({ kind: "exprStmt", expr: run, loc });
-    return true;
-  }
-  const res = lowerer.declareHiddenLocal("%dres", JSVAL);
-  out.push({ kind: "varDecl", localId: res.id, init: run, loc });
-  spec.binds.forEach((name, i) => {
-    const bindLoc = locOf(name);
-    const read: IrExpr = {
-      kind: "jsOp",
-      op: "getIdx",
-      args: [
-        { kind: "varRef", localId: res.id, type: JSVAL, loc: bindLoc },
-        {
-          kind: "jsMarshal",
-          value: { kind: "numLit", value: i, type: F64, loc: bindLoc },
-          type: JSVAL,
-          loc: bindLoc,
-        },
-      ],
-      type: JSVAL,
-      loc: bindLoc,
-    };
-    // The island property-read stance: a name the checker declares as a
-    // primitive exits eagerly to the static type; everything else stays
-    // a handle.
-    const declared = lowerer.mapTypeOf(lowerer.typeOf(name));
-    const primitive =
-      declared &&
-      (declared.kind === "f64" || declared.kind === "bool" || declared.kind === "string");
-    const value: IrExpr = primitive
-      ? { kind: "jsExit", value: read, type: declared, loc: bindLoc }
-      : read;
-    const symbol = lowerer.checker.getSymbolAtLocation(name);
-    const g = symbol ? lowerer.globalsBySymbol.get(symbol) : undefined;
-    if (g) {
-      out.push({
-        kind: "assign",
-        localId: g.id,
-        value: lowerer.coerceInto(name, value, g.type),
-        ...(g.tdz ? { initializes: true as const } : {}),
-        loc: bindLoc,
-      });
-      return;
-    }
-    if (symbol && hostVariableDeclarationOf(name) !== null && isVarDeclared(name)) {
-      const hoisted = hoistVarBinding(lowerer, symbol, name);
-      out.push({
-        kind: "assign",
-        localId: hoisted.id,
-        value: lowerer.coerceInto(name, value, hoisted.type),
-        loc: bindLoc,
-      });
-      return;
-    }
-    const local = lowerer.declareLocal(name, name.text, value.type, isLet);
-    out.push({ kind: "varDecl", localId: local.id, init: value, loc: bindLoc });
-  });
-  return true;
-}
-
-/** Binds one destructured name to its value — the identifier tail of
- * lowerVarDecl (module-global assignment for pre-registered file-scope
- * names, declareLocal otherwise), or a nested pattern through its own
- * hidden temp. */
-/** An island-world ('any'-flavored) checker spelling: bare jsval or an
- * array of jsvals (`(string | object)[]` absorbed by its jsval arm) —
- * the shapes the runtime-world local rule keeps DYN when the value
- * lowered checked-dynamic. */
-function jsvalFlavoredType(t: IrType): boolean {
-  return t.kind === "jsval" || (t.kind === "array" && t.elem.kind === "jsval");
 }
 
 export function bindPatternTarget(
@@ -4214,20 +3780,13 @@ export function bindPatternTarget(
       });
       return;
     }
-    // The runtime-world local rule, dyn side (383(d)'s dispatch stance):
-    // a pattern binding whose VALUE lowered checked-dynamic stays dyn
-    // where the checker spells an island-world type (`function f({
-    // plugins = [] } = {})` over a JSDoc '(string | object)[]=' member —
-    // the read is a dyn keyed read whose members may be wrapped island
-    // values) or a type with no mapping at all (the varDecl rule's
-    // unmappable-declared-type stance, `string | object` bindings
-    // included). Marshaling here would fence or deep-copy; the value's
-    // world is the honest dispatch.
+    // Preserve checked-value pattern bindings when the inferred type
+    // cannot represent them without a refusal or an alias-breaking copy.
     const dynStays =
       value.type.kind === "dyn" &&
       (() => {
         const mapped = lowerer.mapTypeOf(lowerer.typeOf(name));
-        return mapped === null || (lowerer.dynamic && jsvalFlavoredType(mapped));
+        return mapped === null;
       })();
     let type = dynStays
       ? DYN
@@ -4389,13 +3948,7 @@ function inferredEvolvingLetType(lowerer: Lowerer, decl: ts.VariableDeclaration)
           return "stop";
         }
         const mapped = lowerer.mapTypeOf(lowerer.typeOf(node.right));
-        if (
-          !mapped ||
-          mapped.kind === "dyn" ||
-          mapped.kind === "jsval" ||
-          mapped.kind === "void" ||
-          isUnitType(mapped)
-        ) {
+        if (!mapped || mapped.kind === "dyn" || mapped.kind === "void" || isUnitType(mapped)) {
           invalid = true;
           return "stop";
         }
@@ -4679,9 +4232,8 @@ export function lowerVarDecl(
       // hoisting), and re-running the statement — a declaration inside
       // a loop — must NOT reset the persisting binding.
       if (isVarDeclared(decl)) return null;
-      // Checked-dynamic globals hold the dyn undefined from their
-      // declaration statement on; unions and jsval ride
-      // unassignedSlotInit's arms.
+      // Checked-value globals hold native undefined; typed slots use
+      // unassignedSlotInit's union arms.
       const wrapped =
         g.type.kind === "dyn"
           ? dynUndefinedExpr(locOf(decl))
@@ -4781,9 +4333,7 @@ export function lowerVarDecl(
     if (type.kind === "void") lowerer.badType(decl.name, lowerer.typeOf(decl.name));
     const local = lowerer.declareLocal(decl.name, decl.name.text, type, isLet);
     // tsc's definite-assignment analysis never guards `any` reads, so
-    // uninitialized bindings must hold their world's undefined, never
-    // NULL: unions the interned arm, dyn the dyn undefined, jsval the
-    // engine's — all readable immediately, exactly Node.
+    // uninitialized checked-value bindings must hold native undefined.
     const init =
       type.kind === "dyn"
         ? dynUndefinedExpr(locOf(decl))
@@ -4855,41 +4405,11 @@ export function lowerVarDecl(
   // `any`, which a static build cannot hold): the VALUE is a dyn
   // subtree, so the local stays dyn — later narrowing tests and checked
   // casts read it like any JSON.parse result.
-  // `const p = import("./m")` / `const ns = await import("./m")`: the
-  // island promise/handle is the import expression's only production —
-  // the binding holds it, whatever the checker's namespace type mapped
-  // to (the island-HANDLE local story). Below that: a never-tainted JS
-  // binding type (`const cmd = ['pwd', []]` infers (string | never[])[])
+  // A binding type (`const cmd = ['pwd', []]` infers (string | never[])[])
   // is inference residue, not element information — unmappable, so the
   // dyn initializer keeps the binding checked-dynamic.
   const bindingTainted = neverTaintedJsType(lowerer, decl.name, lowerer.typeOf(decl.name));
   let type =
-    (lowerer.dynamic &&
-    (init.type.kind === "jsval" ||
-      (init.type.kind === "promise" && init.type.inner.kind === "jsval"))
-      ? (importCallHandleType(decl.initializer) ??
-        // An unchecked-overload call result (the resolved overload's
-        // return type was never checked against the jsval-returning
-        // implementation): the binding stores the handle — see
-        // uncheckedOverloadHandleCall.
-        (init.type.kind === "jsval" && uncheckedOverloadHandleCall(lowerer, decl.initializer)
-          ? JSVAL
-          : null))
-      : null) ??
-    // The runtime-world local rule, dyn side (383(d)'s dispatch stance —
-    // the island-HANDLE local rule's mirror): a binding whose
-    // INITIALIZER lowered checked-dynamic stays dyn even where the
-    // checker spells 'any' (`const parsers = options.parsers ?? {}` over
-    // an 'object'-typed bag — the read is a dyn keyed read). Marshaling
-    // into the engine here would deep-copy data and sever aliasing; the
-    // value's world is the honest dispatch, and every use site already
-    // handles dyn (validated exits, routed engine ops for wrapped
-    // island members).
-    (lowerer.dynamic &&
-    init.type.kind === "dyn" &&
-    jsvalFlavoredType(lowerer.mapTypeOf(lowerer.typeOf(decl.name)) ?? DYN)
-      ? DYN
-      : null) ??
     (bindingTainted ? null : lowerer.mapTypeOf(lowerer.typeOf(decl.name))) ??
     staticImportNamespaceType(lowerer, decl.initializer) ??
     (init.type.kind === "moduleNs" ? init.type : null) ??
@@ -5090,7 +4610,6 @@ export function lowerVarDecl(
       (type === null && isJsSourceFile(decl.getSourceFile()))) &&
     init.type.kind !== "void" &&
     init.type.kind !== "caught" &&
-    init.type.kind !== "jsval" &&
     !isUnitType(init.type)
   ) {
     type = init.type;
@@ -5174,42 +4693,7 @@ export function lowerVarDecl(
     settledType = unitOnlyUnion(lowerer.unions);
   }
   if (settledType.kind === "void") lowerer.badType(decl.name, lowerer.typeOf(decl.name));
-  // A PACKAGE promise stored in a local stays an island HANDLE — the
-  // engine's promise has no static promise value to coerce into. Awaits
-  // and .catch/.finally chains on the local bridge per use site (each
-  // bridge is an independent observer of the same settlement).
-  if (init.type.kind === "jsval" && settledType.kind === "promise") settledType = JSVAL;
-  // An island value under an `any[]`-declared LOCAL spelling stays an
-  // island HANDLE too (the runtime-world rule): the jsval-element-array
-  // exit is a CALL-boundary conversion (the loadPlugins param ABI) —
-  // converting a local would strand the engine's own prototypes
-  // (join/map/... on a native handle-element array), where the handle
-  // routes every use engine-side.
-  if (
-    init.type.kind === "jsval" &&
-    settledType.kind === "array" &&
-    settledType.elem.kind === "jsval"
-  ) {
-    settledType = JSVAL;
-  }
-  // A STATIC array of island HANDLES under an unannotated declared type
-  // spelling evolved elements (`const kept = fns.filter(...)` over an
-  // evolving-`any` receiver — the handle-element lowering keeps the
-  // elements jsval, while tsc's evolving-array analysis types the
-  // result by the pushed elements): the value's element type is the
-  // truth, so the binding keeps the handle-element array (the
-  // island-HANDLE local story, one level down) and later method calls
-  // ride the handle-element lowering. Explicit annotations keep the
-  // validated-boundary fence.
-  if (
-    !decl.type &&
-    init.type.kind === "array" &&
-    init.type.elem.kind === "jsval" &&
-    settledType.kind === "array" &&
-    settledType.elem.kind !== "jsval"
-  ) {
-    settledType = init.type;
-  }
+
   // `const runner = options.runner || defaultRunner`: the checker types
   // the || as the union/merge of two structurally-compatible function
   // types — a signature whose RETURN is the arms' union, or the
@@ -6563,7 +6047,7 @@ export function lowerExprStatement(lowerer: Lowerer, expr: ts.Expression): IrStm
               lowerer.unsupported(
                 "SC1090",
                 expr.left.expression,
-                "writing the length of an array-typed value that remains an island handle",
+                "writing the length of an array-typed value without native array storage",
               );
             }
             const length = lowerer.lowerExprExpecting(expr.right, F64);
@@ -6602,51 +6086,7 @@ export function lowerExprStatement(lowerer: Lowerer, expr: ts.Expression): IrStm
           // this method's own `this` — super dispatch is static in JS.
           return lowerer.lowerSuperAccessorWrite(expr.left, expr.right, locOf(expr));
         }
-        if (lowerer.isIslandExpr(expr.left.expression)) {
-          // o.x = v on an island receiver: engine property write; the
-          // value marshals in (a static RHS crosses by value/copy).
-          const obj = lowerer.lowerExpr(expr.left.expression);
-          const loc = locOf(expr);
-          // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
-          // receiver whose value LOWERED checked-dynamic (`bag.nested.x
-          // = v` behind an 'object'-typed bag) takes the dyn keyed
-          // write — the routed JSVAL arm lands it on the real engine
-          // object.
-          if (obj.type.kind === "dyn") {
-            const key: IrExpr = {
-              kind: "strLit",
-              value: expr.left.name.text,
-              type: STRING,
-              loc: locOf(expr.left.name),
-            };
-            const value = lowerer.coerceToExpected(lowerer.lowerExpr(expr.right), DYN);
-            if (value.type.kind !== "dyn") {
-              lowerer.unsupported(
-                "SC1100",
-                expr.right,
-                `assigning '${lowerer.fmt(value.type)}' values through 'unknown' receivers`,
-              );
-            }
-            return {
-              kind: "exprStmt",
-              expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc },
-              loc,
-            };
-          }
-          const value = lowerer.jsvalIn(lowerer.lowerExpr(expr.right), expr.right);
-          return {
-            kind: "exprStmt",
-            expr: {
-              kind: "jsOp",
-              op: "setProp",
-              name: expr.left.name.text,
-              args: [obj, value],
-              type: VOID,
-              loc,
-            },
-            loc,
-          };
-        }
+
         // wrapper.close = fn — the net.Server close-override idiom
         // (routed to lower-server; the generic fences stay for
         // everything else).
@@ -7003,14 +6443,6 @@ export function lowerExprStatement(lowerer: Lowerer, expr: ts.Expression): IrStm
         }
       }
       if (ts.isObjectLiteralExpression(expr.left) || ts.isArrayLiteralExpression(expr.left)) {
-        // Destructuring assignment (chains included) whose SOURCE is an
-        // island value: the ENGINE runs the pattern (JS-exact coercions
-        // — RequireObjectCoercible on object patterns, the iterator
-        // protocol on array patterns) and hands the extracted values
-        // back for the compiled targets. Static sources fall through to
-        // the general assignment lowering below.
-        const viaIsland = lowerJsvalDestructuringChain(lowerer, expr);
-        if (viaIsland) return viaIsland;
         // Destructuring ASSIGNMENT to existing bindings:
         // `({ dir, port } = await discoverState());`, `[a, b = 0, ...rest] = t` —
         // the RHS evaluates once into a hidden temp, then each target
@@ -7231,210 +6663,6 @@ function lowerCompoundToTarget(
   };
 }
 
-/** One destructuring-assignment pattern the island can run: empty object/
- * array patterns and flat identifier targets — shorthand `{ x }`,
- * renamed `{ a: x }`, FOLDED computed keys `{ [k]: x }` (2105's
- * static-fold rule: a pure key expression whose checker type spells one
- * property name — skipping its evaluation is exact), array elements
- * `[x, y]`. Answers the source FIELD key (object patterns) and the
- * target identifier per binding, in pattern order; null for any other
- * pattern form (defaults, rest, nesting, holes, non-identifier targets,
- * runtime-valued keys — the existing fences own those). */
-function islandRunnablePattern(
-  lowerer: Lowerer,
-  pattern: ts.ObjectLiteralExpression | ts.ArrayLiteralExpression,
-): {
-  kind: "object" | "array";
-  binds: {
-    field: string | number;
-    target: ts.Identifier;
-    shorthand: ts.ShorthandPropertyAssignment | null;
-  }[];
-} | null {
-  if (ts.isObjectLiteralExpression(pattern)) {
-    const binds: {
-      field: string | number;
-      target: ts.Identifier;
-      shorthand: ts.ShorthandPropertyAssignment | null;
-    }[] = [];
-    for (const prop of pattern.properties) {
-      if (ts.isShorthandPropertyAssignment(prop)) {
-        if (prop.objectAssignmentInitializer) return null;
-        // 7 types the shorthand's name as PropertyName; the grammar
-        // allows nothing but an Identifier there (lowerShorthandValue).
-        const name = prop.name as ts.Identifier;
-        binds.push({ field: name.text, target: name, shorthand: prop });
-      } else if (
-        ts.isPropertyAssignment(prop) &&
-        ts.isIdentifier(prop.name) &&
-        ts.isIdentifier(prop.initializer)
-      ) {
-        binds.push({ field: prop.name.text, target: prop.initializer, shorthand: null });
-      } else if (
-        ts.isPropertyAssignment(prop) &&
-        ts.isComputedPropertyName(prop.name) &&
-        ts.isIdentifier(prop.initializer)
-      ) {
-        const key = lowerer.foldedStringKeyOf(prop.name.expression);
-        if (key === null) return null;
-        binds.push({ field: key, target: prop.initializer, shorthand: null });
-      } else {
-        return null;
-      }
-    }
-    return { kind: "object", binds };
-  }
-  const binds: { field: string | number; target: ts.Identifier; shorthand: null }[] = [];
-  for (let i = 0; i < pattern.elements.length; i++) {
-    const el = pattern.elements[i]!;
-    if (!ts.isIdentifier(el)) return null; // holes, spreads, nesting
-    binds.push({ field: i, target: el, shorthand: null });
-  }
-  return { kind: "array", binds };
-}
-
-/** `({} = {x, y} = a);` — destructuring assignment (chains included) from
- * an ISLAND source, statement position (--dynamic). The ENGINE runs each
- * pattern over the source value — a synthesized
- * `new Function("v", "\"use strict\"; var __0…; (<pattern> = v); return [__0…]")`
- * — so the coercions are JS-exact: object patterns RequireObjectCoercible
- * (destructuring undefined throws Node's TypeError), array patterns run
- * the real iterator protocol (empty patterns get-and-close). The
- * extracted values come back as an engine array and assign the compiled
- * targets in pattern order, inner assignment first (JS's right-
- * associativity). Null when the innermost source is not jsval-typed or
- * any pattern is outside the island-runnable set — the existing
- * record-source path and fences own those. */
-function lowerJsvalDestructuringChain(lowerer: Lowerer, expr: ts.BinaryExpression): IrStmt | null {
-  if (!lowerer.dynamic) return null;
-  const strip = (e: ts.Expression): ts.Expression => {
-    while (ts.isParenthesizedExpression(e)) e = e.expression;
-    return e;
-  };
-  const patterns: (ts.ObjectLiteralExpression | ts.ArrayLiteralExpression)[] = [];
-  let node: ts.Expression = expr;
-  for (;;) {
-    const s = strip(node);
-    if (
-      ts.isBinaryExpression(s) &&
-      s.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      (ts.isObjectLiteralExpression(strip(s.left)) || ts.isArrayLiteralExpression(strip(s.left)))
-    ) {
-      patterns.push(strip(s.left) as ts.ObjectLiteralExpression | ts.ArrayLiteralExpression);
-      node = s.right;
-    } else {
-      break;
-    }
-  }
-  if (patterns.length === 0) return null;
-  // A single pattern over a PLAIN-VARIABLE island source takes the
-  // general assignment lowering below, whose island arm throws V8's
-  // exact destructure TypeErrors — the spelling embeds the source
-  // text, which only a plain variable survives (corpus 2074). Chains
-  // and non-variable sources ride the engine here (corpus 2054); the
-  // general path fences those with SC1031.
-  if (patterns.length === 1 && ts.isIdentifier(strip(node))) return null;
-  const shapes: NonNullable<ReturnType<typeof islandRunnablePattern>>[] = [];
-  for (const p of patterns) {
-    const s = islandRunnablePattern(lowerer, p);
-    if (!s) return null;
-    shapes.push(s);
-  }
-  // Checker-type gate BEFORE lowering the source (a declined claim must
-  // not leave a discarded lowering behind): only island sources ride
-  // the engine; record/array sources keep their existing paths.
-  if (lowerer.mapTypeOf(lowerer.typeOf(node))?.kind !== "jsval") return null;
-  const source = lowerer.lowerExpr(node);
-  if (source.type.kind !== "jsval") return null;
-  const loc = locOf(expr);
-  const tmp = lowerer.declareHiddenLocal("%dsrc", JSVAL);
-  const out: IrStmt[] = [{ kind: "varDecl", localId: tmp.id, init: source, loc }];
-  const srcRef = (): IrExpr => ({ kind: "varRef", localId: tmp.id, type: JSVAL, loc });
-  // Inner pattern first: `A = B = v` runs B's destructure before A's.
-  for (let p = patterns.length - 1; p >= 0; p--) {
-    const shape = shapes[p]!;
-    const temps = shape.binds.map((_, i) => `__${i}`);
-    const patternSrc =
-      shape.kind === "object"
-        ? `({${shape.binds.map((b, i) => `[${JSON.stringify(String(b.field))}]: __${i}`).join(",")}} = v)`
-        : `([${temps.join(",")}] = v)`;
-    const body =
-      `"use strict";` +
-      (temps.length > 0 ? `var ${temps.join(",")};` : "") +
-      `${patternSrc};return [${temps.join(",")}];`;
-    const helper: IrExpr = {
-      kind: "jsOp",
-      op: "construct",
-      args: [
-        { kind: "jsOp", op: "globalGet", name: "Function", args: [], type: JSVAL, loc },
-        {
-          kind: "jsMarshal",
-          value: { kind: "strLit", value: "v", type: STRING, loc },
-          type: JSVAL,
-          loc,
-        },
-        {
-          kind: "jsMarshal",
-          value: { kind: "strLit", value: body, type: STRING, loc },
-          type: JSVAL,
-          loc,
-        },
-      ],
-      type: JSVAL,
-      loc,
-    };
-    const run: IrExpr = { kind: "jsOp", op: "callFn", args: [helper, srcRef()], type: JSVAL, loc };
-    if (shape.binds.length === 0) {
-      out.push({ kind: "exprStmt", expr: run, loc });
-      continue;
-    }
-    const res = lowerer.declareHiddenLocal("%dres", JSVAL);
-    out.push({ kind: "varDecl", localId: res.id, init: run, loc });
-    shape.binds.forEach((b, i) => {
-      // Shorthand names resolve to the PROPERTY symbol at their
-      // location; the VALUE symbol comes from the checker's shorthand
-      // query (lowerDestructuringAssign's rule).
-      let target: { id: string; type: IrType } | null;
-      if (b.shorthand) {
-        const valueSymbol = lowerer.checker.getShorthandAssignmentValueSymbol(b.shorthand) ?? null;
-        const local = valueSymbol ? lowerer.resolveKey(valueSymbol, b.target) : null;
-        const g = valueSymbol ? lowerer.globalsBySymbol.get(valueSymbol) : undefined;
-        target = local ? { id: local.id, type: local.type } : g ? { id: g.id, type: g.type } : null;
-      } else {
-        target = lowerer.resolveWritable(b.target);
-      }
-      if (!target) {
-        lowerer.rejectUnresolved(
-          b.target,
-          `assignment to '${b.target.text}' (not a writable local or module global)`,
-        );
-      }
-      const read: IrExpr = {
-        kind: "jsOp",
-        op: "getIdx",
-        args: [
-          { kind: "varRef", localId: res.id, type: JSVAL, loc },
-          {
-            kind: "jsMarshal",
-            value: { kind: "numLit", value: i, type: F64, loc },
-            type: JSVAL,
-            loc,
-          },
-        ],
-        type: JSVAL,
-        loc,
-      };
-      out.push({
-        kind: "assign",
-        localId: target.id,
-        value: lowerer.coerceInto(b.target, read, target.type),
-        loc,
-      });
-    });
-  }
-  return { kind: "block", body: out, loc };
-}
-
 /** `({ a, b: x } = e);`, `[a, b = 0, ...rest] = xs;` — destructuring
  * assignment to EXISTING writable bindings, statement position, from a
  * PRE-LOWERED source: for-of expression heads hand the per-iteration
@@ -7579,12 +6807,11 @@ function destructuringAssignInto(
     lowerArrayAssignInto(lowerer, out, target, tmpRef, blame, loc);
     return { stmts: out, value };
   }
-  if (init.type.kind === "dyn" || init.type.kind === "jsval") {
-    // Checked-dynamic and island sources: RequireObjectCoercible with
+  if (init.type.kind === "dyn") {
     // V8's exact destructuring TypeError (it names the SOURCE and, for
     // non-empty patterns, the first property), then keyed reads — GetV
-    // answers undefined for absent members and primitive receivers
-    // alike (the engine's own property semantics on the island side).
+    // answers undefined for absent members and primitive receivers.
+
     // An RHS that is ITSELF a destructuring assignment (`({} = {x} = a)`)
     // already proved the value coercible — its own pattern threw first
     // if it wasn't — so the outer check is dead code and needs no
@@ -7630,32 +6857,14 @@ function destructuringAssignInto(
       });
     }
     for (const prop of target.properties) {
-      const piece = destructAssignPiece(lowerer, prop, init.type.kind === "jsval");
-      const read: IrExpr =
-        piece.keyExpr !== undefined
-          ? {
-              kind: "jsOp",
-              op: "getIdx",
-              args: [tmpRef(), lowerer.jsvalIn(lowerer.lowerExpr(piece.keyExpr), piece.keyExpr)],
-              type: JSVAL,
-              loc: locOf(prop),
-            }
-          : init.type.kind === "jsval"
-            ? {
-                kind: "jsOp",
-                op: "getProp",
-                name: piece.field,
-                args: [tmpRef()],
-                type: JSVAL,
-                loc: locOf(prop),
-              }
-            : {
-                kind: "dynKeyGet",
-                key: { kind: "strLit", value: piece.field, type: STRING, loc: locOf(prop) },
-                value: tmpRef(),
-                type: DYN,
-                loc: locOf(prop),
-              };
+      const piece = destructAssignPiece(lowerer, prop);
+      const read: IrExpr = {
+        kind: "dynKeyGet",
+        key: { kind: "strLit", value: piece.field, type: STRING, loc: locOf(prop) },
+        value: tmpRef(),
+        type: DYN,
+        loc: locOf(prop),
+      };
       out.push({
         kind: "assign",
         localId: piece.target.id,
@@ -8092,21 +7301,6 @@ function destructuringAssignInto(
   return { stmts: out, value };
 }
 
-/** A destructuring-ASSIGNMENT target that is not a plain variable:
- * PROPERTY targets (`({ a: this.x } = o)`, `[c.x, c.y] = t` — the
- * receiver evaluates into a hidden temp at the element's pattern
- * position, BEFORE the element's value read, JS's get-the-reference-
- * then-GetV order), ELEMENT targets over arrays (runtime f64 index)
- * and tuples/records (literal keys) with the same receiver/key temp
- * discipline, and NESTED patterns (`({ p: { q } } = o)`, `[[a], b] = t`
- * — the element's value destructures through the same assignment
- * machinery, its own hidden temp included). `valueOf` builds the
- * (defaulted) source value at the target's own type; it receives null
- * exactly for nested patterns, which have no single binding type —
- * defaults there keep a fence (JS would need the pattern's implied
- * type to test against). Optional-chain targets are not assignment
- * targets in JS at all; index-signature runtime keys and island/dyn
- * receivers keep the fence below. */
 function lowerAssignTargetInto(
   lowerer: Lowerer,
   out: IrStmt[],
@@ -8215,18 +7409,11 @@ function lowerAssignTargetInto(
   );
 }
 
-/** One object-pattern property's pieces for the checked-dynamic path:
- * the source FIELD name (or, over ISLAND sources, a runtime KEY
- * expression the engine indexes with) and the resolved writable target.
- * Shorthand (`{ a }`) and renamed (`{ a: x }`) identifier targets only —
- * the record path's rules, shared fences. */
 function destructAssignPiece(
   lowerer: Lowerer,
   prop: ts.ObjectLiteralElementLike,
-  islandSource: boolean,
-): { field: string; keyExpr?: ts.Expression; target: { id: string; type: IrType } } {
+): { field: string; target: { id: string; type: IrType } } {
   let fieldName: string;
-  let keyExpr: ts.Expression | undefined;
   let bindTo: ts.Expression;
   if (ts.isShorthandPropertyAssignment(prop)) {
     if (prop.objectAssignmentInitializer) {
@@ -8239,23 +7426,14 @@ function destructAssignPiece(
     fieldName = (prop.name as ts.Identifier).text;
     bindTo = prop.name as ts.Identifier;
   } else if (ts.isPropertyAssignment(prop)) {
-    // Identifier keys spell themselves; literal and FOLDABLE computed
-    // keys resolve statically (the record path's rule) — the keyed read
-    // below takes the folded name. A RUNTIME-valued key over an ISLAND
-    // source reads through the engine's own indexing at the element's
-    // pattern position (`({ [key]: w } = src)`); over the checked-dynamic tree the fence
-    // stays.
+    // Identifier, literal, and foldable computed keys resolve statically.
     const folded = patternKeyNameOf(lowerer, prop.name);
     if (folded === null) {
-      if (islandSource && ts.isComputedPropertyName(prop.name)) {
-        keyExpr = prop.name.expression;
-      } else {
-        lowerer.unsupported(
-          "SC1031",
-          prop,
-          "destructuring assignment with computed keys that do not fold to one property name",
-        );
-      }
+      lowerer.unsupported(
+        "SC1031",
+        prop,
+        "destructuring assignment with computed keys that do not fold to one property name",
+      );
     }
     fieldName = folded ?? "";
     bindTo = prop.initializer;
@@ -8284,7 +7462,7 @@ function destructAssignPiece(
       `assignment to '${bindTo.text}' (not a writable local or module global)`,
     );
   }
-  return { field: fieldName, ...(keyExpr !== undefined ? { keyExpr } : {}), target };
+  return { field: fieldName, target };
 }
 
 /** The ARRAY half of destructuring assignment: element assigns from a
@@ -8341,10 +7519,9 @@ function lowerArrayAssignInto(
   const shape = srcType.kind === "record" ? lowerer.shapes.get(srcType.shapeId) : undefined;
   const isTuple = shape?.tuple === true;
   let elemsRef: (() => IrExpr) | null = null;
-  if (srcType.kind === "dyn" || srcType.kind === "jsval") {
-    // GetIterator + the pattern's width, V8's exact TypeErrors
-    // (dynIterN — the engine's real iterator protocol on the island
-    // side); the empty pattern is pure validation.
+  if (srcType.kind === "dyn") {
+    // Read the pattern's width through the native iterator with Node's
+    // TypeErrors. The empty pattern only validates iterability.
     const iterTmp = lowerer.declareHiddenLocal("%destrIter", srcType);
     out.push({
       kind: "varDecl",
@@ -8372,16 +7549,7 @@ function lowerArrayAssignInto(
   const elemRead = (i: number, at: ts.Node): IrExpr => {
     if (elemsRef) {
       const elems = elemsRef();
-      if (elems.type.kind === "jsval") {
-        const key: IrExpr = { kind: "numLit", value: i, type: F64, loc: locOf(at) };
-        return {
-          kind: "jsOp",
-          op: "getIdx",
-          args: [elems, lowerer.jsvalIn(key, at as ts.Expression)],
-          type: JSVAL,
-          loc: locOf(at),
-        };
-      }
+
       return {
         kind: "dynKeyGet",
         key: { kind: "strLit", value: String(i), type: STRING, loc: locOf(at) },
@@ -8430,8 +7598,8 @@ function lowerArrayAssignInto(
     if (ts.isSpreadElement(el)) {
       // `[a, ...rest]`: the tail packs FRESH (JS's surplus packing
       // builds a new array) — array slices, tuple tails under the
-      // target's own type. Checked-dynamic sources keep the fence (the
-      // engine's iterator would have to drain into a compiled array).
+      // target's own type. Checked-value sources keep the fence because
+      // this path has no native array drain.
       if (elemsRef) {
         lowerer.unsupported(
           "SC1031",
@@ -8502,7 +7670,7 @@ function lowerArrayAssignInto(
       // undefined where the plain read would trap).
       let read = elemRead(i, el);
       if (defaultNode !== null) {
-        if (read.type.kind === "dyn" || read.type.kind === "jsval") {
+        if (read.type.kind === "dyn") {
           const boundary = read.type;
           const elemTmp = lowerer.declareHiddenLocal("%destrElem", boundary);
           out.push({ kind: "varDecl", localId: elemTmp.id, init: read, loc: locOf(el) });
@@ -8512,33 +7680,18 @@ function lowerArrayAssignInto(
             type: boundary,
             loc: locOf(el),
           });
-          const isUndef: IrExpr =
-            boundary.kind === "jsval"
-              ? {
-                  kind: "jsOp",
-                  op: "eq",
-                  args: [
-                    elemVar(),
-                    { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc: locOf(el) },
-                  ],
-                  type: BOOL,
-                  loc: locOf(el),
-                }
-              : {
-                  kind: "dynTest",
-                  test: "undefined",
-                  value: elemVar(),
-                  type: BOOL,
-                  loc: locOf(el),
-                };
+          const isUndef: IrExpr = {
+            kind: "dynTest",
+            test: "undefined",
+            value: elemVar(),
+            type: BOOL,
+            loc: locOf(el),
+          };
           const dflt = lowerer.lowerExpr(defaultNode);
           read = {
             kind: "ternary",
             cond: isUndef,
-            then:
-              boundary.kind === "jsval"
-                ? lowerer.jsvalIn(dflt, defaultNode)
-                : lowerer.coerceInto(defaultNode, dflt, DYN),
+            then: lowerer.coerceInto(defaultNode, dflt, DYN),
             else_: elemVar(),
             type: boundary,
             loc: locOf(el),
@@ -8898,19 +8051,10 @@ export function lowerForOf(lowerer: Lowerer, stmt: ts.ForOfStatement): IrStmt {
       }
       tupleSource = { shapeId: iterable.type.shapeId, fields, elem };
     }
-    // An ISLAND value (`for (const store of stores)` where stores is a
-    // package-typed array — one engine handle): the engine's OWN
-    // iterator protocol drives the loop — GetIterator through the
-    // pinned prelude helper (V8's not-iterable TypeError on refusal),
-    // next() through callMethod, done/value reads through getProp — so
-    // engine arrays, Maps, Sets, generators, and Symbol.iterator
-    // implementations all iterate exactly as Node runs them.
-    if (iterable.type.kind === "jsval") {
-      return lowerForOfIsland(lowerer, stmt, iterable, labels);
-    }
+
     // A CHECKED-DYNAMIC iterable (`unknown[]`, the collapsed
-    // `(string | object)[]`, JSON-parsed values, wrapped engine
-    // values): a checked IteratorRecord binds each yielded dyn value.
+    // `(string | object)[]`, JSON-parsed values): a checked IteratorRecord
+    // binds each yielded dyn value.
     if (iterable.type.kind === "dyn") {
       return lowerForOfDyn(lowerer, stmt, iterable, labels);
     }
@@ -8962,7 +8106,7 @@ export function lowerForOf(lowerer: Lowerer, stmt: ts.ForOfStatement): IrStmt {
     if (
       promiseElem &&
       yieldedT.kind === "union" &&
-      !["void", "union", "dyn", "jsval", "undefinedT", "nullT"].includes(promiseElem.inner.kind)
+      !["void", "union", "dyn", "undefinedT", "nullT"].includes(promiseElem.inner.kind)
     ) {
       awaitPromiseTag = lowerer.armTag(yieldedT.unionId, promiseElem);
       elemValueT = lowerer.withUndefinedArm(promiseElem.inner);
@@ -10149,140 +9293,6 @@ function lowerForOfDyn(
           finallyBody: [
             { kind: "if", cond: varRef(needsClose.id, BOOL, loc), then: close(), else_: null, loc },
           ],
-          loc,
-        },
-      ],
-      loc,
-    };
-  } finally {
-    lowerer.scopes.pop();
-  }
-}
-
-/** for-of over an ISLAND value (see lowerForOf's jsval arm): the
- * engine's iterator protocol desugared over jsOps —
- *
- *   it = iterNew(v);            // GetIterator (prelude; may throw)
- *   while (true) {
- *     r = it.next();            // callMethod
- *     if (truthy(r.done)) break;
- *     <bind loop var(s) from r.value>  // getProp
- *     ...body
- *   }
- *
- * The loop variable's ELEMENT is an island handle (jsval — exactly what
- * the checker's package-typed element maps to); identifier heads bind
- * it per iteration, destructuring heads run the jsval pattern desugar,
- * pre-declared and var heads keep their fences (the array path's
- * stories don't carry over mechanically). IteratorClose on early exit
- * (break/return out of a partial iteration calling it.return()) is NOT
- * run — a divergence only a custom island iterator with a return()
- * method can observe. */
-function lowerForOfIsland(
-  lowerer: Lowerer,
-  stmt: ts.ForOfStatement,
-  iterable: IrExpr,
-  labels?: string[],
-): IrStmt {
-  const loc = locOf(stmt);
-  if (!ts.isVariableDeclarationList(stmt.initializer)) {
-    lowerer.unsupported(
-      "SC1090",
-      stmt.initializer,
-      "for-of over a package ('any') iterable with a pre-declared loop variable (declare it in the loop: for (const x of ...))",
-    );
-  }
-  const list = stmt.initializer;
-  if ((list.flags & ts.NodeFlags.Using) !== 0) {
-    lowerer.unsupported("SC1090", list, "'using' declarations (dispose-at-scope-exit semantics)");
-  }
-  const isLet =
-    (list.flags & ts.NodeFlags.Let) !== 0 || (list.flags & ts.NodeFlags.BlockScoped) === 0;
-  const decl = list.declarations[0]!;
-  const itLocal = lowerer.declareHiddenLocal("%vofit", JSVAL);
-  const rLocal = lowerer.declareHiddenLocal("%vofr", JSVAL);
-  const itRef: IrExpr = { kind: "varRef", localId: itLocal.id, type: JSVAL, loc };
-  const rRef: IrExpr = { kind: "varRef", localId: rLocal.id, type: JSVAL, loc };
-  const valueOf: IrExpr = {
-    kind: "jsOp",
-    op: "getProp",
-    name: "value",
-    args: [rRef],
-    type: JSVAL,
-    loc,
-  };
-  lowerer.scopes.push(new Map());
-  try {
-    const binds: IrStmt[] = [];
-    if (ts.isArrayBindingPattern(decl.name) || ts.isObjectBindingPattern(decl.name)) {
-      const tmp = lowerer.declareHiddenLocal("%destr", JSVAL);
-      binds.push({ kind: "varDecl", localId: tmp.id, init: valueOf, loc });
-      lowerer.lowerBindingPattern(
-        decl.name,
-        () => ({ kind: "varRef", localId: tmp.id, type: JSVAL, loc }),
-        JSVAL,
-        isLet,
-        binds,
-      );
-    } else if (ts.isIdentifier(decl.name)) {
-      if (forOfVarTarget(lowerer, decl)) {
-        lowerer.unsupported(
-          "SC1090",
-          decl.name,
-          "for (var x of ...) over a package ('any') iterable (use const or let)",
-        );
-      }
-      const local = lowerer.declareLocal(decl.name, decl.name.text, JSVAL, isLet);
-      binds.push({ kind: "varDecl", localId: local.id, init: valueOf, loc });
-    } else {
-      lowerer.unsupported("SC1031", decl.name);
-    }
-    const body = lowerer.inCtl("loop", () => lowerer.lowerScopedBlock(stmt.statement), labels);
-    return {
-      kind: "block",
-      body: [
-        {
-          kind: "varDecl",
-          localId: itLocal.id,
-          init: { kind: "jsOp", op: "iterNew", args: [iterable], type: JSVAL, loc },
-          loc,
-        },
-        {
-          kind: "while",
-          cond: { kind: "boolLit", value: true, type: BOOL, loc },
-          body: [
-            {
-              kind: "varDecl",
-              localId: rLocal.id,
-              init: {
-                kind: "jsOp",
-                op: "callMethod",
-                name: "next",
-                args: [itRef],
-                type: JSVAL,
-                loc,
-              },
-              loc,
-            },
-            {
-              kind: "if",
-              cond: {
-                kind: "jsOp",
-                op: "truthy",
-                args: [
-                  { kind: "jsOp", op: "getProp", name: "done", args: [rRef], type: JSVAL, loc },
-                ],
-                type: BOOL,
-                loc,
-              },
-              then: [{ kind: "break", loc }],
-              else_: null,
-              loc,
-            },
-            ...binds,
-            ...body,
-          ],
-          ...(labels && { labels }),
           loc,
         },
       ],

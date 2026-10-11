@@ -1,9 +1,3 @@
-/* Surface tables and provenance predicates of the lowerer: the island
- * surface (Math/number/string/global functions marshalable through the
- * dynamic island), the node builtin-module call tables and their fence
- * hints, the string/array/map/set method-name sets, the unsupported-syntax
- * diagnostic tables, and the "which world declared this symbol" predicates
- * (ambient scriptc.d.ts / standard lib / @types/node provenance). */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { UNSUPPORTED } from "../../diagnostics/diagnostic.js";
@@ -27,7 +21,7 @@ import {
   VOID,
   arrayOf,
 } from "../../ir/ir.js";
-import { isJsSourceFile, isNodeTypesPath, requireSpecOf } from "../program.js";
+import { isNodeTypesPath, requireSpecOf } from "../program.js";
 
 /** Statement-level constructs rejected wholesale, keyed by syntax kind. */
 export const UNSUPPORTED_STMT: Partial<
@@ -580,14 +574,12 @@ export const STR_METHODS: Record<
   // lowering so the IR/runtime always see the spec's effective value.
   // Empty separator splits per UTF-16 code unit —
   // astral halves become U+FFFD (SEMANTICS.md divergence 2, the same
-  // substitution the island's boundary marshal applied).
+
   split: { method: "split", result: arrayOf(STRING), minArgs: 0, maxArgs: 2 },
   // Padding completes omitted lengths and fill strings in its lowering.
   padStart: { method: "padStart", result: STRING, minArgs: 0, maxArgs: 2 },
   padEnd: { method: "padEnd", result: STRING, minArgs: 0, maxArgs: 2 },
-  // The lre-backed pair (ECMA Default Case Conversion, final sigma
-  // included — scr_regex.c): static now, no island needed; their presence
-  // flips the regex LINK switch (moduleUsesRegex).
+  // Unicode case conversion shares the libregexp/libunicode link inputs.
   toLowerCase: { method: "toLowerCase", result: STRING, minArgs: 0, maxArgs: 0 },
   toUpperCase: { method: "toUpperCase", result: STRING, minArgs: 0, maxArgs: 0 },
   normalize: { method: "normalize", result: STRING, minArgs: 0, maxArgs: 1 },
@@ -605,18 +597,14 @@ export const STRING_INDEX_METHODS = new Set(["at", "codePointAt"]);
 /** String-pattern replacement composes native search, slice, and callback operations. */
 export const STRING_REPLACE_METHODS = new Set(["replace", "replaceAll"]);
 
-/** One member of the island-backed ambient surface: declared argument
- * types (tsc enforces them at call sites; the arity double-checks the
- * table against the ambient file) and the validated island-exit target the
- * engine's result must satisfy. */
-export interface IslandFnEntry {
+export interface StdlibFnEntry {
   args: IrType[];
   ret: IrType;
 }
 
-const ISL_N1: IslandFnEntry = { args: [F64], ret: F64 };
+const ISL_N1: StdlibFnEntry = { args: [F64], ret: F64 };
 
-const ISL_N2: IslandFnEntry = { args: [F64, F64], ret: F64 };
+const ISL_N2: StdlibFnEntry = { args: [F64, F64], ret: F64 };
 
 export const boundaryIntoIslandMsg = (typeName: string): string =>
   `passing a value of type '${typeName}' into dynamically-executed ('any'-typed) code ` +
@@ -628,27 +616,7 @@ export const boundaryOutOfIslandMsg = (typeName: string): string =>
   `(an 'any' value can only exit to numbers, strings, booleans, JSON-safe records/arrays/unions, ` +
   `and 'T | undefined' over those)`;
 
-/** The island-backed surface — standard-library APIs with no static
- * runtime implementation (Math methods outside STATIC_MATH_FNS,
- * number/string methods beyond the
- * intrinsic set, parseFloat, ...). ONE table drives both sides of the
- * gate: under --dynamic each entry lowers to marshal → engine execution →
- * validated exit to the declared return type; without the flag each use
- * site is a per-site SC2012. Membership here is only half the check — the
- * resolved symbol must be declared by the standard library (provenance,
- * never names), so a user's own `parseFloat` or `.toFixed` takes the
- * ordinary paths. The lib declares MORE than this table (extra members,
- * optional-parameter forms): everything untabled falls through to the
- * SC2020 lib fence — never an ICE, never a link error. Exported so the
- * table-vs-lib consistency test can check every entry against the lib's
- * own declarations — a drifted entry fails a test instead of surprising a
- * user. */
-export const ISLAND_SURFACE = {
-  /** `Math.<fn>(...)` lowers to callMethod(globalGet("Math"), fn, args);
-   * Math constants are compile-time numeric literals in STATIC_MATH_PROPS;
-   * remaining Math properties retain island/fence behavior.
-   * The entries here handle untabled scalar call shapes where --dynamic is
-   * available; STATIC_MATH_FNS handles the ordinary typed calls first. */
+export const STDLIB_SURFACE = {
   math: {
     // The static table below handles these methods at its admitted arities.
     fns: {
@@ -683,8 +651,8 @@ export const ISLAND_SURFACE = {
       tan: ISL_N1,
       tanh: ISL_N1,
       trunc: ISL_N1,
-    } as Record<string, IslandFnEntry | undefined>,
-    // Math constants are compile-time literals, not island properties.
+    } as Record<string, StdlibFnEntry | undefined>,
+
     props: {} as Record<string, IrType | undefined>,
   },
   /** Methods on `number` receivers. The receiver marshals by value; the
@@ -695,7 +663,7 @@ export const ISLAND_SURFACE = {
     toFixed: { args: [F64], ret: STRING },
     toPrecision: { args: [F64], ret: STRING },
     toString: { args: [F64], ret: STRING },
-  } as Record<string, IslandFnEntry | undefined>,
+  } as Record<string, StdlibFnEntry | undefined>,
   /** Methods on `string` receivers beyond the static strIntrinsic set
    * (split/pad/trimStart/trimEnd moved to STR_METHODS — static now).
    * replace/replaceAll take STRING patterns (no regex is declared). `at`
@@ -706,24 +674,14 @@ export const ISLAND_SURFACE = {
     replace: { args: [STRING, STRING], ret: STRING },
     replaceAll: { args: [STRING, STRING], ret: STRING },
     at: { args: [F64], ret: STRING },
-  } as Record<string, IslandFnEntry | undefined>,
-  /** Global functions: parseInt and isNaN are STATIC (lower-calls.ts →
-   * num.parseInt/num.isNaN), and parseFloat/isFinite lower statically
-   * over EXACTLY-typed arguments (a string for parseFloat, a number for
-   * isFinite — num.parseFloat/number.isFinite); these island entries
-   * carry every OTHER argument shape, where the ToNumber/ToString
-   * coercions stay engine territory. */
+  } as Record<string, StdlibFnEntry | undefined>,
+
   globals: {
     parseFloat: { args: [STRING], ret: F64 },
     isFinite: { args: [F64], ret: BOOL },
-  } as Record<string, IslandFnEntry | undefined>,
+  } as Record<string, StdlibFnEntry | undefined>,
 };
 
-/** Math properties with a STATIC lowering: each read becomes the exact
- * JavaScript numeric constant in the typed IR. No runtime Math object read or
- * dynamic-engine dependency is involved. Remaining Math properties retain
- * their island/fence behavior through ISLAND_SURFACE.math.props and the
- * generic standard-library member fence. */
 export const STATIC_MATH_PROPS: Record<string, number | undefined> = {
   E: 2.718281828459045,
   LN10: 2.302585092994046,
@@ -735,10 +693,6 @@ export const STATIC_MATH_PROPS: Record<string, number | undefined> = {
   SQRT2: 1.4142135623730951,
 };
 
-/** Math members with a STATIC lowering. Most use the tabled arity; min/max
- * accept any plain arity, and hypot accepts any arity including number[]
- * spreads. Checked before the island table by lowerIslandMethodCall and
- * included in the methods-as-values fence by lowerMathProperty. */
 export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | undefined> = {
   floor: { fn: "math.floor", arity: 1 },
   abs: { fn: "math.abs", arity: 1 },
@@ -2433,7 +2387,7 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<
     createRequire:
       "the lowered shape is a const binding (or a proven stable top-level let/var) over createRequire(import.meta.url) (or __filename) " +
       "whose require calls take STATIC string literals — builtins, project modules (including #imports), " +
-      "relative .json documents, --npm-static packages, and installed npm packages under --dynamic resolve at build time; " +
+      "relative .json documents and natively compiled npm packages resolve at build time; " +
       "dynamic specifiers cannot exist in a compiled binary's fixed module graph",
     isBuiltin:
       "the lowered call checks a string against the baked Node v24 list, including bare/node: aliases and prefix-only builtins",
@@ -2560,7 +2514,7 @@ export function stdlibMemberFence(lowerer: Lowerer, access: ts.PropertyAccessExp
       "with an INLINE handler, and p.finally(cb) compile) — try { await p } catch (e) is the general form";
   } else if (recvIr?.kind === "f64" && member === "toString") {
     hint =
-      "radix-free conversion is a template literal away: `${x}`; toString(radix) runs under --dynamic";
+      "radix-free conversion is a template literal away: `${x}`; toString(radix) is unsupported";
   } else if (container === "Math" && (member === "min" || member === "max")) {
     hint =
       `Math.${member} lowers with any number of plain arguments or ONE number[] spread — ` +
@@ -2852,22 +2806,6 @@ export function stdlibGlobalAliasNameOf(
       ? "process"
       : stdlibGlobalNameOf(lowerer, aliasExpr);
   if (name === null) return null;
-  // An explicitly any-typed globalThis binding in dynamic TypeScript
-  // holds the engine's global object. Keep the static alias for JS files
-  // (their bare-global value path uses identity tokens) and for the
-  // `globalThis || global` guard that the static alias path folds.
-  let directInit = init;
-  while (ts.isParenthesizedExpression(directInit)) directInit = directInit.expression;
-  if (
-    name === "globalThis" &&
-    lowerer.dynamic &&
-    !isJsSourceFile(init.getSourceFile()) &&
-    ts.isIdentifier(directInit) &&
-    directInit.text === "globalThis" &&
-    ts.isVariableDeclaration(init.parent) &&
-    (lowerer.typeOf(init.parent.name).flags & ts.TypeFlags.Any) !== 0
-  )
-    return null;
   // These globals have provenance-aware call or member lowering, so a
   // stable snapshot keeps the same dispatch as the original global.
   // Other callable globals still use their ordinary value paths.

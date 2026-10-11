@@ -6,7 +6,6 @@ import {
   BOOL,
   DYN,
   F64,
-  JSVAL,
   STRING,
   UNDEFINED_T,
   VOID,
@@ -445,12 +444,9 @@ export function lowerDynObjectLiteral(
           `holding '${lowerer.fmt(v.type)}' values in a runtime-keyed (computed-key) object literal`,
         );
       } catch (err) {
-        // A member value the checked-dynamic tree cannot hold — a func whose signature
-        // cannot box, an island ('any') handle, a record carrying func
-        // fields (the export aggregate's typed utilities and npm-handle
-        // members): the same call-time fence deferral as an unlowerable
-        // member — the slot takes a boxed fence closure; only USING it
-        // stops the run. Probe mode and ICEs keep the poison.
+        // An unrepresentable member gets the same call-time fence as an
+        // unlowerable member: a boxed closure fails only when called.
+        // Probe mode and ICEs keep the poison.
         if (!(err instanceof PoisonError)) throw err;
         const fence = lowerer.deferToRuntimeFence(convDiagsBefore, prop, {
           kind: "closure",
@@ -1012,10 +1008,7 @@ export function lowerObjectLiteral(
   // the slot's width coercion constructs through the trivial
   // parameter-property constructor (recordToClassPlan), or fences with
   // the record-shape story.
-  // A jsval-mapped context reaches here only when lowerExpr's island
-  // gate DECLINED it (a project-declared typedef that absorbed to the
-  // island through checker-`any` field residue): the literal builds at
-  // its own type like every unmappable context.
+
   // An index-signature literal can inherit a callable contextual type for
   // a prototype-named DATA property (notably `toString`). Object literals
   // have no call signature; construct their own data shape and let the
@@ -1025,7 +1018,6 @@ export function lowerObjectLiteral(
     mapped.kind === "union" ||
     mapped.kind === "dyn" ||
     mapped.kind === "object" ||
-    mapped.kind === "jsval" ||
     mapped.kind === "func"
   ) {
     const ctxUnion = mapped?.kind === "union" ? mapped : null;
@@ -1114,8 +1106,7 @@ export function lowerObjectLiteral(
       } else if (ts.isPropertyAssignment(prop)) {
         v = tryLowerExpression(lowerer, prop.initializer);
       }
-      if (!v || v.type.kind === "void" || v.type.kind === "caught" || v.type.kind === "jsval")
-        continue;
+      if (!v || v.type.kind === "void" || v.type.kind === "caught") continue;
       if (isUnitType(v.type)) continue;
       fields.push({ name, value: v });
     }
@@ -2295,10 +2286,8 @@ export function lowerObjectLiteral(
     if (at >= 0) fields.splice(at, 1);
     fields.push({ name, value });
   }
-  // Optional fields may be omitted: the field holds its ABSENT state (it
-  // reads as undefined but is not an own property) or, for an island
-  // handle slot, the engine's undefined cell. tsc rejects omission of
-  // required fields before lowering.
+  // Optional fields may be omitted: the field holds its absent state.
+  // tsc rejects omission of required fields before lowering.
   // A REQUIRED missing field keeps the shape-mismatch rejection (possible
   // through `as`: the cast smuggles a narrower literal past freshness).
   if (droppedNames.size > 0) {
@@ -2315,18 +2304,7 @@ export function lowerObjectLiteral(
     const provided = new Set(fields.filter((f) => !f.overflow).map((f) => f.name));
     for (const f of shape.fields) {
       if (provided.has(f.name)) continue;
-      // 'unknown' fields complete with the dyn undefined — the absent
-      // property reads as undefined in Node, and a dyn slot holds
-      // exactly that (the options-record call shape against
-      // `{ plugins: unknown, ... }` — a JS caller the checker admits).
-      const optional =
-        ((lowerer.checker.getPropertyOfType(tsType, f.name)?.flags ?? 0) &
-          ts.SymbolFlags.Optional) !==
-        0;
-      const absentHandle: IrExpr | null =
-        f.type.kind === "jsval" && optional
-          ? { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }
-          : null;
+      const absentHandle: IrExpr | null = null;
       const absent =
         lowerer.absentFieldValue(f.type, loc) ??
         (f.type.kind === "dyn" ? dynUndefinedExpr(loc) : null) ??
@@ -2532,14 +2510,6 @@ export type CondSpreadProp = (ts.PropertyAssignment | ts.ShorthandPropertyAssign
   name: ts.Identifier | ts.StringLiteral;
 };
 
-/** Parses the conditional-spread idiom `...(c ? { k: v, ... } : {})`
- * (either orientation). Returns the condition, the non-empty arm's
- * properties, and which arm carries them; "unsupported" for conditional
- * sources OUTSIDE the idiom (both arms non-empty, computed/method
- * members); null when the spread source isn't a conditional at all.
- * Callers slice their own honest subset (the static record path takes
- * exactly one property; the island literal takes any number; spawn's
- * options walk takes a `detached` boolean literal). */
 export function conditionalSpreadOf(
   expr: ts.Expression,
 ): { cond: ts.Expression; props: CondSpreadProp[]; whenTrue: boolean } | "unsupported" | null {

@@ -40,12 +40,11 @@ test.each([
       expect(native.stdout).toBe(oracle.stdout);
       expect(native.stderr).toBe(oracle.stderr);
     }
-    for (const dynamic of [false, true]) {
-      const { coverage } = analyze(entry, { dynamic });
+    {
+      const { coverage } = analyze(entry, {});
       expect(coverage.preflightFailed).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -56,36 +55,47 @@ test.each([
   ["dependency", "package/node_modules/dependency", "dependency"],
   ["package-extra", "package-extra", "package-extra"],
   ["relative dependency", "package/node_modules/dependency", "./node_modules/dependency/index.js"],
-])("installed entry keeps %s on the npm boundary", (label, dependencyPath, specifier) => {
-  const dir = mkdtempSync(join(tmpdir(), "scriptc-installed-entry-dependency-"));
-  try {
-    const entry = join(dir, "node_modules/package/main.ts");
-    const dependency = join(dir, "node_modules", dependencyPath);
-    mkdirSync(dirname(entry), { recursive: true });
-    mkdirSync(dependency, { recursive: true });
-    writeFileSync(join(dirname(entry), "package.json"), '{"type":"module"}\n');
-    writeFileSync(
-      join(dependency, "package.json"),
-      JSON.stringify({ type: "module", main: "index.js", types: "index.d.ts" }),
-    );
-    writeFileSync(join(dependency, "index.d.ts"), "export declare const value: number;\n");
-    writeFileSync(join(dependency, "index.js"), "export const value = 42;\n");
-    writeFileSync(
-      entry,
-      `import { value } from ${JSON.stringify(specifier)}; ` + "console.log(`value ${value}`);\n",
-    );
-    const withoutIsland = analyze(entry).coverage;
-    expect(withoutIsland.preflightFailed, label).toBe(false);
-    expect(new Set(withoutIsland.diagnostics.map((d) => d.code)), label).toEqual(
-      new Set(["SC2013"]),
-    );
-    const withIsland = analyze(entry, { dynamic: true }).coverage;
-    expect(withIsland.diagnostics, label).toEqual([]);
-    expect(withIsland.stats.statementsIsland, label).toBeGreaterThan(0);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+])(
+  "installed entry resolves %s with native package rules",
+  async (label, dependencyPath, specifier) => {
+    const dir = mkdtempSync(join(tmpdir(), "scriptc-installed-entry-dependency-"));
+    try {
+      const entry = join(dir, "node_modules/package/main.ts");
+      const dependency = join(dir, "node_modules", dependencyPath);
+      mkdirSync(dirname(entry), { recursive: true });
+      mkdirSync(dependency, { recursive: true });
+      writeFileSync(join(dirname(entry), "package.json"), '{"type":"module"}\n');
+      writeFileSync(
+        join(dependency, "package.json"),
+        JSON.stringify({ type: "module", main: "index.js", types: "index.d.ts" }),
+      );
+      writeFileSync(join(dependency, "index.d.ts"), "export declare const value: number;\n");
+      writeFileSync(join(dependency, "index.js"), "export const value = 42;\n");
+      writeFileSync(
+        entry,
+        `import { value } from ${JSON.stringify(specifier)}; ` + "console.log(`value ${value}`);\n",
+      );
+      const { coverage } = analyze(entry);
+      expect(coverage.preflightFailed, label).toBe(false);
+      if (specifier.startsWith(".")) {
+        // A relative path into a nested dependency does not select that
+        // package's implementation graph or extend the entry's ownership.
+        expect(new Set(coverage.diagnostics.map((d) => d.code))).toEqual(new Set(["SC2013"]));
+        return;
+      }
+      expect(coverage.diagnostics, label).toEqual([]);
+      const outDir = join(dir, "out");
+      const built = await compile(entry, { outDir, outPath: join(outDir, "program"), sanitize });
+      expect(built.ok, JSON.stringify(built.diagnostics)).toBe(true);
+      if (!built.ok) return;
+      const native = await execFileAsync(built.binaryPath);
+      expect(native.stdout).toBe("value 42\n");
+      expect(native.stderr).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("installed entry ownership follows a linked package's source graph", async () => {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-installed-entry-link-"));

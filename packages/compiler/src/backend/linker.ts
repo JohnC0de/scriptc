@@ -113,7 +113,7 @@ export async function executableLinkerEnvironmentFingerprint(
     .update("\0")
     .update(effectiveDriverIdentity)
     .update("\0");
-  for (const name of ["PATH", "SCRIPTC_FETCH_CURL", "SCRIPTC_TEST_RUNTIME_SRC_DIR"] as const) {
+  for (const name of ["PATH", "SCRIPTC_TEST_RUNTIME_SRC_DIR"] as const) {
     const value = env[name];
     hash
       .update(name)

@@ -268,7 +268,7 @@ test(
           dynamic,
           "const value: any = { answer: 42 }; console.log(`answer:${value.answer}`);\n",
         );
-        await checkProgram(probe, dynamic, ["--dynamic"]);
+        await checkProgram(probe, dynamic);
         const comptime = join(directory, "comptime.ts");
         writeFileSync(
           comptime,

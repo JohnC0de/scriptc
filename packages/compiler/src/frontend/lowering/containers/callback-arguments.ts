@@ -65,17 +65,14 @@ export function lowerArrayCallback(
       }
     }
   }
-  // A JSVAL-element receiver behind an EVOLVED contextual type (the
-  // evolving-`any` array under --dynamic — lowerArrayMethodCall adopted
+
   // the value's handle element while tsc's evolving analysis types the
   // callback's params by the pushed elements): the lead params BIND the
   // handles the loop passes, whatever the contextual type spelled —
-  // paramShape's island-handle early-out, the then-handler rule.
+
   if (ts.isArrowFunction(argNode) || ts.isFunctionExpression(argNode)) {
-    argNode.parameters.forEach((p, i) => {
-      if (i >= lead.length || lead[i]!.kind !== "jsval") return;
-      if (!ts.isIdentifier(p.name) || p.type || p.initializer || p.dotDotDotToken) return;
-      lowerer.jsvalParamOverrides.add(p);
+    argNode.parameters.forEach((_p, _i) => {
+      return;
     });
   }
   // An untyped or flow-refined array can contextually type an inline
@@ -93,7 +90,6 @@ export function lowerArrayCallback(
       if (
         expected === undefined ||
         expected.kind === "dyn" ||
-        expected.kind === "jsval" ||
         !ts.isIdentifier(param.name) ||
         param.type ||
         param.initializer ||

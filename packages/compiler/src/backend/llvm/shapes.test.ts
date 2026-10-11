@@ -166,7 +166,7 @@ describe("LLVM runtime RC symbols", () => {
 
 describe("live-object audit notes", () => {
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: "audit.ts",
     entry: "main",
     functions: [],

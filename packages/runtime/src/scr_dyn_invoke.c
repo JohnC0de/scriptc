@@ -129,11 +129,7 @@ static void scr_dyn_display_buf(ScrJsonBuf *b, const ScrDyn *d) {
      * for a bare promise is "[object Promise]". */
     scr_jb_puts(b, "[object Promise]");
     return;
-  case SCR_DYN_JSVAL:
-    /* The engine's own ToString (a bridged failure leaves the exception
-     * pending and appends nothing — the loud path). */
-    scr_dyn_isl_tostr_buf(b, d);
-    return;
+
   case SCR_DYN_TYPED_REF: {
     ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
     scr_dyn_display_buf(b, materialized);
@@ -220,12 +216,8 @@ static ScrDyn *dyn_call_cb(ScrDyn *cb, ScrDyn *item, size_t i, ScrDyn *recv) {
 static bool dyn_cb_check(ScrDyn *const *args, size_t argc) {
   ScrDyn *cb = argc > 0 ? args[0] : scr_dyn_undefined();
   if (scr_dyn_is_callable(cb)) return true;
-  /* An ENGINE function is callable — scr_dyn_call's JSVAL arm routes it
-   * (the loops below call through scr_dyn_call, which converts the checked-dynamic tree
-   * element arguments per the uniform crossing). A wrapped NON-function
-   * falls through to the display path: String(cb) renders through the
-   * engine, exactly Node's message. */
-  if (cb->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(cb, "function")) return true;
+
+
   ScrJsonBuf b;
   scr_jb_init(&b);
   scr_dyn_display_buf(&b, cb);
@@ -261,7 +253,7 @@ static ScrDyn *dyn_borrow_get(ScrDyn *recv, const ScrStr *key) {
   }
   if (recv->kind == SCR_DYN_OBJ) return scr_dyn_obj_read(recv, key->data, key->len);
   if (recv->kind == SCR_DYN_PROXY) return scr_dyn_proxy_get(recv, key);
-  if (recv->kind == SCR_DYN_JSVAL) return scr_dyn_isl_key_get(recv, key);
+
   if (recv->kind == SCR_DYN_FUNC) {
     ScrDyn *value = scr_dyn_fn_get(recv, key->data, key->len);
     return value ? value : scr_dyn_retain(scr_dyn_undefined());
@@ -310,7 +302,7 @@ static bool dyn_borrow_has(ScrDyn *recv, const ScrStr *key) {
     scr_dyn_release(value);
     return present;
   }
-  if (recv->kind == SCR_DYN_JSVAL) return scr_dyn_isl_fence(recv, "Array.prototype borrowed property presence");
+
   return scr_dyn_has_key(recv, key);
 }
 
@@ -655,7 +647,7 @@ static bool dyn_arr_flatten(ScrDyn *out, const ScrDyn *source, double depth, siz
     if (!dyn_borrow_present((ScrDyn *)source, i)) { if (scr_exc_pending()) return false; continue; }
     ScrDyn *item = dyn_borrow_item((ScrDyn *)source, i);
     if (!item) return false;
-    if (depth > 0 && item->kind == SCR_DYN_TYPED_REF && scr_dyn_isl_is_array(item)) {
+    if (depth > 0 && item->kind == SCR_DYN_TYPED_REF && scr_dyn_ref_is_array(item)) {
       ScrDyn *view = scr_dyn_typed_ref_materialize(item);
       if (!view || scr_exc_pending()) { scr_dyn_release(view); scr_dyn_release(item); return false; }
       bool ok = dyn_arr_flatten(out, view, depth - 1, visits);
@@ -772,16 +764,7 @@ static ScrDyn *scr_dyn_invoke_impl(
     return scr_dynh_dispatch(recv, method, args, argc, what);
   }
 
-  /* Island-held receivers: the ENGINE runs its own prototypes (JS-exact
-   * flatMap/map/forEach/filter — Array.prototype is the engine's) through
-   * scr_jsval_call_method; arguments cross per the uniform conversion
-   * (wrapped cells by reference, dyn data deep-copied, FUNC boxes through
-   * the host shim), a missing member throws the engine's own TypeError,
-   * and the result wraps back scalar-normalized. `what` is unused — the
-   * engine's message names the failure. */
-  if (recv->kind == SCR_DYN_JSVAL) {
-    return scr_dyn_jsval_ops()->invoke(recv->v.jsval.cell, method, args, argc, what);
-  }
+
   if (recv->kind == SCR_DYN_PROXY) {
     ScrStr *key = scr_str_new(method, strlen(method));
     ScrDyn *callable = scr_dyn_proxy_get(recv, key);
@@ -822,10 +805,7 @@ static ScrDyn *scr_dyn_invoke_impl(
    * original receiver as `this`. */
   if (recv->kind == SCR_DYN_OBJ || recv->kind == SCR_DYN_PROXY) {
     ScrDyn *m = scr_dyn_obj_read(recv, method, strlen(method));
-    if (m && (scr_dyn_is_callable(m) ||
-              /* a WRAPPED engine function stored as a dyn member: the
-               * routed call (scr_dyn_call's JSVAL arm) runs it. */
-              (m->kind == SCR_DYN_JSVAL && scr_dyn_isl_typeof_is(m, "function")))) {
+    if (m && (scr_dyn_is_callable(m))) {
       /* JS binds the receiver for the call (`obj.method()` — this === obj):
        * the ambient-receiver window (scr_runtime.h). */
       scr_dyn_this_push_dyn(callback_recv ? callback_recv : recv);
@@ -871,7 +851,7 @@ static ScrDyn *scr_dyn_invoke_impl(
     {
       ScrDyn *own = scr_dyn_fn_get(recv, method, strlen(method));
       if (own) {
-        if (own->kind == SCR_DYN_FUNC || own->kind == SCR_DYN_JSVAL) {
+        if (own->kind == SCR_DYN_FUNC) {
           scr_dyn_this_push_dyn(recv);
           ScrDyn *r = scr_dyn_call(own, args, argc, what);
           scr_dyn_this_pop();
@@ -1193,7 +1173,7 @@ static ScrDyn *scr_dyn_invoke_impl(
         if (!dyn_arr_copy_item(out, recv, i, true)) { scr_dyn_release(out); return NULL; }
       }
       for (size_t a = 0; a < argc; a++) {
-        ScrDyn *view = args[a]->kind == SCR_DYN_TYPED_REF && scr_dyn_isl_is_array(args[a])
+        ScrDyn *view = args[a]->kind == SCR_DYN_TYPED_REF && scr_dyn_ref_is_array(args[a])
             ? scr_dyn_typed_ref_materialize(args[a]) : NULL;
         if (scr_exc_pending()) { scr_dyn_release(view); scr_dyn_release(out); return NULL; }
         const ScrDyn *source = view ? view : args[a];
@@ -1414,7 +1394,7 @@ static ScrDyn *scr_dyn_invoke_impl(
             cb, item, i, callback_recv ? callback_recv : recv);
         scr_dyn_release(item);
         if (!r) { scr_dyn_release(out); return NULL; }
-        if (r->kind == SCR_DYN_TYPED_REF && scr_dyn_isl_is_array(r)) {
+        if (r->kind == SCR_DYN_TYPED_REF && scr_dyn_ref_is_array(r)) {
           ScrDyn *view = scr_dyn_typed_ref_materialize(r);
           scr_dyn_release(r);
           r = view;
@@ -1424,25 +1404,6 @@ static ScrDyn *scr_dyn_invoke_impl(
           for (size_t j = 0; j < r->v.arr.len; j++) {
             if (dyn_borrow_present(r, j)) scr_dyn_arr_push(out, dyn_borrow_item(r, j));
             if (scr_exc_pending()) { scr_dyn_release(r); scr_dyn_release(out); return NULL; }
-          }
-          scr_dyn_release(r);
-        } else if (scr_dyn_isl_is_array(r)) {
-          /* An engine-array result: length + element reads through the
-           * routed engine ops (a bridged surprise unwinds). */
-          ScrStr *lk = scr_str_new("length", 6);
-          ScrDyn *lenv = scr_dyn_isl_key_get(r, lk);
-          scr_str_release(lk);
-          if (!lenv) { scr_dyn_release(r); scr_dyn_release(out); return NULL; }
-          size_t rn = lenv->kind == SCR_DYN_NUM ? (size_t)lenv->v.num : 0;
-          scr_dyn_release(lenv);
-          for (size_t j = 0; j < rn; j++) {
-            char idx[24];
-            int ilen = snprintf(idx, sizeof idx, "%zu", j);
-            ScrStr *jk = scr_str_new(idx, (size_t)ilen);
-            ScrDyn *el = scr_dyn_isl_key_get(r, jk);
-            scr_str_release(jk);
-            if (!el) { scr_dyn_release(r); scr_dyn_release(out); return NULL; }
-            scr_dyn_arr_push(out, el); /* ownership moves in */
           }
           scr_dyn_release(r);
         } else {
@@ -1784,8 +1745,8 @@ ScrDyn *scr_dyn_array_prototype(void) {
 static ScrDyn *scr_dyn_define_props_internal(ScrDyn *target, ScrDyn *descs, ScrDyn *protected_keys) {
   /* Island-held operands ARE objects to Node — the non-object TypeError
    * below would be a wrong claim. Loud fence (lane dyn-routing-ops). */
-  scr_dyn_isl_fence(target, "Object.defineProperties");
-  if (!scr_exc_pending()) scr_dyn_isl_fence(descs, "Object.defineProperties");
+
+
   if (scr_exc_pending()) return NULL;
   if (target->kind != SCR_DYN_OBJ && target->kind != SCR_DYN_FUNC && target->kind != SCR_DYN_ARR) {
     scr_throw_error_msg(SCR_ERR_TYPE, "Object.defineProperties called on non-object",

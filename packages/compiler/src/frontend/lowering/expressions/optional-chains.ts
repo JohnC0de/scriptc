@@ -1,6 +1,6 @@
 import { dynUndefinedExpr } from "../../../ir/build.js";
 import * as ts from "../../ts7/adapter.js";
-import { DYN, JSVAL, STRING, UNDEFINED_T, VOID, isUnitType, typeEquals } from "../../../ir/ir.js";
+import { DYN, STRING, UNDEFINED_T, VOID, isUnitType, typeEquals } from "../../../ir/ir.js";
 import type { IrExpr, IrStmt, SrcLoc } from "../../../ir/ir.js";
 import { isNodeEsmFile, locOf } from "../../program.js";
 import type { Lowerer } from "../lowerer.js";
@@ -86,15 +86,11 @@ export function isRequireMainFilename(lowerer: Lowerer, expr: ts.Expression): bo
   return !isNodeEsmFile(expr.getSourceFile(), lowerer.program);
 }
 
-/** True when `expr` is the tail of an optional chain that must short-circuit
- * whole: an unhandled deeper `?.` guarded by a unit-armed union or an island
- * value. Dynamic tails need the guard because an ordinary read of the
- * short-circuited undefined would throw; never-nullish receivers fold at the token. */
 export function isOptionalChainTail(lowerer: Lowerer, expr: ts.Expression): boolean {
   const tail = chainTailDot(lowerer, expr);
   if (!tail) return false;
   const recvT = lowerer.mapTypeOf(lowerer.typeOf(tail.expression));
-  if (recvT?.kind === "jsval" || recvT?.kind === "dyn") return true;
+  if (recvT?.kind === "dyn") return true;
   if (recvT?.kind !== "union") return false;
   const def = lowerer.unions.get(recvT.unionId);
   return !!def && def.arms.some(isUnitType);
@@ -314,66 +310,7 @@ export function lowerOptionalChain(
       lowerer.chainHandled.delete(dotNode);
     }
   }
-  // An 'any' (island-handle) receiver: the nullish test asks the ENGINE
-  // value at runtime — null/undefined short-circuit to the engine's
-  // undefined (JS: null receivers yield undefined too), anything else
-  // proceeds as the plain island operation with the receiver evaluated
-  // once (argument side effects stay lazy, like every optChain). The
-  // result is an island value again ('any' in, 'any' out).
-  if (receiver.type.kind === "jsval") {
-    const id = `chain.${lowerer.chainCounter++}`;
-    const recvRef: IrExpr = { kind: "chainRecv", id, type: JSVAL, loc: locOf(recvNode) };
-    if (dotNode === expr && ts.isCallExpression(expr)) {
-      // `a.b?.(...)` — a MEMBER callee: JS calls it with `this` bound to
-      // `a` and short-circuits a nullish member — exactly the engine's
-      // own `o.name?.()` (optCallMethod: the RECEIVER is `a`, evaluated
-      // once through the chain; a nullish `a` itself short-circuits
-      // earlier like any optional chain). Computed members keep a fence.
-      if (ts.isPropertyAccessExpression(recvNode) || ts.isElementAccessExpression(recvNode)) {
-        if (ts.isPropertyAccessExpression(recvNode) && !recvNode.questionDotToken) {
-          const obj = lowerer.lowerExpr(recvNode.expression);
-          if (obj.type.kind !== "jsval")
-            lowerer.badType(recvNode.expression, lowerer.typeOf(recvNode.expression));
-          const args = expr.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-          return {
-            kind: "jsOp",
-            op: "optCallMethod",
-            name: recvNode.name.text,
-            args: [obj, ...args],
-            type: JSVAL,
-            loc,
-          };
-        }
-        lowerer.unsupported(
-          "SC1090",
-          expr,
-          "optional calls of computed 'any' member values (a[k]?.() — bind the member to a const first)",
-        );
-      }
-      const args = expr.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-      const body: IrExpr = {
-        kind: "jsOp",
-        op: "callFn",
-        args: [recvRef, ...args],
-        type: JSVAL,
-        loc,
-      };
-      return { kind: "optChain", id, receiver, body, type: JSVAL, loc };
-    }
-    // Member forms (`x?.y`, `x?.y(...)`, `x?.[i]`): re-dispatch the plain
-    // island lowering with the receiver node bound to the chain.
-    lowerer.chainRecvByNode.set(recvNode, recvRef);
-    lowerer.chainHandled.add(dotNode);
-    let body: IrExpr;
-    try {
-      body = lowerer.lowerExpr(expr);
-    } finally {
-      lowerer.chainRecvByNode.delete(recvNode);
-      lowerer.chainHandled.delete(dotNode);
-    }
-    if (body.type.kind !== "jsval") lowerer.badType(expr, lowerer.typeOf(expr));
-    return { kind: "optChain", id, receiver, body, type: JSVAL, loc };
-  }
+
   const def =
     receiver.type.kind === "union" ? lowerer.unions.get(receiver.type.unionId) : undefined;
   if (!def || !def.arms.some(isUnitType)) {
@@ -513,8 +450,7 @@ export function finishOptionalChain(
     (type.kind !== "union" || lowerer.armTag(type.unionId, UNDEFINED_T) < 0) &&
     receiver.type.kind === "union" &&
     lowerer.armTag(receiver.type.unionId, UNDEFINED_T) >= 0 &&
-    body.type.kind !== "generator" &&
-    body.type.kind !== "jsval"
+    body.type.kind !== "generator"
       ? lowerer.withUndefinedArmOf(body.type)
       : null;
   if (hiddenOptionalResult) type = hiddenOptionalResult;

@@ -346,9 +346,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "https.requestFn",
   "https.requestFnCb",
   "rl.question",
-  "island.eval",
-  "island.import",
-  "island.castFail",
+
   "json.parse",
   "json.parseReviver",
   "json.stringifyReplacer",
@@ -599,9 +597,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "assert.ifErrorStr",
   "assert.ifErrorBool",
   "assert.ifErrorDyn",
-  // util.inspect of an island `any` composite: the runtime tag is all
+
   // there is, so the honest answer is a catchable TypeError.
-  "insp.jsval",
+
   // The wider sync fs slice: same catchable errno throws as the rest.
   "fs.unlinkSync",
   "fs.chmodSync",

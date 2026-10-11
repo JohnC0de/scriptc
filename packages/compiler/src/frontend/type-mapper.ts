@@ -21,7 +21,6 @@ import {
   isSupportedMapValue,
   isSupportedSetElem,
   isUnitType,
-  JSVAL,
   mapOf,
   NULL_T,
   PROCSTREAM_T,
@@ -122,15 +121,7 @@ export function jsOpenObjectType(
     : type;
 }
 
-/** The ambient TYPE names of the fetch slice. Under --dynamic their
- * values live in the embedded engine and map to island handles (jsval).
- * Static fetch gives Response, RequestInit, AbortController/AbortSignal, response
- * Headers, and the readable Web Streams slice native checked-dynamic
- * handle representations. The Headers constructor itself remains
- * dynamic-only even though response.headers is native.
- * Declaration provenance is checked in mapType so user types with the
- * same names keep their ordinary structural representation. */
-export const ISLAND_AMBIENT_TYPES = [
+export const FETCH_AMBIENT_TYPES = [
   "Response",
   "Request",
   "ResponseInit",
@@ -147,23 +138,6 @@ export const ISLAND_AMBIENT_TYPES = [
   "ReadableStreamReadValueResult",
   "ReadableStreamReadDoneResult",
 ] as const;
-
-function isAmbientAbortHandleType(type: ts.Type, ctx: TypeMapperCtx): boolean {
-  if (type.isUnionType())
-    return ts.constituentTypes(type).some((part) => isAmbientAbortHandleType(part, ctx));
-  const symbol = type.getSymbol();
-  return (
-    !!symbol &&
-    (symbol.name === "AbortSignal" || symbol.name === "AbortController") &&
-    ctx.checker
-      .declarationsOf(symbol)
-      .some(
-        (d) =>
-          (ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)) &&
-          ctx.isStdlibFile(d.getSourceFile()),
-      )
-  );
-}
 
 /** node:util.parseArgs's public and @types/node helper type names. Values
  * behind this surface use the checked-dynamic tree; see mapTypeInner. */
@@ -736,8 +710,6 @@ export function formatIrType(
           seen.delete(t.unionId);
         }
       }
-      case "jsval":
-        return append("any");
       case "regex":
         return append("RegExp");
       case "date":
@@ -975,21 +947,14 @@ export interface TypeMapperCtx {
    * Map/RegExp/Promise recognition needs declaration provenance: the name
    * alone proves nothing (a user's own `interface Map` maps as a record). */
   isStdlibFile: (sf: ts.SourceFile) => boolean;
-  /** True for an npm package's shipped .d.ts — a declaration file under
-   * node_modules that is NOT the standard library (typescript's own lib
-   * files live under node_modules too). Types declared there map to jsval
-   * under --dynamic: the package's implementation runs in the embedded
-   * engine, so its values are island handles. */
+
   isNpmFile: (sf: ts.SourceFile) => boolean;
   /** True for a declaration file explicitly mapped by coverage's
    * --external-types option. These declarations are trusted as structural
    * type descriptions for project-owned values, but their imported runtime
    * bindings are fenced separately by the Lowerer. */
   isExternalTypeFile: (sf: ts.SourceFile) => boolean;
-  /** --dynamic: `any` maps to the island handle type (jsval). Off, `any`
-   * stays unmapped and the requires-dynamic diagnostic fires per site. */
-  dynamic: boolean;
-  /** Successful context-free mappings, keyed by dynamic posture + the
+  /** Successful context-free mappings, keyed by the
    * TypeScript server's stable type id. A generated facade can reference the
    * same large record/function type thousands of times; remapping its full
    * member graph each time is quadratic work. Generic/mixin contexts opt out
@@ -1005,10 +970,7 @@ export interface TypeMapperCtx {
    * would ICE the validator. Such instance types stay unmapped (null):
    * callers fence them like any other unsupported type. */
   isProgramFile: (sf: ts.SourceFile) => boolean;
-  /** Static ECMAScript module namespace identity, when `type` is exactly a
-   * compiled source module or supported Node builtin namespace. Dynamic
-   * builds leave these unmapped because import() values live in the
-   * embedded engine there. */
+
   moduleNamespaceId?: (type: ts.Type) => string | null;
 }
 /** A generator type's normalized value channels (Generator<T, TReturn,
@@ -1098,7 +1060,7 @@ export function mapType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const topLevel = mapTypeDepth === 0;
   const typeId = (type as { id?: number }).id;
   const memoizable = typeId !== undefined && (ctx.canMemoizeType?.() ?? true);
-  const memoKey = memoizable ? `${ctx.dynamic ? 1 : 0}:${typeId}` : null;
+  const memoKey = memoizable ? `${0}:${typeId}` : null;
   if (memoKey !== null) {
     const memo = ctx.typeMemo?.get(memoKey);
     if (memo !== undefined) return memo;
@@ -1140,13 +1102,9 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // TypeScript's intrinsic globalThis symbol has no declaration. A stored
   // reference needs native object identity, including var's undefined state.
   const intrinsic = type.getSymbol();
-  if (
-    !ctx.dynamic &&
-    intrinsic?.name === "globalThis" &&
-    checker.declarationsOf(intrinsic).length === 0
-  )
+  if (intrinsic?.name === "globalThis" && checker.declarationsOf(intrinsic).length === 0)
     return DYN;
-  if (!ctx.dynamic) {
+  {
     const moduleId = ctx.moduleNamespaceId?.(type) ?? null;
     if (moduleId !== null) return { kind: "moduleNs", moduleId };
   }
@@ -1360,11 +1318,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // through the same checked casts. Member accesses tsc allows on `object`
   // (the Object.prototype surface) fence at their use sites.
   if (flags & ts.TypeFlags.NonPrimitive) return DYN;
-  // `any` is the island handle type under --dynamic (the type-hole becomes
-  // dynamically-executed code); without the flag it stays unmapped and the
-  // per-site diagnostic tells the user about --dynamic and the static
-  // alternative (`unknown` + a checked cast).
-  if (flags & ts.TypeFlags.Any) return ctx.dynamic ? JSVAL : null;
+
+  // Context-free `any` has no concrete storage shape. The lowering site
+  // chooses checked-value storage when its operations support that boundary.
+  if (flags & ts.TypeFlags.Any) return null;
   // Enum types and enum member literal types: an enum VALUE at runtime IS
   // its underlying primitive (tsc's own emit stores plain numbers/strings
   // on the enum object; const enums inline them), so the enum type maps to
@@ -1397,23 +1354,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       return hasStr ? STRING : F64;
     }
   }
-  // Types DECLARED by a shipped .d.ts — an npm package's, or a LOCAL
-  // declaration file describing sibling JS the program loads dynamically
-  // (an Emscripten factory's .d.mts): the .d.ts is trusted as the type
-  // surface, but the values behind it live in the embedded engine — under
-  // --dynamic they are island handles (jsval), and every operation on them
-  // rides the engine ops with validated exits at typed boundaries.
-  // Primitives/arrays/etc. REACHED THROUGH such types keep their
-  // structural mapping (they were handled above or recurse normally); this
-  // rule fires only when the type's own identity is declaration-file-
-  // declared — interfaces, classes, type literals, and aliases from the
-  // .d.ts. The standard library's declaration files are carved out (their
-  // surfaces have static lowerings), as are declarations explicitly mapped
-  // by --external-types: those describe project-owned structural data while
-  // the Lowerer fences their imported runtime bindings. The program's own
-  // compiled modules are never declaration files. Without --dynamic this
-  // stays unmapped; badType reports the per-package requires-dynamic
-  // diagnostic for node_modules types and the generic story otherwise.
+  // Declaration-only package types have no compiled implementation.
+  // Primitive and container types retain their structural mappings; types
+  // owned by the standard library or explicit host mappings are handled
+  // by their dedicated native rules.
   const npmSym = widened.getAliasSymbol() ?? widened.getSymbol();
   const npmDecls = npmSym ? checker.declarationsOf(npmSym) : undefined;
   if (
@@ -1424,22 +1368,18 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       return sf.isDeclarationFile && !ctx.isStdlibFile(sf) && !ctx.isExternalTypeFile(sf);
     })
   ) {
-    return ctx.dynamic ? JSVAL : null;
+    return null;
   }
-  // Module NAMESPACE types (`typeof import("./x.mjs")`) were claimed at
-  // the top by moduleNamespaceId when they name a compiled source module
-  // or supported builtin in a static build. Declaration-only package
-  // namespaces retain the npm rule above; dynamic builds retain their
-  // jsval import-handle path.
+  // Module namespaces were claimed above when they name compiled source
+  // modules or supported builtins. Declaration-only namespaces remain refused.
+
   // T[]: monomorphic arrays, recursively (number[][] works). An element type
   // that doesn't map (never from a context-free `[]`) makes the whole array
   // unsupported — null propagates. Record/object/union elements ride the
   // runtime's REF element kind (per-array RC entry points, the map-value
   // technique), and PROMISE elements ride it too (Promise<T>[] is
   // Promise.all's food: promises are refcounted, cycle-headered values
-  // with `_v` adapters like any other ref element — they just never
-  // JSON-serialize or cross the island boundary, which the safety
-  // predicates already refuse). FUNCTION elements ride REF too (closure
+  // with `_v` adapters like any other ref element). FUNCTION elements ride REF too (closure
   // `_v` adapters + scr_closure_trace_v — closures are cycle-headered):
   // `f === f` identity through indexOf/includes is sound because a
   // function VALUE is one ScrClosure for its whole life — top-level
@@ -1459,16 +1399,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // VOID mapping is a return-position artifact, not a value.
     if (elem?.kind === "void" && isUnitOnlyTsType(elemTs, ctx.resolveTypeParam))
       elem = unitOnlyUnion(unions);
-    // A jsval element ABSORBS the array — with one carve-out. An array
-    // type entangled with package-declared ('npm-jsval') elements
-    // (`GeneratedFile[]`, `ModelMessage[]`) describes ISLAND values: the
-    // handles those APIs produce are engine arrays, never the static
-    // ScrArr this mapping would otherwise claim, so the whole array is
-    // one handle and every operation on it is an engine op. The carve-out
-    // is literal `any[]`: an EXPLICIT static array of dynamic values —
-    // the messages-building pattern (`const content: any[] = []`) — which
-    // keeps its static array-of-handles representation.
-    if (elem?.kind === "jsval" && !(elemTs.flags & ts.TypeFlags.Any)) return JSVAL;
+
     if (!elem) return null;
     // A dyn ELEMENT makes the WHOLE array the checked-dynamic value:
     // `unknown[]`, `object[]`, and the collapsed `(string | object)[]`
@@ -1522,18 +1453,13 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     const args = checker.getTypeArguments(ref);
     if (args.length === 0) return arrayOf(unitOnlyUnion(unions));
     if (tupleShape?.elementFlags === undefined) return null;
-    // Optional/rest elements (`[string?, number?]`, `[string, ...number[]]`)
-    // have no fixed shape — the ARITY is a runtime fact. Under --dynamic
-    // the value lives in the engine, a real JS array carrying its true
-    // length (reads, destructuring, JSON, .length all exact); static
-    // builds stay unmapped and badType tells the dynamic-tier story.
+    // Optional/rest elements have no fixed native tuple layout.
     if (tupleShape.elementFlags.some((f) => !(f & ts.ElementFlags.Required))) {
-      return ctx.dynamic ? JSVAL : null;
+      return null;
     }
     const fields: { name: string; type: IrType }[] = [];
     for (let i = 0; i < args.length; i++) {
-      let et =
-        !ctx.dynamic && (args[i]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[i]!, ctx);
+      let et = (args[i]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[i]!, ctx);
       // A unit-only element (`[number, undefined]`) rides the unit-only
       // union, the record-field rule.
       if (et?.kind === "void" && isUnitOnlyTsType(args[i]!, ctx.resolveTypeParam))
@@ -1543,9 +1469,9 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       // normalizer shape): the slot has the overflow map's RC/JSON/dyn
       // plumbing, values arrive dyn or convert via dynFrom.
       if (!et || et.kind === "void") return null;
-      // A jsval member keeps this tuple in the island as a real JS array.
+
       // Object records may instead keep ambient abort handles in slots.
-      if (et.kind === "jsval") return JSVAL;
+
       fields.push({ name: String(i), type: et });
     }
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -2015,7 +1941,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   // spawn consumes a presence-sensitive option bag, including optional
   // stdio and env values. Keep it checked-dynamic for native normalization.
   if (isStdlibInterface("SpawnOptions")) return DYN;
-  // The fetch ambient slice: under --dynamic these are island handles
+
   // exactly like npm-declared types. Static fetch has one deliberately
   // narrower native representation: Response is an opaque checked-
   // dynamic capsule consumed only by the Response method lowerings, and
@@ -2029,7 +1955,6 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   {
     const alias = widened.getAliasSymbol();
     if (
-      !ctx.dynamic &&
       alias?.name === "ReadableStreamReadResult" &&
       checker
         .declarationsOf(alias)
@@ -2043,7 +1968,6 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     }
   }
   if (
-    !ctx.dynamic &&
     psym &&
     (psym.name === "ReadableStreamReadValueResult" ||
       psym.name === "ReadableStreamReadDoneResult") &&
@@ -2059,7 +1983,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   }
   if (
     psym &&
-    (ISLAND_AMBIENT_TYPES as readonly string[]).includes(psym.name) &&
+    (FETCH_AMBIENT_TYPES as readonly string[]).includes(psym.name) &&
     !(
       psym.name === "ReadableStream" &&
       checker
@@ -2074,7 +1998,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
           ctx.isStdlibFile(d.getSourceFile()),
       )
   ) {
-    return ctx.dynamic ? JSVAL : DYN;
+    return DYN;
   }
   // ReadonlyMap/ReadonlySet are the SAME runtime values as Map/Set — the
   // readonly-ness is a checker-only view (no mutating members on the
@@ -2083,30 +2007,26 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   if (isStdlibInterface("Map") || isStdlibInterface("ReadonlyMap")) {
     const args = checker.getTypeArguments(widened as ts.TypeReference);
     if (args.length !== 2) return null;
-    const key =
-      !ctx.dynamic && (args[0]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[0]!, ctx);
+    const key = (args[0]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[0]!, ctx);
     if (
       !key ||
       !isSupportedMapKey(key, key.kind === "union" ? ctx.unions.get(key.unionId)?.arms : undefined)
     )
       return null;
-    const value =
-      !ctx.dynamic && (args[1]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[1]!, ctx);
+    const value = (args[1]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[1]!, ctx);
     if (!value || !isSupportedMapValue(value)) return null;
     return mapOf(key, value);
   }
   // Native WeakMap keeps reference identities in checked-dynamic storage.
   // The runtime rejects reference kinds without a weak lifetime contract.
-  if (isStdlibInterface("WeakMap") || isStdlibInterface("WeakSet"))
-    return ctx.dynamic ? JSVAL : DYN;
+  if (isStdlibInterface("WeakMap") || isStdlibInterface("WeakSet")) return DYN;
   // Set<T>: Map's sibling — same provenance rule and key domain.
   // Anything else stays unmapped;
   // the `new Set` lowering names the offending element type specifically.
   if (isStdlibInterface("Set") || isStdlibInterface("ReadonlySet")) {
     const args = checker.getTypeArguments(widened as ts.TypeReference);
     if (args.length !== 1) return null;
-    const elem =
-      !ctx.dynamic && (args[0]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[0]!, ctx);
+    const elem = (args[0]!.flags & ts.TypeFlags.Any) !== 0 ? DYN : mapType(args[0]!, ctx);
     if (
       !elem ||
       !isSupportedSetElem(
@@ -2725,10 +2645,8 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // Promise<any> in a STATIC build (untyped JS entries: `new
     // Promise((resolve) => ...)` infers any): the settled value rides the
     // dyn arm exactly like Promise<unknown> — every use of the awaited
-    // value is checked-dynamic, the same honesty `unknown` gets. Dynamic
-    // builds keep the jsval mapping below (an engine promise is one
-    // handle).
-    if (arg.flags & ts.TypeFlags.Any && !ctx.dynamic) return { kind: "promise", inner: DYN };
+    // value is checked-dynamic, the same checks `unknown` gets.
+    if (arg.flags & ts.TypeFlags.Any) return { kind: "promise", inner: DYN };
     const inner = mapType(arg, ctx);
     if (!inner) return null;
     return { kind: "promise", inner };
@@ -2802,9 +2720,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   }
   // PromiseSettledResult<T>'s parts: the lib's PromiseFulfilledResult<T> /
   // PromiseRejectedResult interfaces map to the documented HONEST SUBSET
-  // record { status: string } — `value` (T) and `reason` (any) have no
-  // record-field representation here (void fields don't exist; a jsval
-  // field would absorb the record), and the manual-allSettled pattern this
+  // record { status: string }. The manual-allSettled pattern this
   // mapping exists for (pMap) discards them. Construction literals still
   // EVALUATE a dropped initializer for its effects — the awaited mapper —
   // via the object-literal lowering's drop path. Both interfaces intern
@@ -3205,7 +3121,6 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     // Recursive and Symbol-keyed callable objects need their complete live
     // property table; dropping those members into a plain closure loses data.
     if (
-      !ctx.dynamic &&
       checker.getCallSignatures(widened).length > 0 &&
       checker.getPropertiesOfType(widened).length > 0
     )
@@ -3243,7 +3158,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     for (const p of sig.getParameters()) {
       const decl = checker.valueDeclarationOf(p);
       const rest = decl !== undefined && ts.isParameter(decl) && decl.dotDotDotToken !== undefined;
-      // JavaScript rest values retain the checked-dynamic/island runtime-
+
       // arity ABI selected by lambdaSignature. Treating an inferred any[]
       // declaration as a typed packed-array closure would bypass its boxed
       // spread/error semantics and change coverage classification.
@@ -3297,7 +3212,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       // Belt and braces for non-strict type worlds: an optional param's
       // ABI slot is always the undefined-armed union (strictNullChecks
       // already spells it that way; arm it here if the world didn't).
-      if (optional && pt && pt.kind !== "void" && pt.kind !== "jsval" && pt.kind !== "dyn") {
+      if (optional && pt && pt.kind !== "void" && pt.kind !== "dyn") {
         const armed = withUndefinedArm(pt, ctx.unions);
         if (!armed) return null;
         pt = armed;
@@ -3324,7 +3239,7 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       isJsSourceFile(sigDecl.getSourceFile()) &&
       (retT.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0;
     let ret =
-      jsUnitReturn || (!ctx.dynamic && (retT.flags & ts.TypeFlags.Any) !== 0)
+      jsUnitReturn || (retT.flags & ts.TypeFlags.Any) !== 0
         ? DYN
         : retT.flags & ts.TypeFlags.Never
           ? VOID
@@ -3529,22 +3444,8 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
           continue;
         }
         const mapped = mapType(part, ctx);
-        // A jsval PART absorbs the union: `GeneratedFile | undefined` (a
-        // package-declared arm) is one island handle — the engine's
-        // undefined/null ARE handle values, and any data sibling is
-        // representable in the engine too, so the handle is the one
-        // runtime representation. Exactly tsc's own collapse for `any | T`
-        // (which never even reaches here as a union). Sibling arms that
-        // already mapped don't matter — and ones that would NOT map on
-        // their own don't block the absorb either: a STATIC value of such
-        // an arm flowing in still fences per-site at the marshal
-        // (jsvalIn's boundary message).
-        if (mapped?.kind === "jsval") return JSVAL;
+
         if (!mapped) {
-          // Before failing the whole union, let a LATER jsval part absorb.
-          for (const rest of ts.constituentTypes(widened)) {
-            if (mapType(rest, ctx)?.kind === "jsval") return JSVAL;
-          }
           return null;
         }
         if (mapped.kind === "void") {
@@ -3585,10 +3486,8 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
       // DYN WHOLESALE — the checked-dynamic tree's scalar kinds ARE the scalar arms (===,
       // typeof, switch dispatch all exact), typeof/Array.isArray/unit
       // narrowing on dyn already dispatches natively (dynTest +
-      // maybeNarrow's validated scalar extraction), and engine-valued
-      // arms ride the island kind (SCR_DYN_JSVAL), so no per-arm runtime
-      // tag is ever needed and the component fence retires at these
-      // sites. The domain is dynSubsumableUnionArm's: scalars, units, dyn
+      // maybeNarrow's validated scalar extraction), so no union tag is
+      // needed. The domain is dynSubsumableUnionArm's: scalars, units, dyn
       // itself, and records/arrays inside the dynFrom conversion domain
       // (those enter as dyn data — the deep-copy stance, so identity and
       // mutation coupling with the source value end at the slot;
@@ -4011,11 +3910,7 @@ function mapBoundIndexedAccess(type: ts.Type, ctx: TypeMapperCtx): IrType | null
  * (`{a?: string}` and `{a: string | undefined}` are ONE shape) — those stay
  * unmapped inside generic bodies; their concrete uses resolve structurally
  * through mapRecordType. */
-/** `Awaited<T>` where T is a STILL-GENERIC type parameter, resolved against
- * the lowerer's binding: promise kinds unwrap recursively (the alias's own
- * recursion), everything else is already its awaited self — including
- * jsval (the engine's await handles thenables natively). Null off the
- * shape (not the lib's Awaited over a bound parameter). */
+
 /** True for a TypeNode spelling the `const` assertion (`e as const`). */
 export function isConstAssertionTypeNode(t: ts.TypeNode): boolean {
   return (
@@ -4209,7 +4104,7 @@ export function genResultRecord(
         for (const a of unions.get(t.unionId)?.arms ?? []) byKey.set(typeKey(a), a);
         return true;
       }
-      if (t.kind === "regex" || t.kind === "date" || t.kind === "jsval" || t.kind === "generator") {
+      if (t.kind === "regex" || t.kind === "date" || t.kind === "generator") {
         return false; // no legal union arm exists for these kinds
       }
       byKey.set(typeKey(t), t);
@@ -4282,7 +4177,7 @@ export function withUnitArm(
   unions: UnionRegistry,
 ): IrType | null {
   const unit: IrType = { kind };
-  if (t.kind === "jsval") return t;
+
   if (t.kind === "union") {
     const def = unions.get(t.unionId);
     if (!def) return null;
@@ -4346,8 +4241,8 @@ function mapHybridCallableIntersection(widened: ts.Type, ctx: TypeMapperCtx): Ir
   for (const p of checker.getPropertiesOfType(widened)) {
     if (p.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) return null;
     const pt = mapType(checker.getTypeOfSymbol(p), ctx);
-    // No jsval absorb here: an island-entangled hybrid is not this shape.
-    if (!pt || pt.kind === "void" || pt.kind === "jsval") return null;
+
+    if (!pt || pt.kind === "void") return null;
     fields.push({ name: p.name, type: pt });
     declaredOrder.push(p.name);
   }
@@ -4618,12 +4513,10 @@ function mapRecordType(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {
     const inner = mapRecordTypeInner(widened, ctx);
     if (inner === null) return null; // a pending placeholder, if minted, stays unfinalized (prunes as unreachable)
     if (!("fields" in inner)) {
-      // A whole-type answer (the jsval/dyn absorbs, the header-family
       // canonical shape). If a back-reference minted a placeholder for
       // this very type meanwhile, the two answers disagree — fence rather
       // than leave references to a shape that is not this type's mapping.
-      if (shapes.recursivePending(widened) && inner.kind !== "jsval" && inner.kind !== "dyn")
-        return null;
+      if (shapes.recursivePending(widened) && inner.kind !== "dyn") return null;
       return inner;
     }
     if (shapes.recursivePending(widened)) {
@@ -4716,11 +4609,9 @@ function mapRecordTypeInner(
     for (const info of indexInfos) {
       if (!stringKey(info.keyType) && !(info.keyType.flags & ts.TypeFlags.Number)) return null;
       const iv = mapType(info.valueType, ctx);
-      // A jsval-valued signature absorbs the shape: `Record<string,
+
       // JSONValue>` (a package's own JSON alias) and `Record<string, any>`
-      // are one island object — the overflow map has no handle slot, and
-      // island objects hold arbitrary engine values natively.
-      if (iv?.kind === "jsval") return JSVAL;
+
       if (!iv || !isSupportedIndexValue(iv)) return null;
       if (v !== null && !typeEquals(v, iv)) return null;
       v = iv;
@@ -4889,7 +4780,7 @@ function mapRecordTypeInner(
         let readT: IrType | null = null;
         if (getDecl) {
           readT = mapType(checker.getTypeOfSymbol(p), ctx);
-          if (readT === null || readT.kind === "jsval") return null;
+          if (readT === null) return null;
         }
         let writeT: IrType | null = null;
         if (setDecl) {
@@ -4899,13 +4790,7 @@ function mapRecordTypeInner(
           // A void/unit-typed write slot has no value form; DIVERGENT
           // getter/setter types stay out too (one property, one type —
           // the class-accessor stance).
-          if (
-            writeT === null ||
-            writeT.kind === "void" ||
-            writeT.kind === "jsval" ||
-            isUnitType(writeT)
-          )
-            return null;
+          if (writeT === null || writeT.kind === "void" || isUnitType(writeT)) return null;
           if (readT !== null && typeKey(readT) !== typeKey(writeT)) return null;
         }
         if (readT !== null || getDecl)
@@ -4941,13 +4826,13 @@ function mapRecordTypeInner(
       // the empty tuple — map it exactly as the tuple branch does (the
       // unit-element array; see the `[] as const` rule there).
       if (
-        (pt === null || pt.kind === "jsval") &&
+        pt === null &&
         (fieldTs.flags & ts.TypeFlags.Any) !== 0 &&
         constAssertedEmptyArrayProp(p, ctx)
       ) {
         pt = arrayOf(unitOnlyUnion(ctx.unions));
       }
-      if (pt === null && !ctx.dynamic && (fieldTs.flags & ts.TypeFlags.Any) !== 0) pt = DYN;
+      if (pt === null && (fieldTs.flags & ts.TypeFlags.Any) !== 0) pt = DYN;
       // Unit-only FIELDS (`{ msg?: undefined }` — the discriminated-union
       // absent-field idiom — and `{ p: undefined }` spellings): the
       // unit-only union. The runtime value is the interned unit, JSON
@@ -4964,12 +4849,9 @@ function mapRecordTypeInner(
       // v }` — a string-literal key): mapping it would collide with the
       // accessor dispatch, so the shape stays unmapped.
       if (accessorSlotProp(p.name) !== null) return null;
-      // Keep ambient abort handles in a native record slot under --dynamic:
+
       // an options record with `signal?: AbortSignal` must not turn its
-      // unrelated static fields into island properties. Other bare jsval
-      // fields still absorb the record into one island object.
-      if (pt.kind === "jsval" && !(ctx.dynamic && isAmbientAbortHandleType(fieldTs, ctx)))
-        return JSVAL;
+
       fields.push({ name: p.name, type: pt });
     }
     // getPropertiesOfType yields DECLARATION order (interface/alias/literal

@@ -20,7 +20,6 @@ console.log(JSON.stringify(styleText("red", "x", {validateStream: false, stream:
 `,
     );
     const result = await compile(entry, {
-      dynamic: false,
       sanitize: process.env["SCRIPTC_SAN"] === "1",
       outDir: dir,
       outPath: join(dir, "program"),

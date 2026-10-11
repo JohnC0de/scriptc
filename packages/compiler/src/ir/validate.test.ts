@@ -315,7 +315,7 @@ function numericReadModule(overrides: Partial<IrExpr & { kind: "arrIntrinsic" }>
     ...overrides,
   };
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [
@@ -399,7 +399,7 @@ test.each(["sortPrimitive", "toSortedPrimitive"] as const)(
 
 function expressionModule(expr: IrExpr, unions: IrUnionDef[]): IrModule {
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     unions,
@@ -1286,7 +1286,7 @@ test.each([
 function tdzModule(mutable = true): IrModule {
   const value: IrExpr = { kind: "numLit", value: 0, type: F64, loc };
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [
@@ -1539,7 +1539,7 @@ test("TDZ locals require a shared box", () => {
 
 function discriminatedModule(): IrModule {
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [{ name: "main", params: [], locals: [], returnType: VOID, body: [], loc }],
@@ -1748,7 +1748,7 @@ test("function result views preserve the parameter ABI and reject reversed covar
     if (variant === "parameter") type.params[0] = STRING;
     if (variant === "arity") type.params.push(F64);
     if (variant === "rest") type.rest = true;
-    if (variant === "rest-abi") type.restAbi = "jsval";
+    if (variant === "rest-abi") type.restAbi = "typed";
     if (variant === "arguments") type.argumentsAll = true;
     if (variant === "return") type.ret = F64;
     if (variant === "unrelated") type.ret = { kind: "object", className: "Other" };

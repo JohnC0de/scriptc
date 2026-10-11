@@ -15,7 +15,7 @@
  * ambient OR @types/node — see isStdlibFile/isNodeTypesPath), and
  * everything else @types/node declares hits the SC2020-family fence at
  * its use site. scriptc.d.ts holds the always-shipped core (divergence
- * overrides, comptime, __island_eval, setTimeout — which MERGES with
+ * overrides, comptime, setTimeout — which MERGES with
  * @types/node's as an overload instead of colliding). */
 
 /* NodeJS.ErrnoException — the Error shape @types/node attaches to fs and
@@ -606,12 +606,6 @@ declare var TextDecoder: {
   new (label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean }): TextDecoder;
 };
 
-/* The WHATWG event surface (Node globals since v15): declared so the
- * suite's event-plumbing tests typecheck and fence per SITE with the
- * member's own name. The dynamic island's web prelude implements
- * Event/CustomEvent/EventTarget/DOMException/AbortController for real;
- * the static tier has no lowering yet — construction and members fence
- * honestly (SC2020). */
 interface Event {
   readonly type: string;
   readonly bubbles: boolean;
@@ -689,11 +683,6 @@ declare var EventTarget: {
   readonly prototype: EventTarget;
 };
 
-/* MessagePort/MessageChannel — the worker_threads pair Node exposes as
- * globals (v15+). The island's worker_threads shim implements the
- * same-thread subset (postMessage delivers structured-clone copies on a
- * microtask); the web prelude exposes the classes as engine globals.
- * Statically declared-not-lowered: per-site fences. */
 interface MessagePort extends EventTarget {
   postMessage(value: unknown, transferOrOptions?: unknown): void;
   start(): void;
@@ -716,9 +705,6 @@ declare var MessageChannel: {
   readonly prototype: MessageChannel;
 };
 
-/* AbortSignal, the native fetch-cancellation slice. The three statics,
- * state/reason reads, throwIfAborted, and abort listeners all lower in
- * static builds; dynamic builds use the island's Web implementation. */
 interface AbortSignal extends EventTarget {
   readonly aborted: boolean;
   readonly reason: unknown;
@@ -818,7 +804,7 @@ interface Response {
   json(): Promise<unknown>;
   text(): Promise<string>;
   /* The whole body as bytes: bytes() answers a Uint8Array in both tiers.
-   * arrayBuffer() remains dynamic-only because static programs have no
+   * arrayBuffer() remains unsupported because static programs have no
    * free-standing ArrayBuffer representation; the compiler diagnoses its
    * direct use and points at bytes(). */
   arrayBuffer(): Promise<ArrayBuffer>;
@@ -1051,26 +1037,6 @@ declare module "perf_hooks" {
  * performance.now() either way. */
 declare var performance: import("node:perf_hooks").Performance;
 
-/* node:module. createRequire's lowered shape is the version/config-
- * reading pattern real CLIs ship: a const binding over
- * createRequire(import.meta.url) (or __filename) whose require calls
- * take STATIC string literals — the indirection erases at compile time.
- * A builtin spec makes the binding a namespace import in const clothing;
- * relative and package-import program modules use the compiled module
- * graph; a relative .json document bakes and parses (JSON.parse's
- * `unknown` stance — validate with a checked cast); an installed npm
- * package loads through the island's require-condition entry under
- * --dynamic, or through the compiled graph under --npm-static; a bare name
- * nothing installed resolves compiles to Node's catchable MODULE_NOT_FOUND
- * throw (the optional-dependency try/require pattern).
- * Dynamic specifiers fence: a compiled binary's module graph is fixed at
- * build time. builtinModules is the baked Node v24 list (a fresh
- * mutable array per read where Node ships one frozen singleton);
- * isBuiltin checks runtime strings against that pinned list, and
- * syncBuiltinESMExports is a no-op because the static builtin surface is
- * immutable. Both spellings
- * name the builtin, like in Node (the builtin wins over the npm package
- * named "module" for the bare specifier there too). */
 declare module "node:module" {
   export function createRequire(filename: string | URL): ScriptcRequire;
   export const builtinModules: string[];

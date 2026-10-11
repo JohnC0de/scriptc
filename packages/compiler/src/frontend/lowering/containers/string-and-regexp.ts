@@ -710,12 +710,6 @@ export function lowerStringPaddingCall(
   return { kind: "call", callee: helper, args: values, type: STRING, loc };
 }
 
-/** Regex method calls, both directions: `re.test(s)` on a regex receiver,
- * and `s.replace(re, tpl)` / `s.replaceAll(re, tpl)` / `s.split(re)` on a
- * string receiver whose FIRST ARGUMENT is a regex (the string-pattern
- * overloads keep their island lowering — the argument's mapped type is
- * what routes here, before lowerIslandMethodCall can claim the name).
- * Null when neither shape matches. */
 export function lowerRegexMethodCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -1097,10 +1091,7 @@ export function lowerStringMethodCall(
         ? { kind: "bin", op: "/", left: numLit(1, loc), right: numLit(0, loc), type: F64, loc }
         : numLit(0, loc);
     const position = lowerPositionArgument(lowerer, argumentNodes[1], defaultPosition);
-    if (
-      needle.type.kind === "string" &&
-      (position.type.kind === "f64" || position.type.kind === "jsval")
-    ) {
+    if (needle.type.kind === "string" && position.type.kind === "f64") {
       return {
         kind: "strIntrinsic",
         method: entry.method,
@@ -1198,8 +1189,8 @@ export function lowerStringMethodCall(
     );
     const subject = entry.method === "repeat" ? "string repeat count" : "string position";
     // Keep ordinary numeric calls on the direct intrinsic path, including the
-    // existing boundary validation for island values in numeric slots.
-    if (args.every((arg) => arg.type.kind === "f64" || arg.type.kind === "jsval")) {
+
+    if (args.every((arg) => arg.type.kind === "f64")) {
       return {
         kind: "strIntrinsic",
         method: entry.method,

@@ -154,11 +154,7 @@ export function widthLiftPlan(lowerer: Lowerer, src: IrType, dst: IrType): Width
     // such a slot honestly holds in the width family is EMPTY, so the
     // lift is a fresh empty array of the target type, guarded by a
     // runtime non-empty trap (the checked-extraction stance).
-    if (
-      lowerer.unitOnlyElem(src.elem) &&
-      dst.elem.kind !== "jsval" &&
-      !lowerer.unitOnlyElem(dst.elem)
-    ) {
+    if (lowerer.unitOnlyElem(src.elem) && !lowerer.unitOnlyElem(dst.elem)) {
       return { how: "emptyArr" };
     }
     return null;
@@ -166,7 +162,7 @@ export function widthLiftPlan(lowerer: Lowerer, src: IrType, dst: IrType): Width
   // A TUPLE flowing into an array FIELD/ELEMENT (`aliases: ["ls"]` into
   // an `aliases: string[]` slot): per-position lifts, the top-level
   // tuple-into-array coercion applied recursively.
-  if (dst.kind === "array" && src.kind === "record" && dst.elem.kind !== "jsval") {
+  if (dst.kind === "array" && src.kind === "record") {
     const from = lowerer.shapes.get(src.shapeId);
     if (from?.tuple && from.fields.every((f) => lowerer.widthLiftPlan(f.type, dst.elem) !== null)) {
       return { how: "tupleArr" };

@@ -26,21 +26,10 @@ export function emitControlExpr(
   switch (e.kind) {
     case "dynDestrCheck": {
       // RequireObjectCoercible with V8's destructuring TypeError. dyn
-      // values check in the runtime helper and pass through unchanged
-      // (same temp, same ownership); island values check in the engine
-      // (a fresh +1 cell for the same value comes back).
+      // values check in the runtime helper and pass through unchanged.
       const v = host.emitExpr(e.value);
       const first = e.firstProp !== undefined ? host.cstr(e.firstProp) : "null";
-      if (e.value.type.kind === "jsval") {
-        host.declare(`declare ptr @scr_jsval_destr_check(ptr, ptr, ptr)`);
-        const t = B.tmp();
-        B.line(
-          `${t} = call ptr @scr_jsval_destr_check(ptr ${v.name}, ptr ${host.cstr(e.spelling)}, ptr ${first})`,
-        );
-        const out = host.own({ name: t, type: e.type });
-        host.emitPendingCheck();
-        return out;
-      }
+
       const helper = host.dyn.dynDestrCheckHelper();
       B.line(`call void @${helper}(ptr ${v.name}, ptr ${host.cstr(e.spelling)}, ptr ${first})`);
       host.emitPendingCheck();
@@ -48,18 +37,9 @@ export function emitControlExpr(
     }
     case "dynIterN": {
       // GetIterator + first-N steps as a fresh array (V8's exact
-      // not-iterable TypeError on non-iterables): the dyn helper for
-      // dyn operands, the engine's real iterator protocol for island
-      // ones.
+      // not-iterable TypeError on non-iterables) through the native dyn helper.
       const v = emitBorrowedInput(host, e.value);
-      if (e.value.type.kind === "jsval") {
-        host.declare(`declare ptr @scr_jsval_iter_n(ptr, double)`);
-        const t = B.tmp();
-        B.line(`${t} = call ptr @scr_jsval_iter_n(ptr ${v.name}, double ${f64Lit(e.count)})`);
-        const out = host.own({ name: t, type: e.type });
-        host.emitPendingCheck();
-        return out;
-      }
+
       const helper = host.dyn.dynIterNHelper();
       const t = B.tmp();
       B.line(
@@ -209,63 +189,7 @@ export function emitControlExpr(
         B.line(`${t} = load ptr, ptr ${slot}`);
         return host.own({ name: t, type: e.type });
       }
-      if (e.receiver.type.kind === "jsval") {
-        // Island-handle chain: the nullish test asks the engine value;
-        // the unit path result is the engine's undefined (+1 cell), the
-        // body runs lazily over the bound handle otherwise.
-        const r = host.emitExpr(e.receiver);
-        host.declare(`declare zeroext i1 @scr_jsval_is_nullish(ptr)`);
-        host.declare(`declare ptr @scr_jsval_retain_v(ptr)`);
-        const isN = B.tmp();
-        B.line(`${isN} = call zeroext i1 @scr_jsval_is_nullish(ptr ${r.name})`);
-        const bind = B.slot();
-        B.entryAllocas.push(`${bind} = alloca ptr`);
-        B.line(`store ptr null, ptr ${bind}`);
-        host.ownSlot(bind, e.receiver.type);
-        if (e.type.kind === "void") {
-          const lb = B.newLabel("ocj.b");
-          const lj = B.newLabel("ocj.j");
-          B.condBr(isN, lj, lb);
-          B.startBlock(lb);
-          const rr = B.tmp();
-          B.line(`${rr} = call ptr @scr_jsval_retain_v(ptr ${r.name})`);
-          B.line(`store ptr ${rr}, ptr ${bind}`);
-          host.chainSlots.set(e.id, { name: bind, type: e.receiver.type, slot: true });
-          host.frames.push([]);
-          host.emitExpr(e.body);
-          host.releaseFrame(host.frames.pop()!);
-          host.chainSlots.delete(e.id);
-          B.br(lj);
-          B.startBlock(lj);
-          return { name: "", type: e.type };
-        }
-        if (e.type.kind !== "jsval")
-          throw new InternalCompilerError("llvm emitter bug: jsval optChain result kind");
-        const slot = B.slot();
-        B.entryAllocas.push(`${slot} = alloca ptr`);
-        const lu = B.newLabel("ocj.u");
-        const lb = B.newLabel("ocj.b");
-        const lj = B.newLabel("ocj.j");
-        B.condBr(isN, lu, lb);
-        B.startBlock(lu);
-        host.declare(`declare ptr @scr_jsval_undefined()`);
-        const un = B.tmp();
-        B.line(`${un} = call ptr @scr_jsval_undefined()`);
-        B.line(`store ptr ${un}, ptr ${slot}`);
-        B.br(lj);
-        B.startBlock(lb);
-        const rr = B.tmp();
-        B.line(`${rr} = call ptr @scr_jsval_retain_v(ptr ${r.name})`);
-        B.line(`store ptr ${rr}, ptr ${bind}`);
-        host.chainSlots.set(e.id, { name: bind, type: e.receiver.type, slot: true });
-        host.emitBranchInto(slot, e.body);
-        host.chainSlots.delete(e.id);
-        B.br(lj);
-        B.startBlock(lj);
-        const t = B.tmp();
-        B.line(`${t} = load ptr, ptr ${slot}`);
-        return host.own({ name: t, type: e.type });
-      }
+
       if (e.receiver.type.kind !== "union")
         throw new LlvmUnsupportedError(`optChain:${e.receiver.type.kind}`, e.loc);
       const def = host.unionsById.get(e.receiver.type.unionId);
@@ -424,35 +348,10 @@ export function emitControlExpr(
       // TAG against its unit arms as the test. Pass-through shape: the
       // result IS the left box. Narrowed shape: the single non-unit
       // arm's payload extracts (+1 for ref kinds) and the box releases.
-      if (e.left.type.kind === "jsval") {
-        // The island form: engine nullish test, lazy right (jsval).
-        const l = host.emitExpr(e.left);
-        host.moveTemp(l);
-        host.declare(`declare zeroext i1 @scr_jsval_is_nullish(ptr)`);
-        const slot = B.slot();
-        B.entryAllocas.push(`${slot} = alloca ptr`);
-        const isN = B.tmp();
-        B.line(`${isN} = call zeroext i1 @scr_jsval_is_nullish(ptr ${l.name})`);
-        const lu = B.newLabel("nulj.u");
-        const lv = B.newLabel("nulj.v");
-        const lj = B.newLabel("nulj.j");
-        B.condBr(isN, lu, lv);
-        B.startBlock(lu);
-        host.releaseValue(l.name, e.left.type);
-        host.emitBranchInto(slot, e.right);
-        B.br(lj);
-        B.startBlock(lv);
-        B.line(`store ptr ${l.name}, ptr ${slot}`);
-        B.br(lj);
-        B.startBlock(lj);
-        const t = B.tmp();
-        B.line(`${t} = load ptr, ptr ${slot}`);
-        return host.own({ name: t, type: e.type });
-      }
+
       if (e.left.type.kind === "dyn") {
-        // The checked-dynamic form: the runtime kind decides (UNDEF/
-        // NULL take the default; a wrapped island value asks the
-        // engine); the right runs lazily in its branch (already dyn).
+        // The native checked-value kind decides whether the left is
+        // nullish; the right runs lazily in its branch.
         const l = host.emitExpr(e.left);
         host.moveTemp(l);
         host.declare(`declare zeroext i1 @scr_dyn_is_nullish(ptr)`);

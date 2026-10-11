@@ -382,7 +382,7 @@ describe.skipIf(!zigOnPath())("zig cc builds (zig on PATH)", () => {
     expect(stdout).toBe("zigcc says hi\n");
   });
 
-  test("host-native zigcc builds dynamic, TLS, zlib, and native fetch together", async () => {
+  test("host-native zigcc builds TLS, zlib, and native fetch together", async () => {
     const dir = await mkdtemp(join(tmpdir(), "scr-zigcc-host-features-"));
     const cPath = join(dir, "program.c");
     await writeFile(
@@ -391,7 +391,7 @@ describe.skipIf(!zigOnPath())("zig cc builds (zig on PATH)", () => {
     );
     const outPath = join(dir, "program");
     await withCcEnv("zigcc", undefined, () =>
-      compileC({ cPath, outPath, dynamic: true, tls: true, zlib: true, fetch: true }),
+      compileC({ cPath, outPath, tls: true, zlib: true, fetch: true }),
     );
     const { stdout } = await execFileAsync(outPath);
     expect(stdout).toBe("zigcc host features ok\n");
@@ -450,14 +450,15 @@ exit 99
       const cPath = join(dir, "program.c");
       await writeFile(cPath, "int main(void) { return 0; }\n");
       await withCcEnv("zigcc", undefined, () =>
-        compileC({ cPath, outPath: join(dir, "program"), dynamic: true, tls: true, zlib: true }),
+        compileC({ cPath, outPath: join(dir, "program"), regex: true, tls: true, zlib: true }),
       );
 
       const invocations = (await readFile(logPath, "utf8")).trim().split(/\r?\n/);
-      expect(invocations.some((line) => /^cc .*quickjs-ng/.test(line))).toBe(true);
+      expect(invocations.some((line) => /^cc .*quickjs-ng.*libregexp\.c/.test(line))).toBe(true);
+      expect(invocations.some((line) => /^cc .*quickjs-ng.*quickjs\.c/.test(line))).toBe(false);
       expect(invocations.some((line) => /^cc .*mbedtls.*library/.test(line))).toBe(true);
       expect(invocations.some((line) => /^cc .*vendor.*zlib/.test(line))).toBe(true);
-      expect(invocations.some((line) => /^ar rcs .*libqjs\.a/.test(line))).toBe(true);
+      expect(invocations.some((line) => /^ar rcs .*libqjs\.a/.test(line))).toBe(false);
       expect(invocations.some((line) => /^ar rcs .*libmbedtls\.a/.test(line))).toBe(true);
       expect(invocations.some((line) => /(?:^|\s)-lz(?:\s|$)/.test(line))).toBe(false);
       expect(await readFile(unexpectedToolPath).catch(() => "")).toBe("");
@@ -528,7 +529,7 @@ exit 99
     expect(undefinedSymbols).not.toMatch(/\b_?(?:fputs|abort)\b/);
   });
 
-  test("linux cross builds accept fetch natively (no libcurl); the curl reference keeps its soname stub", async () => {
+  test("linux cross builds accept fetch natively (no libcurl)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "scr-zigcc-gate-"));
     const cPath = join(dir, "program.c");
     // Reference the fetch unit the way every emitted fetch program does
@@ -543,27 +544,14 @@ exit 99
       // The NATIVE fetch rides the socket units (scr_net/scr_http/scr_tls
       // + the vendored zlib objects) — the produced ELF carries NO
       // libcurl dependency at all.
-      await compileC({ cPath, outPath, dynamic: true, fetch: true });
+      await compileC({ cPath, outPath, fetch: true });
       const elf = await readFile(outPath);
       expect([...elf.subarray(0, 4)]).toEqual([0x7f, 0x45, 0x4c, 0x46]); // \x7fELF
       expect(elf.includes("libcurl.so.4")).toBe(false);
-      // The retired curl REFERENCE (SCRIPTC_FETCH_CURL=1) still links the
-      // generated import stub: the binary records DT_NEEDED libcurl.so.4
-      // — the string sits verbatim in the ELF's dynamic string table —
-      // and binds the target system's real libcurl at load time.
-      process.env["SCRIPTC_FETCH_CURL"] = "1";
-      try {
-        await compileC({ cPath, outPath, dynamic: true, fetch: true });
-        const curlElf = await readFile(outPath);
-        expect([...curlElf.subarray(0, 4)]).toEqual([0x7f, 0x45, 0x4c, 0x46]);
-        expect(curlElf.includes("libcurl.so.4")).toBe(true);
-      } finally {
-        delete process.env["SCRIPTC_FETCH_CURL"];
-      }
     });
   }, 600_000);
 
-  test("cross build for x86_64-windows-gnu produces a PE and accepts events/net/http/dgram/tls/watch/zlib/--dynamic/fetch", async () => {
+  test("cross build for x86_64-windows-gnu produces a PE and accepts events/net/http/dgram/tls/watch/zlib/fetch", async () => {
     const dir = await mkdtemp(join(tmpdir(), "scr-zigcc-win-"));
     const cPath = join(dir, "program.c");
     const caProbePath = join(dir, "ca-eku.c");
@@ -605,28 +593,11 @@ exit 99
       const magic2 = tlsPe.subarray(0, 2);
       expect([...magic2]).toEqual([0x4d, 0x5a]);
       expect(tlsPe.includes("CRYPT32.dll")).toBe(true);
-      // --dynamic: the engine archive cross-builds for the windows triple
-      // (buildEngineArchiveCross), the island's win32 arms (_msize, the
-      // winsock hostname) compile, and the link carries the 8MB PE stack
-      // reserve for ISL_MAIN_STACK_BUDGET. The Windows differential lane
-      // verifies the @dynamic corpus at runtime against the box's Node.
-      await compileC({ cPath, outPath, dynamic: true });
-      const magic3 = (await readFile(outPath)).subarray(0, 2);
-      expect([...magic3]).toEqual([0x4d, 0x5a]);
       // fetch: NATIVE on win32 too (the socket units' win32 arms + the
-      // vendored zlib objects — no libcurl contract needed). The retired
-      // curl reference's soname-stub arm stays linux-only.
-      await compileC({ cPath, outPath, dynamic: true, fetch: true });
+      // vendored zlib objects — no libcurl dependency).
+      await compileC({ cPath, outPath, fetch: true });
       const magic4 = (await readFile(outPath)).subarray(0, 2);
       expect([...magic4]).toEqual([0x4d, 0x5a]);
-      process.env["SCRIPTC_FETCH_CURL"] = "1";
-      try {
-        await expect(compileC({ cPath, outPath, dynamic: true, fetch: true })).rejects.toThrow(
-          /fetch.*not supported under a cross target/s,
-        );
-      } finally {
-        delete process.env["SCRIPTC_FETCH_CURL"];
-      }
     });
   }, 600_000);
 
@@ -685,16 +656,4 @@ exit 99
     const magic = (await readFile(outPath)).subarray(0, 4);
     expect([...magic]).toEqual([0x7f, 0x45, 0x4c, 0x46]); // \x7fELF
   });
-
-  test("cross builds accept --dynamic (the engine archive builds per target, no CMake)", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "scr-zigcc-dyn-"));
-    const cPath = join(dir, "program.c");
-    await writeFile(cPath, HELLO_C);
-    const outPath = join(dir, "program");
-    await withCcEnv("zigcc", "aarch64-linux-gnu.2.36", () =>
-      compileC({ cPath, outPath, dynamic: true }),
-    );
-    const magic = (await readFile(outPath)).subarray(0, 4);
-    expect([...magic]).toEqual([0x7f, 0x45, 0x4c, 0x46]); // \x7fELF
-  }, 600_000);
 });

@@ -175,15 +175,13 @@ async function build() {
     const flavors = {};
     // The executable `speed` flavor (--optimization=speed) exists only when
     // it differs from release: its static units are emitted through the host
-    // LLVM helper with import bitcode. Its SCR_DYNAMIC variants are the
-    // release objects themselves.
+    // LLVM helper with import bitcode.
     const flavorPlan = [
       ...Object.entries(matrix.flavors),
       ...("release" in matrix.flavors && unitHelper !== null
         ? [["speed", matrix.flavors.release]]
         : []),
     ];
-    const releaseVariants = new Map();
     for (const [flavor, flavorSpec] of flavorPlan) {
       process.stdout.write(`building ${packageManifest.name} ${flavor} runtime\n`);
       // Zig emits DWARF by default, including descriptions of functions
@@ -208,11 +206,6 @@ async function build() {
               ...baseVariant,
               defines: [...(flavorSpec.defines ?? []), ...baseVariant.defines],
             };
-            const variantKey = `${unit.source}\0${variant.id}`;
-            if (flavor === "speed" && variant.defines.includes("SCR_DYNAMIC")) {
-              variants.push(releaseVariants.get(variantKey));
-              continue;
-            }
             const output = join(
               stagedOutputRoot,
               flavor,
@@ -221,9 +214,7 @@ async function build() {
               unit.source.replace(/\.c$/, ".o"),
             );
             const includeFlags = [
-              ...(unit.source === "scr_regex.c" || variant.defines.includes("SCR_DYNAMIC")
-                ? ["-I", quickjs]
-                : []),
+              ...(unit.source === "scr_regex.c" ? ["-I", quickjs] : []),
               ...(unit.source === "scr_tls.c" ? ["-I", join(mbedtls, "include")] : []),
               ...(unit.source === "scr_zlib.c" || unit.source === "scr_fetch.c"
                 ? ["-I", zlib]
@@ -282,7 +273,6 @@ async function build() {
               size: (await stat(output)).size,
               ...(bitcode === undefined ? {} : { bitcode }),
             };
-            if (flavor === "release") releaseVariants.set(variantKey, built);
             variants.push(built);
           }
           return { source: unit.source, predicate: unit.predicate, variants };
@@ -392,7 +382,7 @@ async function build() {
       package: packageManifest.name,
       version: packageManifest.version,
       target: matrix.target,
-      runtime_abi: { version: 8, marker: "scr_runtime_abi_v8" },
+      runtime_abi: { version: 9, marker: "scr_runtime_abi_v9" },
       compiler: {
         command: compiler,
         identity: compilerVersion,
@@ -400,7 +390,7 @@ async function build() {
         ...(unitHelper === null ? {} : { speed_codegen: unitHelper.identity }),
       },
       macros: {
-        executable: ["SCR_DYNAMIC", "SCR_TEXT_DECODER_LEGACY"],
+        executable: ["SCR_TEXT_DECODER_LEGACY"],
         excluded: ["SCR_RC_AUDIT", "SCR_ASAN_FIBERS"],
         sanitizer: "external-toolchain-required",
       },

@@ -31,7 +31,6 @@ import {
   type IrParam,
   type IrStmt,
   type IrType,
-  JSVAL,
   NULL_T,
   STRING,
   SYMBOL_T,
@@ -50,16 +49,8 @@ import {
 } from "../../ir/ir.js";
 import { isJsSourceFile, locOf, requireSpecOf } from "../program.js";
 import { isGenericCallableMemberType, typeKey } from "../type-mapper.js";
-import {
-  PoisonError,
-  dynFallbackType,
-  importCallHandleType,
-  jsFuncNameOf,
-  newFnCtx,
-  staticImportNamespaceType,
-} from "./lowerer.js";
+import { dynFallbackType, jsFuncNameOf, newFnCtx, staticImportNamespaceType } from "./lowerer.js";
 import { NARROW_FIRST, STRING_INDEX_METHODS, STR_METHODS, stdlibGlobalNameOf } from "./surfaces.js";
-import { requiresDynamicDiag } from "../../diagnostics/diagnostic.js";
 import { dynStringReceiver } from "./containers/dynamic-receivers.js";
 import {
   lowerArrayConstructor,
@@ -169,7 +160,6 @@ import {
   spreadNeedsRuntimeArity,
   completeFuncValueArgs,
   lowerSpreadArgsCall,
-  omittedArgFor,
   completeArgs,
 } from "./call-arguments.js";
 import { isThisParameter, type ParamShape } from "./call-signatures.js";
@@ -179,30 +169,6 @@ import {
   objLitGenericFnInfoOf,
   genericCallInstance,
 } from "./generic-functions.js";
-
-/** An island call result the .d.ts DECLARES as a primitive exits eagerly
- * to that static type — the member-read rule's call sibling (see the
- * getProp lowering in lower-exprs.ts): primitives copy by value, every
- * static consumer works on the result, and a lying declaration throws the
- * catchable TypeError. Chain-handled forms stay jsval (the optChain's
- * unit path is the engine's undefined). */
-export function islandPrimitiveExit(
-  lowerer: Lowerer,
-  call: ts.CallExpression,
-  result: IrExpr,
-): IrExpr {
-  if (call.questionDotToken) return result;
-  if (ts.isPropertyAccessExpression(call.expression) && call.expression.questionDotToken)
-    return result;
-  const declared = lowerer.mapTypeOf(lowerer.typeOf(call));
-  if (
-    declared &&
-    (declared.kind === "f64" || declared.kind === "bool" || declared.kind === "string")
-  ) {
-    return { kind: "jsExit", value: result, type: declared, loc: result.loc };
-  }
-  return result;
-}
 
 export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
   const loc = locOf(expr);
@@ -444,16 +410,7 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     }
     const args = expr.arguments.map((a) => {
       const lowered = lowerer.lowerExpr(a);
-      if (lowered.type.kind === "jsval") {
-        // Node prints objects with util.inspect formatting, which
-        // String() cannot match — silent divergence is banned. Templates
-        // are ToString (Node-exact), casts are validated: both honest.
-        lowerer.unsupported(
-          "SC1090",
-          a,
-          `${surface} of 'any' values (wrap it: ${surface}(\`\${v}\`), or validate with 'as <type>' first)`,
-        );
-      }
+
       // Checked-dynamic values carry their own shape, so the runtime
       // renders them exactly like Node's console formatter renders a
       // non-format argument: strings VERBATIM, everything else through
@@ -790,23 +747,6 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     if (name === "String") return lowerer.ensureString(arg, argNode);
   }
 
-  // __island_eval: the internal island testing hook (eval in the embedded
-  // engine, String(result) back). Provenance-checked like setTimeout.
-  // Only meaningful when the engine is linked: without --dynamic it is a
-  // clean requires-dynamic diagnostic, never an ICE or a link error.
-  if (
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "__island_eval" &&
-    lowerer.isStdlibSymbol(lowerer.resolveValueSymbol(expr.expression) ?? undefined)
-  ) {
-    if (!lowerer.dynamic) {
-      lowerer.pushDiag(requiresDynamicDiag("'__island_eval'", loc));
-      throw new PoisonError();
-    }
-    const code = lowerer.lowerExprExpecting(expr.arguments[0]!, STRING);
-    return { kind: "libCall", fn: "island.eval", args: [code], type: STRING, loc };
-  }
-
   // Computed calls preserve their evaluated receiver just like dotted
   // calls, including when the property is keyed by a native symbol.
   if (
@@ -860,140 +800,6 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
         loc,
       };
     }
-  }
-
-  // Island calls. A property-access callee whose receiver is an 'any'
-  // value is an engine method call (this = receiver, JS-exact); any other
-  // 'any'-typed callee is an engine function call. Arguments marshal in;
-  // results stay island values.
-  // A questionDotToken here is always chain-handled (the gate at the top
-  // of lowerCall routed unhandled ones to the chain lowering), so
-  // `x?.y(...)` re-dispatches into this same method-call form with the
-  // receiver reading back as the chain's bound handle.
-  if (
-    ts.isPropertyAccessExpression(expr.expression) &&
-    lowerer.isIslandExpr(expr.expression.expression)
-  ) {
-    // Typed fetch/Web Streams handles map to island values under
-    // --dynamic, but their inventory still owns which methods exist.
-    // Reject unsupported rows before the universal jsval method path.
-    lowerer.fenceStaticResponseMember(expr.expression, "call");
-    lowerer.fenceStaticHeadersMember(expr.expression, "call");
-    lowerer.fenceStaticReadableStreamMember(expr.expression, "call");
-    const receiver = lowerer.lowerExpr(expr.expression.expression);
-    // A checker-`any` receiver whose VALUE lives in the checked-dynamic tree (a
-    // checked-dynamic local behind the any-typed spelling — the JS
-    // WeakSet placeholder, rest-args arrays): the checked-dynamic
-    // method machinery owns it — receiver-kind dispatch, stored-member
-    // calls, honest fences — never an engine op over a dyn value.
-    if (receiver.type.kind === "dyn") {
-      const served = lowerDynReceiverMethodCall(lowerer, expr, expr.expression);
-      if (served) return served;
-      lowerer.unsupported(
-        "SC1100",
-        expr,
-        `'.${expr.expression.name.text}()' calls through 'unknown'-valued receivers in dynamically-executed positions`,
-      );
-    }
-    const args = expr.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-    const result: IrExpr = {
-      kind: "jsOp",
-      op: "callMethod",
-      name: expr.expression.name.text,
-      args: [receiver, ...args],
-      type: JSVAL,
-      loc,
-    };
-    return islandPrimitiveExit(lowerer, expr, result);
-  }
-  if (lowerer.isIslandExpr(expr.expression)) {
-    // `o.m(...)` where o LOWERS checked-dynamic and the checker types
-    // `o.m` 'any' (a member read behind an 'object'/'unknown'-typed
-    // bag): METHOD-CALL semantics — receiver-kind dispatch (dynInvoke),
-    // so `this` binds and a WRAPPED island receiver runs the ENGINE's
-    // own method (the routed-ops lane). A stored-member dynCall would
-    // call engine prototype methods receiverless — the this-less
-    // `list.slice()` ToObject TypeError. Spread arguments keep the
-    // stored-member path below (the runtime-arity lane owns them).
-    if (
-      ts.isPropertyAccessExpression(expr.expression) &&
-      !expr.expression.questionDotToken &&
-      !expr.questionDotToken &&
-      !expr.arguments.some((a) => ts.isSpreadElement(a))
-    ) {
-      const recvProbe = tryLowerExpression(lowerer, expr.expression.expression);
-      if (recvProbe?.type.kind === "dyn") {
-        const args = expr.arguments.map((a) => lowerer.lowerExprExpecting(a, DYN));
-        return {
-          kind: "dynInvoke",
-          recv: recvProbe,
-          method: expr.expression.name.text,
-          calleeName: expr.expression.getText(),
-          args,
-          type: DYN,
-          loc,
-        };
-      }
-    }
-    const callee = lowerer.lowerExpr(expr.expression);
-    // A checker-`any` callee that LOWERED checked-dynamic (a dyn member
-    // chain's stored function): the checked-dynamic tree's own call — dynCall reads and
-    // calls the stored member with Node's is-not-a-function TypeError
-    // on refusal.
-    if (callee.type.kind === "dyn") {
-      const args = expr.arguments.map((a) => lowerer.lowerExprExpecting(a, DYN));
-      const calleeName = ts.isPropertyAccessExpression(expr.expression)
-        ? expr.expression.getText()
-        : ts.isIdentifier(expr.expression)
-          ? expr.expression.text
-          : "value";
-      return { kind: "dynCall", callee, calleeName, args, type: DYN, loc };
-    }
-    // `fn(...args)` — a TRAILING spread into an island call: the
-    // engine's own apply (`fn.apply(undefined, argsArray)`); leading
-    // plain arguments prepend through `[l1, l2].concat(argsArray)`
-    // (concat flattens the array argument one level — exactly the
-    // spread). Other spread shapes keep the syntax fence.
-    if (
-      expr.arguments.length > 0 &&
-      ts.isSpreadElement(expr.arguments[expr.arguments.length - 1]!) &&
-      expr.arguments.slice(0, -1).every((a) => !ts.isSpreadElement(a))
-    ) {
-      const spread = expr.arguments[expr.arguments.length - 1] as ts.SpreadElement;
-      const spreadV = lowerer.jsvalIn(lowerer.lowerExpr(spread.expression), spread.expression);
-      const leading = expr.arguments
-        .slice(0, -1)
-        .map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-      const argsArr: IrExpr =
-        leading.length === 0
-          ? spreadV
-          : {
-              kind: "jsOp",
-              op: "callMethod",
-              name: "concat",
-              args: [{ kind: "jsOp", op: "arrLit", args: leading, type: JSVAL, loc }, spreadV],
-              type: JSVAL,
-              loc,
-            };
-      const result: IrExpr = {
-        kind: "jsOp",
-        op: "callMethod",
-        name: "apply",
-        args: [callee, { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }, argsArr],
-        type: JSVAL,
-        loc,
-      };
-      return islandPrimitiveExit(lowerer, expr, result);
-    }
-    const args = expr.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-    const result: IrExpr = {
-      kind: "jsOp",
-      op: "callFn",
-      args: [callee, ...args],
-      type: JSVAL,
-      loc,
-    };
-    return islandPrimitiveExit(lowerer, expr, result);
   }
 
   // Builtin-module functions (fs, path, os, ...): named imports whose
@@ -1088,9 +894,8 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     }
     // STATIC parseInt/parseFloat/isNaN/isFinite (num.parseInt /
     // num.parseFloat / num.isNaN / number.isFinite — scr_string.c,
-    // scr_lib.c; ECMA-exact, Node is the oracle). Provenance like the
-    // island globals: a user function shadowing the name has a
-    // different, non-stdlib symbol. parseInt's omitted radix completes
+    // scr_lib.c; ECMA-exact, Node is the oracle). Declaration provenance
+    // excludes shadowed names. parseInt's omitted radix completes
     // to 0 — the spec's "undefined" (base 10 with the 0x hex escape);
     // parseFloat lowers the STRING form only (Node would ToString other
     // values — no static story); isNaN/isFinite's arguments are
@@ -1206,10 +1011,8 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     // parseInt's siblings (num.parseFloat is ECMA 19.2.4's decimal-
     // literal prefix parse in scr_string.c; a number-typed isFinite IS
     // Number.isFinite — the global's ToNumber coercion is the identity
-    // there, ms's `isFinite(val)` guard). Other argument types fall
-    // through to today's island path (--dynamic) or its SC2012 fence:
-    // the ToNumber/ToString coercions on arbitrary values stay engine
-    // territory. The probe never emits — lowering is IR construction.
+    // there, ms's `isFinite(val)` guard). Other argument types retain
+    // their native coercion checks below.
     if (
       (expr.expression.text === "parseFloat" || expr.expression.text === "isFinite") &&
       expr.arguments.length === 1 &&
@@ -1318,10 +1121,7 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       let data: IrExpr;
       if (v.type.kind === "dyn") {
         data = v;
-      } else if (
-        v.kind === "unitLit" ||
-        (v.type.kind !== "jsval" && lowerer.dynConvertible(v.type))
-      ) {
+      } else if (v.kind === "unitLit" || lowerer.dynConvertible(v.type)) {
         data = { kind: "dynFrom", value: v, type: DYN, loc };
       } else {
         lowerer.noLowering(
@@ -1338,11 +1138,11 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
         loc,
       };
     }
-    // Island-backed globals (parseFloat, isFinite): the engine's own
+
     // global function executes — callFn(globalGet(name)) — and the
     // result exits to the declared static type. A user function
     // shadowing the name has a different, non-stdlib symbol.
-    const islFn = lowerer.islandGlobalFnOf(expr.expression);
+    const islFn = lowerer.stdlibGlobalFnOf(expr.expression);
     if (islFn && expr.arguments.length !== islFn.args.length) {
       const name = expr.expression.text;
       lowerer.noLowering(
@@ -1351,24 +1151,7 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       );
     }
     if (islFn && expr.arguments.length === islFn.args.length) {
-      lowerer.requireDynamicApi(`'${expr.expression.text}'`, expr);
-      const callee: IrExpr = {
-        kind: "jsOp",
-        op: "globalGet",
-        name: expr.expression.text,
-        args: [],
-        type: JSVAL,
-        loc,
-      };
-      const args = expr.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-      const result: IrExpr = {
-        kind: "jsOp",
-        op: "callFn",
-        args: [callee, ...args],
-        type: JSVAL,
-        loc,
-      };
-      return { kind: "jsExit", value: result, type: islFn.ret, loc };
+      lowerer.refuseUnsupportedApi(`'${expr.expression.text}'`, expr);
     }
   }
 
@@ -1640,8 +1423,6 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       lowerPromiseAllTupleCall(lowerer, expr, expr.expression) ??
       lowerer.lowerPromiseStaticCall(expr, expr.expression) ??
       lowerPromiseRejectCall(lowerer, expr, expr.expression) ??
-      // Before the island path: regex-argument replace/replaceAll/split
-      // lower STATICALLY; only the string-pattern overloads are island.
       lowerRegexMethodCallWithOptionalArg(lowerer, expr, expr.expression) ??
       lowerUrlStaticCall(lowerer, expr, expr.expression) ??
       lowerer.lowerUrlMethodCall(expr, expr.expression) ??
@@ -1690,7 +1471,7 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       lowerStringPrototypeCall(lowerer, expr, expr.expression) ??
       lowerStringMethodCallWithOptionalArgs(lowerer, expr, expr.expression) ??
       // Typed-array/Buffer receivers and the Buffer statics — before the
-      // island path (bytes never cross the boundary).
+
       lowerer.lowerBytesMethodCall(expr, expr.expression) ??
       lowerBytesStaticCall(lowerer, expr, expr.expression) ??
       lowerBufferStaticCallWithNarrowedArg(lowerer, expr, expr.expression) ??
@@ -1698,7 +1479,7 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       // stdlib chokepoint claims the member).
       lowerStreamStaticCall(lowerer, expr, expr.expression) ??
       // Primitive toString calls, including numeric radices, use the
-      // native formatters before the island method path.
+
       lowerNumberToStringCall(lowerer, expr, expr.expression) ??
       // Union receivers whose every arm has a text — the ngrok
       // `(chunk: Buffer | string) => chunk.toString()` idiom.
@@ -1707,9 +1488,7 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       // override-free program classes — "[object Object]", folded.
       lowerDefaultToStringCall(lowerer, expr, expr.expression) ??
       // The remaining primitive prototype statics — toExponential(),
-      // both toFixed() forms, hasOwnProperty over literal keys. Before
-      // the island path. Optional-chain spellings first enter the chain
-      // machinery above, then re-enter here with a narrowed chainRecv.
+      // both toFixed() forms, hasOwnProperty over literal keys.
       lowerPrimitiveProtoCall(
         lowerer,
         expr,
@@ -1721,23 +1500,18 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
       // compile-time-known, so a literal key folds to a constant.
       lowerClassHasOwnPropertyCall(lowerer, expr, expr.expression) ??
       lowerObjectOwnMethodCall(lowerer, expr, expr.expression) ??
-      // Response constructor-object operations are unsupported in both
-      // tiers. Keep their SC2020 inventory contract ahead of the island
-      // and generic-call fallbacks (Response.json otherwise reports the
-      // generic SC1090 fence).
+      // Refuse Response constructor operations before generic-call
+      // fallbacks can report an unrelated SC1090 diagnostic.
       lowerer.fenceUnsupportedFetchConstructorMember(expr.expression) ??
       // Static fetch responses are checked-dynamic handles, but the
       // adopted undici declaration exposes a wider API than that handle.
-      // Fence unimplemented members before either the island or generic
-      // dyn receiver path can compile them into a runtime missing-method
-      // failure. Dynamic-only rows pass through these checks unchanged.
+      // Refuse unsupported members before generic checked-value dispatch.
       lowerer.fenceStaticResponseMember(expr.expression, "call") ??
       lowerer.fenceStaticHeadersMember(expr.expression, "call") ??
       lowerer.fenceStaticReadableStreamMember(expr.expression, "call") ??
-      lowerer.lowerIslandMethodCall(expr, expr.expression) ??
+      lowerer.lowerStdlibMethodCall(expr, expr.expression) ??
       // Dyn receivers (JSON.parse-derived `unknown`/`any` values) —
-      // validated-extract, then the static machinery. After the island
-      // path (jsval receivers belong there), before the fences.
+
       lowerDynReceiverMethodCall(lowerer, expr, expr.expression) ??
       // Narrowing filters (inferred predicates, filter(Boolean)) claim
       // their calls before the generic array HOF path types the result
@@ -1875,8 +1649,6 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
   if (ts.isElementAccessExpression(expr.expression)) {
     const symbolMethod = lowerClassSymbolMethodCall(lowerer, expr);
     if (symbolMethod) return symbolMethod;
-    const headersIterator = lowerer.lowerDynamicHeadersIteratorCall(expr, expr.expression);
-    if (headersIterator) return headersIterator;
     lowerer.fenceUnsupportedFetchConstructorMember(expr.expression);
     lowerer.fenceStaticResponseMember(expr.expression, "call");
     lowerer.fenceStaticHeadersMember(expr.expression, "call");
@@ -2082,39 +1854,7 @@ export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     const spreadServed = lowerSpreadArgsCall(lowerer, expr, callee, loc);
     if (spreadServed) return spreadServed;
   }
-  // An ISLAND-REST func value called directly (`f(1, 2)` where f is the
-  // --dynamic `(...args) =>` lambda): the type SPELLS its trailing
-  // engine-array param — complete the call exactly like completeArgs'
-  // island pack (fixed slots positionally, missing ones with the
-  // engine's undefined, the surplus marshaled into one fresh engine
-  // array). JS arity, no runtime machinery.
-  if (
-    callee.type.rest === true &&
-    callee.type.restAbi === "jsval" &&
-    callee.type.params.length >= 1 &&
-    callee.type.params[callee.type.params.length - 1]!.kind === "jsval" &&
-    !expr.arguments.some((a) => ts.isSpreadElement(a))
-  ) {
-    const fixed = callee.type.params.slice(0, -1);
-    const args: IrExpr[] = fixed.map((p, i) => {
-      const a = expr.arguments[i];
-      if (a) return lowerer.lowerExprExpecting(a, p);
-      const absent = omittedArgFor(lowerer, p, loc);
-      if (!absent) {
-        lowerer.unsupported(
-          "SC1090",
-          expr,
-          "calls omitting a non-optional parameter of the callee's type",
-        );
-      }
-      return absent;
-    });
-    const restArgs = expr.arguments
-      .slice(fixed.length)
-      .map((a) => lowerer.lowerExprExpecting(a, JSVAL));
-    args.push({ kind: "jsOp", op: "arrLit", args: restArgs, type: JSVAL, loc });
-    return { kind: "callValue", callee, args, type: callee.type.ret, loc };
-  }
+
   // A JS call with MORE arguments than the callee's lowered signature
   // (`cb(1, 'x')` where the mustCall wrapper's inferred type declared
   // fewer params — tsc's JS world doesn't police arity): ride the
@@ -2721,7 +2461,6 @@ function lowerArrayPrototypeBorrowCall(
   access: ts.PropertyAccessExpression,
 ): IrExpr | null {
   if (
-    lowerer.dynamic ||
     !isJsSourceFile(call.getSourceFile()) ||
     call.questionDotToken ||
     access.questionDotToken ||
@@ -2764,12 +2503,7 @@ function lowerObjectOwnPrototypeCall(
   call: ts.CallExpression,
   access: ts.PropertyAccessExpression,
 ): IrExpr | null {
-  if (
-    lowerer.dynamic ||
-    access.name.text !== "call" ||
-    !ts.isPropertyAccessExpression(access.expression)
-  )
-    return null;
+  if (access.name.text !== "call" || !ts.isPropertyAccessExpression(access.expression)) return null;
   const method = access.expression;
   const enumerable = method.name.text === "propertyIsEnumerable";
   if (method.name.text !== "hasOwnProperty" && !enumerable) return null;
@@ -2799,7 +2533,6 @@ function lowerObjectOwnMethodCall(
 ): IrExpr | null {
   const method = access.name.text;
   if (
-    lowerer.dynamic ||
     call.questionDotToken ||
     access.questionDotToken ||
     (method !== "hasOwnProperty" && method !== "propertyIsEnumerable") ||
@@ -3044,12 +2777,7 @@ function lowerObjectPrototypeCall(
   call: ts.CallExpression,
   access: ts.PropertyAccessExpression,
 ): IrExpr | null {
-  if (
-    lowerer.dynamic ||
-    access.name.text !== "call" ||
-    !ts.isPropertyAccessExpression(access.expression)
-  )
-    return null;
+  if (access.name.text !== "call" || !ts.isPropertyAccessExpression(access.expression)) return null;
   const method = access.expression;
   const prototype = method.expression;
   if (
@@ -4297,13 +4025,11 @@ function lowerArrayIsArrayCall(
     // (`Array.isArray(tlds)` on `string | readonly string[]` — the
     // narrowing test tsc's control flow then builds on); several array
     // arms OR their tag tests, and zero arms fold to false — both only
-    // over side-effect-free reads (the operand re-evaluates/drops, the
-    // `in`-operator fold discipline). dyn/caught/jsval arms have no
-    // static tag answer and keep the narrow-first fence.
+    // over side-effect-free reads. Opaque arms have no static tag answer
+    // and keep the narrow-first fence.
     const unionId = arg.type.unionId;
     const def = lowerer.unions.get(unionId);
-    const opaque =
-      !def || def.arms.some((a) => a.kind === "dyn" || a.kind === "caught" || a.kind === "jsval");
+    const opaque = !def || def.arms.some((a) => a.kind === "dyn" || a.kind === "caught");
     const arrayTags = lowerer.arrayValueTags(arg.type.unionId);
     const freeRead = arg.kind === "varRef" || arg.kind === "recordGet" || arg.kind === "fieldGet";
     if (!opaque && arrayTags.length === 1) {
@@ -4339,7 +4065,7 @@ function lowerArrayIsArrayCall(
       `Array.isArray on '${lowerer.fmt(arg.type)}' values (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms)`,
     );
   }
-  if (arg.type.kind === "jsval" || arg.type.kind === "caught") return null;
+  if (arg.type.kind === "caught") return null;
   if (arg.kind === "varRef" || arg.kind === "recordGet" || arg.kind === "fieldGet") {
     return { kind: "boolLit", value: lowerer.isArrayValueType(arg.type), type: BOOL, loc };
   }
@@ -4914,23 +4640,14 @@ function reconcileOverloadReturn(
   // site's own mapping (and that site's honest fences). Unit narrowing
   // follows maybeNarrow's stance — a unit arm has no payload to extract.
   if (!rt || rt.kind === "void" || isUnitType(rt) || typeEquals(rt, call.type)) return call;
-  // An ISLAND-valued implementation return (`any` under --dynamic): the
+
   // resolved overload's return type is a claim tsc never checked against
   // the body — extracting it HERE would throw the boundary TypeError
   // where Node just lets the value flow (functionOverloads35: the
   // implementation returns its object argument under a number-returning
   // overload signature; Node exits clean). The checker-trust trap keeps
   // governing edges the checker actually vouches for; this edge it never
-  // did. The handle stays the value's only story: bindings store it
-  // (uncheckedOverloadHandleCall's rule at the declaration sites), and
-  // uses dispatch to engine ops like any island value.
-  if (call.type.kind === "jsval") return call;
-  // The CHECKED-DYNAMIC twin of the island rule: an `any`-returning
-  // implementation under a typed overload signature is the same
-  // never-vouched-for edge (functionOverloads35's shape without
-  // --dynamic) — extracting the resolved type HERE would throw the
-  // boundary TypeError where Node lets the value flow. Uses stay
-  // checked per read like every any-origin value.
+  // did. The checked value stays in bindings and is validated per use.
   if (call.type.kind === "dyn") return call;
   if (call.type.kind === "union" && rt.kind !== "union") {
     const helper = lowerer.narrowedArmHelper(call.type.unionId, rt, call.loc);
@@ -4978,24 +4695,6 @@ function templateEscapesValid(raw: string): boolean {
   return true;
 }
 
-/** Tagged templates `tag\`a${x}b\`` — ES's call: tag(strings, ...values).
- * The strings object is a per-SITE lazily initialized hidden array global,
- * so the spec's identity contract holds — the same site evaluated twice
- * hands the tag the SAME array; two sites never share. TemplateStringsArray
- * maps to string[] (type-mapper.ts), so the array rides the ordinary
- * slot-directed coercion into whatever the tag's first parameter wants
- * — string[] exactly, an `any` slot through the dyn boundary, a rest
- * pack's first element. Checked tags receive frozen cooked and raw
- * arrays with the standard nonenumerable `.raw` descriptor. Typed direct
- * tags retain the string-array representation.
- *
- * Tag forms: a top-level declared function (the direct-call fast path —
- * overload sets reconcile through the resolved signature exactly like
- * plain calls), an island value under --dynamic (engine method/function
- * call with the engine's cooked/raw template object), and
- * a checked-dynamic value (the dynCall boundary — a non-function tag
- * throws Node's catchable TypeError). Everything else — generic tags,
- * method tags, function-value bindings — fences by name. */
 export function lowerTaggedTemplate(lowerer: Lowerer, expr: ts.TaggedTemplateExpression): IrExpr {
   const loc = locOf(expr);
   const pieces = ts.isNoSubstitutionTemplateLiteral(expr.template)
@@ -5020,53 +4719,6 @@ export function lowerTaggedTemplate(lowerer: Lowerer, expr: ts.TaggedTemplateExp
   const values: readonly ts.Expression[] = ts.isNoSubstitutionTemplateLiteral(expr.template)
     ? []
     : expr.template.templateSpans.map((s) => s.expression);
-
-  // Island tags (--dynamic): the engine call forms, mirroring lowerCall's
-  // island paths — a property-access tag is a method call (this = the
-  // receiver, JS-exact), any other island tag a function call. The
-  // strings argument builds ENGINE-NATIVE with its `.raw` property (the
-  // tplStrings op): a JSON marshal would drop `.raw`, and tags dispatch
-  // on it (the outdent idiom treats a raw-less argument as its OPTIONS
-  // form and answers a function). A fresh array per evaluation — tags
-  // caching by strings identity re-compute per call (SEMANTICS.md).
-  const islandStrings = (): IrExpr => ({
-    kind: "jsOp",
-    op: "tplStrings",
-    args: [
-      ...pieces.map((p): IrExpr => ({
-        kind: "jsMarshal",
-        value: { kind: "strLit", value: p.text, type: STRING, loc },
-        type: JSVAL,
-        loc,
-      })),
-      ...pieces.map((p): IrExpr => ({
-        kind: "jsMarshal",
-        value: { kind: "strLit", value: templateRawTextOf(p), type: STRING, loc },
-        type: JSVAL,
-        loc,
-      })),
-    ],
-    type: JSVAL,
-    loc,
-  });
-  if (ts.isPropertyAccessExpression(expr.tag) && lowerer.isIslandExpr(expr.tag.expression)) {
-    const receiver = lowerer.lowerExpr(expr.tag.expression);
-    const args = [islandStrings(), ...values.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a))];
-    return {
-      kind: "jsOp",
-      op: "callMethod",
-      name: expr.tag.name.text,
-      args: [receiver, ...args],
-      type: JSVAL,
-      loc,
-    };
-  }
-  if (lowerer.isIslandExpr(expr.tag)) {
-    const callee = lowerer.lowerExpr(expr.tag);
-    const args = [islandStrings(), ...values.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a))];
-    return { kind: "jsOp", op: "callFn", args: [callee, ...args], type: JSVAL, loc };
-  }
-
   // Direct call of a top-level declared function — the plain-call fast
   // path with the strings array as the leading completed argument.
   if (ts.isIdentifier(expr.tag) && !lowerer.isSelfReference(expr.tag)) {
@@ -5286,46 +4938,19 @@ function loweredTemplateStrings(
  * wrapper's await re-throws it), and a handler throw rejects the
  * result — the spec's onFulfilled rules by construction. Null for
  * non-promise receivers and other members. */
-/** The storage type behind a promise-valued expression whose CHECKER type
- * has no mapping — the dynamic-import receiver rule (--dynamic): a direct
- * `import("...")` call is the island promise itself; an identifier bound
- * to a promise-of-jsval local or module global answers the binding's
- * type. Null everywhere else. */
-function islandPromiseStorageTypeOf(lowerer: Lowerer, e: ts.Expression): IrType | null {
-  const direct = lowerer.dynamic ? importCallHandleType(e) : staticImportNamespaceType(lowerer, e);
+
+function modulePromiseStorageTypeOf(lowerer: Lowerer, e: ts.Expression): IrType | null {
+  const direct = staticImportNamespaceType(lowerer, e);
   if (direct?.kind === "promise") return direct;
   if (!ts.isIdentifier(e)) return null;
   const local = lowerer.resolveLocal(e);
-  if (
-    local?.type.kind === "promise" &&
-    (local.type.inner.kind === "jsval" || local.type.inner.kind === "moduleNs")
-  )
-    return local.type;
+  if (local?.type.kind === "promise" && local.type.inner.kind === "moduleNs") return local.type;
   if (local) return null;
   let sym = lowerer.checker.getSymbolAtLocation(e);
   if (sym && sym.flags & ts.SymbolFlags.Alias) sym = lowerer.checker.getAliasedSymbol(sym);
   const g = sym ? lowerer.globalsBySymbol.get(sym) : undefined;
-  if (
-    g?.type.kind === "promise" &&
-    (g.type.inner.kind === "jsval" || g.type.inner.kind === "moduleNs")
-  )
-    return g.type;
+  if (g?.type.kind === "promise" && g.type.inner.kind === "moduleNs") return g.type;
   return null;
-}
-
-/** Marks an INLINE then-handler's unannotated identifier parameters for
- * the island-handle (jsval) binding type — paramShape's early-out. Only
- * the inline arrow/function forms qualify: a handler VALUE keeps its own
- * declared signature (and the settled-type equality check below). */
-function markJsvalHandlerParams(lowerer: Lowerer, handler: ts.Expression): void {
-  let e = handler;
-  while (ts.isParenthesizedExpression(e)) e = e.expression;
-  if (!ts.isArrowFunction(e) && !ts.isFunctionExpression(e)) return;
-  for (const p of e.parameters) {
-    if (ts.isIdentifier(p.name) && p.type === undefined && !p.dotDotDotToken && !p.initializer) {
-      lowerer.jsvalParamOverrides.add(p);
-    }
-  }
 }
 
 function markModuleNsHandlerParams(
@@ -5355,12 +4980,9 @@ export function lowerPromiseMethodCall(
     lowerer.mapTypeOf(lowerer.typeOf(access.expression)) ??
     dynFallbackType(lowerer, access.expression, lowerer.typeOf(access.expression));
   // A dynamic-import promise under an unmappable checker type
-  // (`Promise<typeof import("./m")>` — module-namespace types have no
-  // static mapping): the BINDING holds the island promise
-  // (importCallHandleType / the island-HANDLE var rules), so the storage
-  // type is the receiver's truth. Direct `import("./m").then(...)`
-  // spells the same promise with no binding at all.
-  if (!recvT) recvT = islandPromiseStorageTypeOf(lowerer, access.expression);
+  // (`Promise<typeof import("./m")>`) uses the module promise's native
+  // storage type. Direct `import("./m").then(...)` needs no binding.
+  if (!recvT) recvT = modulePromiseStorageTypeOf(lowerer, access.expression);
   if (recvT?.kind !== "promise") return null;
   if (!lowerer.isStdlibMember(access)) return null;
   const loc = locOf(call);
@@ -5399,20 +5021,7 @@ export function lowerPromiseMethodCall(
   }
   // The receiver evaluates FIRST, in the enclosing function, like JS.
   let receiver = lowerer.lowerExpr(access.expression);
-  // A PACKAGE-returned promise lowers as an island value (jsval): the
-  // promise lives in the engine, so bridge it — a static promise the
-  // engine promise settles (fulfillment = the retained handle or void,
-  // rejection = the bridged reason) — and desugar over the BRIDGE
-  // exactly like a native receiver. This is the classic CLI entry line,
-  // `program.parseAsync(process.argv).catch(handler)`.
-  if (receiver.type.kind === "jsval") {
-    receiver = {
-      kind: "jsBridgePromise",
-      value: receiver,
-      type: { kind: "promise", inner: recvT.inner.kind === "void" ? VOID : JSVAL },
-      loc,
-    };
-  }
+
   if (receiver.type.kind === "dyn" && lowerer.dynConvertible(recvT))
     receiver = lowerer.coerceInto(access.expression, receiver, recvT);
   if (receiver.type.kind !== "promise") {
@@ -5420,9 +5029,8 @@ export function lowerPromiseMethodCall(
     // a lowering gap, named rather than ICEd on.
     lowerer.unsupported("SC1090", call, `'.${member}' on this receiver`);
   }
-  // The wrapper types follow the RECEIVER's promise type (the bridge's
-  // promise-of-jsval for package receivers, the mapped type otherwise);
-  // typed uses of the settled value exit through coerceInto below.
+  // Wrapper types follow the receiver's promise type; typed uses of the
+  // settled value convert through coerceInto below.
   const promT = receiver.type;
   const inner = promT.inner;
 
@@ -5493,8 +5101,6 @@ export function lowerPromiseMethodCall(
         );
       }
       const R = resultT.inner;
-      if (!fulfilledAbsent && inner.kind === "jsval")
-        markJsvalHandlerParams(lowerer, fulfilledNode);
       if (!fulfilledAbsent && inner.kind === "moduleNs")
         markModuleNsHandlerParams(lowerer, fulfilledNode, inner);
       const boxHandler = (
@@ -5696,11 +5302,10 @@ export function lowerPromiseMethodCall(
         lowerer.fnStack.pop();
       }
     }
-    // The settled value is an island HANDLE: an inline handler's
-    // unannotated parameter binds it as jsval, whatever the checker's
+
     // contextual type spelled (a module-namespace type has no mapping —
     // the handle is the value's only story, isIslandExpr's local rule).
-    if (inner.kind === "jsval") markJsvalHandlerParams(lowerer, call.arguments[0]!);
+
     if (inner.kind === "moduleNs") markModuleNsHandlerParams(lowerer, call.arguments[0]!, inner);
     let cb = lowerer.lowerExpr(call.arguments[0]!);
     // A TYPED handler on a DYN-settling promise (the tracePromise
@@ -6260,17 +5865,6 @@ export function lowerPromiseMethodCall(
       // chained into .catch): falling off the handler's end resolves
       // with the dyn undefined.
       catchBody.push({ kind: "return", value: dynUndefinedExpr(loc), loc });
-    } else if (R.kind === "jsval") {
-      // A package-typed result (Promise<Command> — the parseAsync().catch
-      // entry line): falling off the handler's end resolves with
-      // undefined, which on the island side is the engine's own
-      // undefined. Also what makes a never-returning handler (ending in
-      // process.exit) satisfy the always-returns analysis.
-      catchBody.push({
-        kind: "return",
-        value: { kind: "jsOp", op: "globalGet", name: "undefined", args: [], type: JSVAL, loc },
-        loc,
-      });
     }
     const ctx = lowerer.ctx;
     const lifted: IrFunction = {
@@ -6374,7 +5968,7 @@ export function lowerFilterNarrowCall(
   if (isBooleanArg) {
     // ToBoolean must be answerable per element (dyn/caught arms are not).
     if (elem.kind === "union") lowerer.requireTruthyUnion(elem.unionId, argNode);
-    if (elem.kind === "dyn" || elem.kind === "jsval" || elem.kind === "void" || isUnitType(elem)) {
+    if (elem.kind === "dyn" || elem.kind === "void" || isUnitType(elem)) {
       lowerer.badType(argNode, lowerer.typeOf(argNode));
     }
     const receiver = lowerer.lowerExpr(access.expression);
@@ -7015,8 +6609,7 @@ function lowerObjectStaticCall(
       member === "getOwnPropertySymbols" ||
       member === "getOwnPropertyDescriptors") &&
     call.arguments.length === 1 &&
-    !call.arguments.some(ts.isSpreadElement) &&
-    !lowerer.dynamic
+    !call.arguments.some(ts.isSpreadElement)
   ) {
     let object = lowerer.lowerExpr(call.arguments[0]!);
     if (
@@ -7043,8 +6636,7 @@ function lowerObjectStaticCall(
   if (
     (member === "getPrototypeOf" || member === "setPrototypeOf") &&
     call.arguments.length === (member === "getPrototypeOf" ? 1 : 2) &&
-    !call.arguments.some(ts.isSpreadElement) &&
-    !lowerer.dynamic
+    !call.arguments.some(ts.isSpreadElement)
   ) {
     let object = lowerer.lowerExpr(call.arguments[0]!);
     if (object.type.kind === "func") {
@@ -7137,7 +6729,7 @@ function lowerObjectStaticCall(
   // identity. Statically DISJOINT kind pairs answer the constant false
   // with the operands still evaluated (tsc admits any pair — Object.is
   // is (any, any) — and JS evaluates the arguments either way).
-  // dyn/jsval operands keep strict equality's stance: validate first.
+
   if (member === "is") {
     if (call.arguments.length !== 2 || call.arguments.some((a) => ts.isSpreadElement(a))) {
       lowerer.noLowering(
@@ -7164,7 +6756,7 @@ function lowerObjectStaticCall(
     }
     const unitTest = lowerer.lowerUnitComparison(left, right, false, loc);
     if (unitTest) return unitTest;
-    if (lk === "dyn" || rk === "dyn" || lk === "jsval" || rk === "jsval") {
+    if (lk === "dyn" || rk === "dyn") {
       return {
         kind: "libCall",
         fn: "dyn.sameValue",
@@ -7272,8 +6864,7 @@ function lowerObjectStaticCall(
     );
   }
   // Native checked objects retain a live prototype and can install an
-  // own-property descriptor table during creation. Engine-held values
-  // use the engine's Object.create path below.
+  // own-property descriptor table during creation.
   if (member === "create") {
     if (call.arguments.some((a) => ts.isSpreadElement(a))) {
       lowerer.noLowering("Object.create with spread arguments", call);
@@ -7285,54 +6876,7 @@ function lowerObjectStaticCall(
     let protoNode: ts.Expression = call.arguments[0]!;
     while (ts.isParenthesizedExpression(protoNode)) protoNode = protoNode.expression;
     const nullProto = protoNode.kind === ts.SyntaxKind.NullKeyword;
-    if (lowerer.dynamic) {
-      if (call.arguments.length === 2)
-        lowerer.noLowering("Object.create with properties under --dynamic", call);
-      // The checker types the result `any` — an ENGINE value under
-      // --dynamic — and the engine's own Object.create answers with
-      // REAL prototype semantics: reads delegate LIVE, writes shadow,
-      // and inspect renders Node's exact shapes ("[Object: null
-      // prototype]" included). null and engine-held (jsval) prototypes
-      // route; checked-dynamic (dyn) prototypes keep the named fence —
-      // their marshal into the engine is a DEEP COPY, so a later
-      // prototype mutation would be invisible through the created
-      // object where Node delegates live.
-      const objectGlobal = (): IrExpr => ({
-        kind: "jsOp",
-        op: "globalGet",
-        name: "Object",
-        args: [],
-        type: JSVAL,
-        loc,
-      });
-      if (nullProto) {
-        const nullIn: IrExpr = { kind: "jsOp", op: "nullLit", args: [], type: JSVAL, loc };
-        return {
-          kind: "jsOp",
-          op: "callMethod",
-          name: "create",
-          args: [objectGlobal(), nullIn],
-          type: JSVAL,
-          loc,
-        };
-      }
-      const proto = lowerer.lowerExpr(protoNode);
-      if (proto.type.kind === "jsval") {
-        return {
-          kind: "jsOp",
-          op: "callMethod",
-          name: "create",
-          args: [objectGlobal(), proto],
-          type: JSVAL,
-          loc,
-        };
-      }
-      lowerer.noLowering(
-        `Object.create over '${lowerer.fmt(proto.type)}' prototypes`,
-        call,
-        "prototype reads delegate LIVE in Node (mutating the prototype shows through the created object), which the boundary's deep copy cannot honor — only null and engine-held ('any') prototypes lower",
-      );
-    }
+
     if (nullProto && call.arguments.length === 1) {
       return { kind: "libCall", fn: "dyn.objCreateNullProto", args: [], type: DYN, loc };
     }
@@ -8026,7 +7570,7 @@ function lowerObjectStaticCall(
   }
   // unknown[] uses the checked-dynamic array representation. Enumerate
   // a live view of the record so values retain their identities and the
-  // result never pretends to be a native vector or an island array.
+
   const enumerationType = lowerer.mapTypeOf(lowerer.typeOf(call));
   if (
     (member === "values" || member === "entries") &&
@@ -8748,7 +8292,6 @@ function lowerObjLitGenericMethodCall(
       thisT !== null &&
       thisT.kind !== "searchParams" &&
       thisT.kind !== "dyn" &&
-      thisT.kind !== "jsval" &&
       (!thisArg ||
         ts.isIdentifier(thisArg) ||
         ts.isLiteralExpression(thisArg) ||

@@ -121,7 +121,6 @@ async function tryFastPath(): Promise<number | null> {
     outPath,
     emitIr: values["emit-ir"],
     sanitize: values.sanitize,
-    dynamic: values.dynamic,
     backend: "llvm",
     ...(optimization === "dev" || optimization === "speed" ? { optimization } : {}),
     ...(values.strip ? { strip: true as const } : {}),

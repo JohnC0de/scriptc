@@ -51,7 +51,7 @@ export interface FetchCompatOption {
   evidence: readonly FetchCompatEvidence[];
 }
 
-export type FetchCompatInventoryStatus = "static" | "dynamic-only" | "unsupported" | "out-of-scope";
+export type FetchCompatInventoryStatus = "static" | "unsupported" | "out-of-scope";
 
 export type FetchCompatInventoryPlacement =
   | "global"
@@ -64,7 +64,7 @@ export type FetchCompatInventoryPlacement =
 
 /** One public property in the pinned runtime census, or one WebIDL
  * dictionary member observed through its conversion reads. Static rows
- * must resolve to an operation/option above; dynamic-only rows are the
+ * must resolve to an operation/option above; unsupported rows are the
  * implementation queue; out-of-scope rows make intentional omissions
  * explicit instead of letting absence masquerade as a support claim. */
 export interface FetchCompatInventoryEntry {
@@ -119,22 +119,6 @@ const staticEntry = (
   placement: FetchCompatInventoryPlacement,
 ): FetchCompatInventoryEntry => ({ id, owner, member, placement, status: "static" });
 
-const dynamicEntry = (
-  id: string,
-  owner: string,
-  member: string,
-  placement: FetchCompatInventoryPlacement,
-  reason: string,
-): FetchCompatInventoryEntry => ({
-  id,
-  owner,
-  member,
-  placement,
-  status: "dynamic-only",
-  code: "SC2020",
-  reason,
-});
-
 const unsupportedEntry = (
   id: string,
   owner: string,
@@ -167,8 +151,7 @@ const outOfScopeEntry = (
 });
 
 const widerMemberFence = "the member is outside the native static handle projection";
-const typedInterfaceUnsupported =
-  "typed source has no compiler bridge for this interface in either tier";
+const typedInterfaceUnsupported = "typed source has no compiler bridge for this interface";
 const metadataExclusion =
   "WebIDL brand metadata is observable reflection, not an executable compatibility operation";
 
@@ -581,7 +564,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         "AbortSignal",
         "constructor",
         "constructor",
-        "Node exposes the interface object but constructing it throws; neither compiler tier currently preserves that constructor behavior",
+        "Node exposes the interface object but constructing it throws; the compiler does not preserve that constructor behavior",
       ),
       staticEntry("stdlib.abort-signal.abort", "AbortSignal", "abort", "static"),
       staticEntry("stdlib.abort-signal.timeout", "AbortSignal", "timeout", "static"),
@@ -626,7 +609,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         staticEntry(`stdlib.headers.${member}`, "Headers", member, "prototype"),
       ),
       ...["keys", "values", "entries"].map((member) =>
-        dynamicEntry(
+        unsupportedEntry(
           `stdlib.headers.${member}`,
           "Headers",
           member,
@@ -635,7 +618,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         ),
       ),
       staticEntry("stdlib.headers.forEach", "Headers", "forEach", "prototype"),
-      dynamicEntry(
+      unsupportedEntry(
         "stdlib.headers.symbol.iterator",
         "Headers",
         "[Symbol.iterator]",
@@ -704,10 +687,10 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
           "Response",
           member,
           "static",
-          "Response static constructor-object operations have no compiler lowering in either tier",
+          "Response static constructor-object operations have no compiler lowering",
         ),
       ),
-      dynamicEntry("stdlib.response.type", "Response", "type", "prototype", widerMemberFence),
+      unsupportedEntry("stdlib.response.type", "Response", "type", "prototype", widerMemberFence),
       ...["url", "redirected", "status", "ok", "statusText", "headers", "body", "bodyUsed"].map(
         (member) => staticEntry(`stdlib.response.${member}`, "Response", member, "prototype"),
       ),
@@ -718,7 +701,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
           "Response",
           member,
           "prototype",
-          "the dynamic fetch bridge does not implement this Response operation",
+          "the native fetch runtime does not implement this Response operation",
         ),
       ),
       ...["text", "json"].map((member) =>
@@ -744,13 +727,13 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
       staticEntry("stdlib.readable-stream.cancel", "ReadableStream", "cancel", "prototype"),
       staticEntry("stdlib.readable-stream.get-reader", "ReadableStream", "getReader", "prototype"),
       ...["pipeThrough", "values"].map((member) =>
-        dynamicEntry(
+        unsupportedEntry(
           `stdlib.readable-stream.${member}`,
           "ReadableStream",
           member,
           "prototype",
           member === "values"
-            ? "direct for-await consumption compiles statically; storing or driving the first-class iterator handle requires --dynamic"
+            ? "direct for-await consumption compiles statically; storing or driving the first-class iterator handle is unsupported"
             : "the wider Web Streams graph is outside the native readable-stream slice",
         ),
       ),
@@ -760,7 +743,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
           "ReadableStream",
           member,
           "prototype",
-          "the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation",
+          "this operation is outside the native readable-stream implementation",
         ),
       ),
       unsupportedEntry(
@@ -768,7 +751,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         "ReadableStream",
         "[Symbol.asyncIterator]",
         "prototype-symbol",
-        "direct for-await consumption compiles statically; explicit symbol access and stored iterator handles have no compiler lowering in either tier",
+        "direct for-await consumption compiles statically; explicit symbol access and stored iterator handles have no compiler lowering",
       ),
       outOfScopeEntry(
         "stdlib.readable-stream.symbol.toStringTag",
@@ -783,7 +766,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         "ReadableStreamDefaultReader",
         "constructor",
         "constructor",
-        "the constructor object is unavailable in the dynamic engine; static reader handles come from ReadableStream.getReader()",
+        "reader handles come from ReadableStream.getReader(); the constructor object is unsupported",
       ),
       staticEntry(
         "stdlib.readable-stream-default-reader.read",
@@ -822,7 +805,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         "ReadableStreamDefaultController",
         "constructor",
         "constructor",
-        "the constructor object is unavailable in the dynamic engine; static controller handles come from underlying-source callbacks",
+        "controller handles come from underlying-source callbacks; the constructor object is unsupported",
       ),
       staticEntry(
         "stdlib.readable-stream-default-controller.desired-size",
@@ -879,19 +862,19 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
         return supported.has(member)
           ? staticEntry(id, "RequestInit", member, "dictionary")
           : member === "dispatcher"
-            ? dynamicEntry(
+            ? unsupportedEntry(
                 id,
                 "RequestInit",
                 member,
                 "dictionary",
-                "the dynamic tier recognizes Vercel CLI's EnvProxyDispatcher and applies equivalent native environment-proxy routing",
+                "custom dispatchers are unsupported; native environment-proxy routing uses NODE_USE_ENV_PROXY",
               )
             : unsupportedEntry(
                 id,
                 "RequestInit",
                 member,
                 "dictionary",
-                "neither compiler tier preserves this RequestInit member's conversion or transport behavior",
+                "the compiler does not preserve this RequestInit member's conversion or transport behavior",
               );
       }),
       ...["headers", "status", "statusText"].map((member) =>
@@ -906,7 +889,7 @@ export const NODE24_FETCH_COMPAT_PROFILE = {
       {
         name: "WritableStream/TransformStream",
         reason:
-          "the static tier currently targets readable fetch bodies, not general Web Streams graphs",
+          "native support currently covers readable fetch bodies; general Web Streams graphs are unsupported",
       },
       {
         name: "Readable byte/BYOB streams",

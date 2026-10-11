@@ -11,7 +11,7 @@ import { BOOL, DYN, type IrExpr, type IrStmt, type IrType, VOID } from "../../ir
 import { locOf } from "../program.js";
 import { extractIteratorValue } from "./lower-generators.js";
 import { streamSidesOf } from "./lower-stream.js";
-import { staticReadableStreamElementType } from "./lower-island.js";
+import { staticReadableStreamElementType } from "./lower-stdlib.js";
 import { genResultRecord } from "../type-mapper.js";
 import { sideEffectFreeOptionValue } from "./surfaces.js";
 

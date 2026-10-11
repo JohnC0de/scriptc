@@ -48,7 +48,6 @@ describe.each(["llvm"] as const)("static native callback pool, %s", (backend) =>
       );
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         sanitize,
         outDir,
         outPath: join(outDir, "program"),
@@ -88,7 +87,6 @@ describe.each(["llvm"] as const)("static native callback pool, %s", (backend) =>
     );
     const result = await compile(join(fixture, "callback-pool.mjs"), {
       backend,
-      dynamic: false,
       sanitize,
       outDir,
       outPath: join(outDir, "program"),

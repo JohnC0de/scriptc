@@ -4,6 +4,8 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+- **Compilation is native-only.** The `--dynamic` option and embedded JavaScript execution runtime have been removed. Eligible dependencies compile natively by default; unsupported packages receive build diagnostics. QuickJS remains only in the native compiler's isolated `comptime` helper and as standalone regex/Unicode libraries.
+
 <!-- release:start -->
 
 ## 0.2.6

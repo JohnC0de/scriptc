@@ -11,5 +11,4 @@ export class CoercionState {
   readonly checkedNarrows = new Set<string>();
   readonly retags = new Map<string, string>();
   readonly narrows = new Map<string, string>();
-  readonly islandInputs = new Map<string, string>();
 }

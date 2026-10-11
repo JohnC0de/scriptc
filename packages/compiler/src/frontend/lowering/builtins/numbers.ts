@@ -2,7 +2,7 @@ import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, own } from "../lowerer.js";
 import { lowerCheckedPredicateValue } from "../lower-builtin-values.js";
 import { locOf } from "../../program.js";
-import { BOOL, F64, type IrExpr, type IrLibFn, JSVAL } from "../../../ir/ir.js";
+import { BOOL, F64, type IrExpr, type IrLibFn } from "../../../ir/ir.js";
 import { lowerBuiltinValuePreservingUndefined, lowerOptionalNumberPredicate } from "./arguments.js";
 
 /** The lowered Number statics, by member name. The predicate quartet has
@@ -29,12 +29,6 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
   NEGATIVE_INFINITY: -Infinity,
 };
 
-/** Method calls on THE `Number` global: the predicate statics lower to
- * plain C over f64 arguments; `Number.parseFloat`/`Number.parseInt` ARE
- * the global parsers (the spec aliases them), so they get the same
- * island lowering — engine execution under --dynamic, per-site SC2012
- * without it (parseInt takes an explicit radix, like the global). Null
- * for non-Number receivers. */
 export function lowerNumberStaticCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -51,31 +45,7 @@ export function lowerNumberStaticCall(
     }
     const argNode = call.arguments[0]!;
     const arg = lowerBuiltinValuePreservingUndefined(lowerer, argNode);
-    // An ISLAND ('any'-typed) argument evaluates the predicate in the
-    // engine — the statics never coerce, so the engine's answer over the
-    // real value is JS-exact where a static fence would refuse the
-    // editorconfig `(value) => Number.isSafeInteger(value)` shape; the
-    // boolean exits validated like every island boolean.
-    if (arg.type.kind === "jsval") {
-      lowerer.requireDynamicApi(`'Number.${member}'`, call);
-      const numberGlobal: IrExpr = {
-        kind: "jsOp",
-        op: "globalGet",
-        name: "Number",
-        args: [],
-        type: JSVAL,
-        loc,
-      };
-      const raw: IrExpr = {
-        kind: "jsOp",
-        op: "callMethod",
-        name: member,
-        args: [numberGlobal, arg],
-        type: JSVAL,
-        loc,
-      };
-      return { kind: "jsExit", value: raw, type: BOOL, loc };
-    }
+
     const optional = lowerOptionalNumberPredicate(lowerer, arg, fn, loc);
     if (optional) return optional;
     if (arg.type.kind !== "f64") {
@@ -96,24 +66,7 @@ export function lowerNumberStaticCall(
         member === "parseInt" ? "pass an explicit radix: Number.parseInt(s, 10)" : undefined,
       );
     }
-    lowerer.requireDynamicApi(`'Number.${member}'`, call);
-    const callee: IrExpr = {
-      kind: "jsOp",
-      op: "globalGet",
-      name: member,
-      args: [],
-      type: JSVAL,
-      loc,
-    };
-    const args = call.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-    const result: IrExpr = {
-      kind: "jsOp",
-      op: "callFn",
-      args: [callee, ...args],
-      type: JSVAL,
-      loc,
-    };
-    return { kind: "jsExit", value: result, type: F64, loc };
+    lowerer.refuseUnsupportedApi(`'Number.${member}'`, call);
   }
   return null; // other Number statics land on the member fence
 }

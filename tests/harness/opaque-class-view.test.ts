@@ -15,7 +15,6 @@ for (const backend of ["llvm"] as const) {
         join(import.meta.dirname, "../fixtures/self-hosting/opaque-class-view.ts"),
         {
           backend,
-          dynamic: false,
           sanitize: process.env["SCRIPTC_SAN"] === "1",
           optimization: "dev",
           outDir: dir,

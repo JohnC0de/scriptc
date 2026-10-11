@@ -1,0 +1,13 @@
+retired-engine-763-any-flow.ts:15:1 - error SC1043: comparing non-number, non-string values are not supported yet
+
+  14 | let acc: any = 1;
+  15 | acc += 4;
+     | ^~~~~~~~
+  16 | acc *= 3;
+
+retired-engine-763-any-flow.ts:16:1 - error SC1043: comparing non-number, non-string values are not supported yet
+
+  15 | acc += 4;
+  16 | acc *= 3;
+     | ^~~~~~~~
+  17 | console.log(`${acc}`);

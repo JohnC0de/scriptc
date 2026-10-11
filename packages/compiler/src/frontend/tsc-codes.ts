@@ -29,17 +29,6 @@ export const ADOPTED_OPTIONS = [
   "allowSyntheticDefaultImports",
 ] as const;
 
-/* The JAVASCRIPT strictness stance (the JS-input design made real):
- * JavaScript sources carry no annotations, so tsc's strictness families
- * that exist to demand annotations — or to reject dynamically-typed
- * idioms that are ordinary, working JS — cannot be satisfied by the
- * program's author at all. The design already says where inference gaps
- * land: exactly where `any` lands in TS (island under --dynamic, honest
- * fences without). So for JS FILES ONLY, these tsc families are not
- * preflight gates; the values involved stay `any`/loose and every use
- * meets the lowerer's per-site fences instead. TypeScript sources keep
- * the full strict gate — nothing here weakens the default for annotated
- * programs. */
 export const JS_RELAXED_TSC_CODES: ReadonlySet<number> = new Set([
   // implicit any (params, variables, elements, this, returns, rest,
   // construct signatures, index reads over shapes with no index

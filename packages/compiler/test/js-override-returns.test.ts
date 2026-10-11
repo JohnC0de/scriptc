@@ -44,13 +44,11 @@ catch (error) { console.log("short", String(error).includes("SC1090")); }
 console.log("after");
 `,
       );
-      const { coverage } = analyze(entry, { dynamic: false });
+      const { coverage } = analyze(entry, {});
       expect(coverage.diagnostics).toEqual([]);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.runtimeFences ?? []).toEqual([]);
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         sanitize,
         outDir: dir,
         outPath: join(dir, "program"),
@@ -96,12 +94,11 @@ catch (error) { console.log("super", String(error).includes("SC1090")); }
 console.log("after");
 `,
     );
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.diagnostics).toEqual([]);
     expect(coverage.runtimeFences ?? []).toEqual([]);
     const result = await compile(entry, {
       backend: "llvm",
-      dynamic: false,
       sanitize,
       outDir: dir,
       outPath: join(dir, "program"),
@@ -133,7 +130,7 @@ test.each([
   try {
     const entry = join(dir, "main.cjs");
     writeFileSync(entry, "// @ts-nocheck\n" + source + "\nnew Derived().method();\n");
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     const diagnostics = [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])];
     expect(
       diagnostics.some(
@@ -162,7 +159,7 @@ test.each([
       entry,
       `// @ts-nocheck\n${importedBase || base}\nclass Derived extends Base { method() { return 'x'; } }\nnew Derived();\n`,
     );
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     const diagnostics = [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])];
     expect(
       diagnostics.some((d) => d.code === "SC1090" && d.message.includes("different signature")),

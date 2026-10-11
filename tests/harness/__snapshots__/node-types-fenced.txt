@@ -25,14 +25,14 @@ fenced.ts:16:1 - error SC2020: 'Timeout.close' is typed by @types/node but has n
 
   hint: unref(), ref(), hasRef(), and refresh() are the supported Timeout methods
 
-fenced.ts:28:15 - error SC2020: 'Response.type in a static build' is typed by @types/node but has no scriptc lowering yet
+fenced.ts:28:15 - error SC2020: 'Response.type' is typed by @types/node but has no scriptc lowering yet
 
   27 |   const response = await fetch(url);
   28 |   console.log(response.type);
      |               ^~~~~~~~~~~~~
   29 |   response.clone();
 
-  hint: the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), bytes(), and arrayBuffer(); use --dynamic for the wider Web API
+  hint: the member is outside the native static handle projection
 
 fenced.ts:29:3 - error SC2020: 'Response.clone' is typed by @types/node but has no scriptc lowering yet
 

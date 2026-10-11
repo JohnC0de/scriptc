@@ -21,7 +21,6 @@ import {
   HTTPCLIENTREQ_T,
   HTTPREQ_T,
   HTTPRES_T,
-  JSVAL,
   NETSERVER_T,
   NETSOCKET_T,
   PROCSTREAM_T,
@@ -88,35 +87,6 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "fetch.streamFrom": { argTypes: [null], result: DYN },
   // The chunk/result record depends on ReadableStream<T>; validated by validate.ts.
   "fetch.readerRead": { argTypes: [DYN], result: VOID },
-  "island.eval": { argTypes: [STRING], result: STRING },
-  /** Load an embedded npm package's runtime entry in the island (cached by
-   * the engine's module registry) and take one export: args are the entry
-   * KEY (an embedded module's key, from IrModule.embedded) and the export
-   * name — "default" for default imports, "*" for the namespace object.
-   * --dynamic only, like island.eval; result is an owned jsval. May throw
-   * (a package's top-level code can), bridged catchably. */
-  "island.import": { argTypes: [STRING, STRING, STRING], result: JSVAL },
-  /** Dynamic `import(spec)`: load a module through the island's module
-   * system — an embedded module's key or a builtin shim's "node:x" key —
-   * and answer an ENGINE promise of its namespace object (always a
-   * promise, never a throw: load and evaluation failures REJECT it,
-   * Node's shape). The frontend wraps the result in jsBridgePromise, so
-   * awaiting parks the fiber and a rejection crosses catchably. --dynamic
-   * only; result is an owned jsval holding the engine promise. */
-  "island.importDyn": { argTypes: [STRING], result: JSVAL },
-  // Result is the cast's mapped PROMISE target (program-dependent) —
-  // checked in the libCall case, like error.new.
-  /** A checked cast the boundary can never satisfy, DEFERRED to runtime:
-   * `islandValue as Promise<T>` — the value is an ENGINE promise and T
-   * has no validated exit (Node-typed async APIs put class-shaped
-   * interfaces there), so instead of refusing the build the cast throws a
-   * catchable TypeError AT THE CAST naming the target type (args: the
-   * island value — evaluated, borrowed — and the type name). The result
-   * type is the cast's mapped target (a typed dummy; the exception is
-   * pending). Documented divergence: JS `as` never checks — like the dyn
-   * boundary, a conversion that cannot happen throws instead of lying.
-   * --dynamic only. */
-  "island.castFail": { argTypes: [JSVAL, STRING], result: VOID },
   "json.parse": { argTypes: [STRING], result: DYN },
   "json.parseReviver": { argTypes: [STRING, DYN], result: DYN },
   "json.stringifyReplacer": { argTypes: [DYN, DYN, STRING], result: DYN },
@@ -496,11 +466,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
    * epsilon boundary). Borrow nothing; never throw. */
   "math.abs": { argTypes: [F64], result: F64 },
   "math.round": { argTypes: [F64], result: F64 },
-  /** Math.trunc / Math.ceil — C trunc()/ceil() ARE the JS operations
-   * (NaN/±0/±Infinity pass through bit-exactly; ceil(-0.5) is -0 in IEEE
-   * round-toward-+Infinity exactly as ECMA says). Static like floor —
-   * they are ask-4's wholeness-discharge operators, so the library
-   * inference needs them compiled, not island-served. Never throw. */
+
   "math.trunc": { argTypes: [F64], result: F64 },
   "math.ceil": { argTypes: [F64], result: F64 },
   "math.sin": { argTypes: [F64], result: F64 },
@@ -2667,12 +2633,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "dyn.reflectDefine": { argTypes: [DYN, DYN, DYN], result: BOOL },
   "dyn.abstractEq": { argTypes: [DYN, DYN], result: BOOL },
   "dyn.assignAll": { argTypes: [DYN, DYN], result: DYN },
-  /** `Object.create(null)` (scr_json.c): a fresh NULL-PROTOTYPE dyn
-   * dictionary. The checked-dynamic tree's OBJ dispatch is already own-member-only —
-   * Node's null-proto answer — so the flag's whole job is the observations
-   * that SEE the prototype: inspect's "[Object: null prototype]" prefix
-   * and deepStrictEqual's prototype gate. Never throws. Static builds
-   * only; --dynamic routes Object.create through the engine instead. */
+
   "dyn.objCreateNullProto": { argTypes: [], result: DYN },
   "dyn.arrayPrototype": { argTypes: [], result: DYN },
   "dyn.arrayConstructor": { argTypes: [], result: DYN },
@@ -3084,19 +3045,7 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "assert.bytesDeepEq": { argTypes: [null, null, BOOL], result: BOOL },
   // util.inspect: the error receiver is program-dependent (a builtin or
   // user error class — the error.toString precedent, null slot).
-  /** util.inspect (scr_inspect.c — its own link switch, moduleUsesInspect):
-   * the runtime half of the static rendering. Scalar formatters return +1
-   * strings (insp.f64: JS ToString except -0; insp.str: the quoting
-   * ladder + line splitting; insp.regex: /source/flags; insp.buffer:
-   * <Buffer aa ..>). insp.error renders the STACKLESS [Name: message]
-   * form with the code slot as its one property. insp.dyn walks the
-   * checked-dynamic tree entirely in the runtime (its shape lives in the
-   * value); insp.dynS is format's %s twin (dyn strings pass verbatim).
-   * insp.jsval ([value, recurse, depth], --dynamic only) renders the
-   * island scalars and THROWS a catchable TypeError on composites (the
-   * may-throw seed set). begin/entry/moreItems/end drive the frame
-   * engine from the compiler-synthesized per-type traversal helpers
-   * (%util.insp.N — the deepStrictEqual precedent). */
+
   "insp.f64": { argTypes: [F64], result: STRING },
   /** util.format %j over a checked-dynamic argument: the runtime dyn
    * walk (JS-exact stringify; root undefined/function prints
@@ -3108,7 +3057,6 @@ export const LIB_FN_SIGS = defineLibFnSignatures({
   "insp.error": { argTypes: [null, F64, F64], result: STRING },
   "insp.dyn": { argTypes: [DYN, F64, F64], result: STRING },
   "insp.dynS": { argTypes: [DYN, F64], result: STRING },
-  "insp.jsval": { argTypes: [JSVAL, F64, F64], result: STRING },
   "insp.begin": { argTypes: [F64], result: VOID },
   "insp.entry": { argTypes: [STRING, BOOL], result: VOID },
   // Circular references: the receiver slot is program-dependent (any

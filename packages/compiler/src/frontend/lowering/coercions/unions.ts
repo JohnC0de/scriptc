@@ -94,7 +94,6 @@ export function strandedUnitTrap(
     expected.kind === "union" ||
     expected.kind === "void" ||
     expected.kind === "dyn" ||
-    expected.kind === "jsval" ||
     isUnitType(expected)
   ) {
     return null;

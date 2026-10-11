@@ -52,42 +52,9 @@ test("a host without a compile-time evaluator refuses explicitly", () => {
   expect(factory).not.toHaveBeenCalled();
 });
 
-test("TypeScript package emission belongs to its host and obeys the service lifecycle", () => {
-  const emit = vi.fn(() => "export const value = 1;");
-  const factory = vi.fn(() => {
-    throw new Error("emission must not open a parser connection");
-  });
-  const services = new FrontendServices(factory, process.cwd(), undefined, undefined, emit);
-  expect(services.emitRuntimeTypeScript("index.ts", "export const value: number = 1;", "esm")).toBe(
-    "export const value = 1;",
-  );
-  expect(emit).toHaveBeenCalledExactlyOnceWith(
-    "index.ts",
-    "export const value: number = 1;",
-    "esm",
-  );
-  expect(factory).not.toHaveBeenCalled();
-  services.close();
-  expect(() => services.emitRuntimeTypeScript("index.ts", "", "esm")).toThrow("closed");
-  expect(emit).toHaveBeenCalledTimes(1);
-});
-
-test("a host without a TypeScript package emitter refuses explicitly", () => {
-  const { services, factory } = setup();
-  try {
-    expect(() => services.emitRuntimeTypeScript("index.ts", "", "esm")).toThrow(
-      "does not provide TypeScript package emission",
-    );
-  } finally {
-    services.close();
-  }
-  expect(factory).not.toHaveBeenCalled();
-});
-
 test("service construction and irrelevant rewrites open no connections", () => {
   const { services, factory } = setup();
   expect(services.rewriteCjs("exports.value = 1;", "index.js")).toBeNull();
-  expect(services.globalFetchModules([])).toEqual(new Set());
   expect(services.declarationOverloads("index.js", "", new Map())).toBeNull();
   expect(services.declarationProperties("index.js", "", new Map())).toBeNull();
   services.close();
@@ -95,7 +62,6 @@ test("service construction and irrelevant rewrites open no connections", () => {
   expect(factory).not.toHaveBeenCalled();
   expect(() => services.parse("a.ts", "", "ts")).toThrow("closed");
   expect(() => services.createProgramHost()).toThrow("closed");
-  expect(() => services.globalFetchModules([])).toThrow("closed");
   expect(() => services.rewriteCjs("", "a.js")).toThrow("closed");
   expect(() => services.declarationOverloads("a.js", "", new Map())).toThrow("closed");
   expect(() => services.declarationProperties("a.js", "", new Map())).toThrow("closed");
@@ -134,20 +100,6 @@ test("program hosts remain usable after their creating services close", () => {
     host.close();
   }
   expect(connections[0]!.close).toHaveBeenCalledTimes(1);
-});
-
-test("fetch analysis never shares a semantic session with detached syntax", () => {
-  const { services, connections } = setup();
-  const file = services.parse("same.js", "const fetch = () => 1;", "js");
-  expect([
-    ...services.globalFetchModules([{ key: "same.js", source: "fetch();", format: "cjs" }]),
-  ]).toEqual(["same.js"]);
-  expect(connections).toHaveLength(2);
-  expect(connections[0]!.close).not.toHaveBeenCalled();
-  expect(connections[1]!.close).toHaveBeenCalledTimes(1);
-  expect(services.parse("same.js", file.text, "js")).toBe(file);
-  services.close();
-  expect(connections.every((connection) => connection.close.mock.calls.length === 1)).toBe(true);
 });
 
 test("load failure releases the newly opened program host and keeps supplied services reusable", () => {

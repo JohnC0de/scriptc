@@ -13,7 +13,6 @@ import { compile, compileLibrary } from "@scriptc/compiler";
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
 const require = createRequire(import.meta.url);
-const islandShim = join(import.meta.dirname, "island-shim.mjs");
 
 function zigOnPath(): boolean {
   try {
@@ -270,7 +269,6 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     const result = await compile(entry, {
       outDir,
       outPath: join(outDir, "program.wasm"),
-      dynamic: true,
     });
     if (!result.ok) {
       throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
@@ -284,7 +282,6 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     const result = await compile(entry, {
       outDir,
       outPath: join(outDir, "program.wasm"),
-      dynamic: true,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -313,36 +310,16 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     }
   });
 
-  test("the LLVM target supports the dynamic island", async () => {
-    const entry = join(repoRoot, "tests/corpus/1100-island-eval-basics.ts");
-    const outDir = await mkdtemp("/tmp/scriptc-wasi-dynamic-");
-    const outPath = join(outDir, "program.wasm");
-    const result = await compile(entry, { outDir, outPath, dynamic: true });
-    if (!result.ok)
-      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
-    expect(result.backend).toBe("llvm");
-
-    const node = await run(process.execPath, ["--import", islandShim, entry]);
-    const wasm = await run(process.execPath, [
-      "--no-warnings",
-      "--experimental-wasi-unstable-preview1",
-      "-e",
-      WASI_RUNNER,
-      outPath,
-    ]);
-    expect(wasm).toEqual(node);
-  });
-
-  test("pending static promises cross into the dynamic island", async () => {
+  test("native promises cross checked-value boundaries", async () => {
     const entry = join(repoRoot, "tests/corpus/2633-island-promise-crossing.js");
     const outDir = await mkdtemp("/tmp/scriptc-wasi-dynamic-promise-");
     const outPath = join(outDir, "program.wasm");
-    const result = await compile(entry, { outDir, outPath, dynamic: true });
+    const result = await compile(entry, { outDir, outPath });
     if (!result.ok)
       throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     expect(result.backend).toBe("llvm");
 
-    const node = await run(process.execPath, ["--import", islandShim, entry]);
+    const node = await run(process.execPath, [entry]);
     const wasm = await run(process.execPath, [
       "--no-warnings",
       "--experimental-wasi-unstable-preview1",
@@ -353,11 +330,11 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     expect(wasm).toEqual(node);
   });
 
-  test("the LLVM target embeds npm packages for the dynamic island", async () => {
+  test("the LLVM target compiles npm packages natively", async () => {
     const entry = join(repoRoot, "tests/fixtures/npm/cases/namespace/main.ts");
     const outDir = await mkdtemp("/tmp/scriptc-wasi-npm-");
     const outPath = join(outDir, "program.wasm");
-    const result = await compile(entry, { outDir, outPath, dynamic: true });
+    const result = await compile(entry, { outDir, outPath });
     if (!result.ok)
       throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     expect(result.backend).toBe("llvm");
@@ -379,7 +356,7 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
       const entry = join(repoRoot, "tests/fixtures/npm/cases", fixture, "main.ts");
       const outDir = await mkdtemp("/tmp/scriptc-wasi-npm-pending-");
       const outPath = join(outDir, "program.wasm");
-      const result = await compile(entry, { outDir, outPath, dynamic: true });
+      const result = await compile(entry, { outDir, outPath });
       if (!result.ok)
         throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
       expect(result.backend).toBe("llvm");
@@ -400,7 +377,7 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     const entry = join(repoRoot, "tests/fixtures/npm/cases/zlib-shims/main.ts");
     const outDir = await mkdtemp("/tmp/scriptc-wasi-npm-zlib-");
     const outPath = join(outDir, "program.wasm");
-    const result = await compile(entry, { outDir, outPath, dynamic: true });
+    const result = await compile(entry, { outDir, outPath });
     if (!result.ok)
       throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     expect(result.backend).toBe("llvm");

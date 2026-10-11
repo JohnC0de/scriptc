@@ -15,7 +15,6 @@ async function emit(source: string): Promise<string> {
       outDir: dir,
       outPath: output,
       outputKind: "ir",
-      dynamic: false,
     });
     if (!result.ok) throw new Error(result.diagnostics.map((d) => d.message).join("\n"));
     return emitLlvmModule(deserializeModule(await readFile(output, "utf8")));

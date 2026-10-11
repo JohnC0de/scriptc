@@ -2,6 +2,7 @@ import type { CompileFailure, CompileRequestOptions } from "../compile-types.js"
 import type { FfiProfile } from "../ffi/ffi-manifest.js";
 import {
   checkerPanicDiag,
+  npmStaticRefusalDiag,
   iceDiag,
   isCheckerPanic,
   type ScrDiagnostic,
@@ -46,11 +47,22 @@ export function prepareExecutableModule(
       sourceTexts: fe.sourceTexts(),
     });
 
+    const refused = fe.npmStatic.filter((entry) => entry.status === "refused");
+    if (refused.length > 0) {
+      return fail(
+        refused.map((entry) =>
+          npmStaticRefusalDiag(
+            entry.package,
+            entry.detail ?? "its static compilation was refused",
+            fe.npmImportSites.get(entry.package) ?? { file: entryPath, start: 0, end: 0 },
+          ),
+        ),
+      );
+    }
     if (fe.preflight.length > 0) return fail(fe.preflight);
 
     try {
       lowered = fe.lower({
-        dynamic: opts.dynamic ?? false,
         targetPlatform: buildPlatform,
         ...(ffi !== null ? { ffiImports: ffi.functions } : {}),
       });

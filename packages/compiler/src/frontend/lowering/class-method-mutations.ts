@@ -277,7 +277,6 @@ export function collectClassMethodMutations(
   };
   for (const file of files)
     ts.walkPreorder(file, (node) => {
-      if (lowerer.dynamic) unknownKey = file;
       if (
         (ts.isPropertyDeclaration(node) ||
           ts.isPropertyAssignment(node) ||

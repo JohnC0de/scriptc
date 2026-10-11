@@ -33,7 +33,7 @@ export function npmCases(fixturesRoot: string): NpmCase[] {
     {
       // THE acceptance test: a calculator CLI on the real commander package
       // (pinned in the fixture; see its README), across the happy paths,
-      // --version/--help (island process.exit), and the error exits.
+
       name: "commander-calc",
       entry: join(fixturesRoot, "commander-calc/calc.ts"),
       argvs: [

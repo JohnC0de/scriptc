@@ -9,10 +9,10 @@ import { InternalCompilerError } from "../errors.js";
  * (tests/harness/surface-manifest.test.ts) fails until the committed file
  * is regenerated (`pnpm manifest`).
  *
- * Schema (schemaVersion 1 — additive changes only; removals or meaning
+ * Schema (schemaVersion 2 — additive changes only; removals or meaning
  * changes bump the number):
  *   {
- *     schemaVersion: 1,
+ *     schemaVersion: 2,
  *     compilerVersion: string,   // the exact published release version —
  *                                // a version pin matches this string
  *     coverage: string[],        // what is and is not projected (the
@@ -23,7 +23,7 @@ import { InternalCompilerError } from "../errors.js";
  *                                // names ("stdlib.string.charCodeAt")
  *       kind: "syntax" | "stdlib" | "node-builtin" | "diagnostic-fence",
  *       name: string,            // human-readable surface name
- *       status: "static" | "dynamic-only" | "unsupported",
+ *       status: "static" | "unsupported",
  *       code?: "SC____",         // REQUIRED on every non-static entry:
  *                                // the diagnostic code the compiler
  *                                // raises where the refusal applies
@@ -49,7 +49,7 @@ import {
   BUILTIN_MODULE_FNS,
   COLLECTION_ITERATOR_METHODS,
   COMPOUND_ASSIGN_OPS,
-  ISLAND_SURFACE,
+  STDLIB_SURFACE,
   MAP_METHODS,
   SET_COMBINE_METHODS,
   SET_METHODS,
@@ -65,7 +65,7 @@ import {
 
 export type SurfaceEntryKind = "syntax" | "stdlib" | "node-builtin" | "diagnostic-fence";
 
-export type SurfaceEntryStatus = "static" | "dynamic-only" | "unsupported";
+export type SurfaceEntryStatus = "static" | "unsupported";
 
 export interface SurfaceManifestEntry {
   id: string;
@@ -77,13 +77,13 @@ export interface SurfaceManifestEntry {
 }
 
 export interface SurfaceManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   compilerVersion: string;
   coverage: string[];
   entries: SurfaceManifestEntry[];
 }
 
-export const MANIFEST_SCHEMA_VERSION = 1;
+export const MANIFEST_SCHEMA_VERSION = 2;
 
 /** The manifest's own scope statement: what the projection covers and —
  * just as load-bearing — what it deliberately leaves out, so absence is
@@ -93,10 +93,9 @@ const COVERAGE_NOTES: string[] = [
   "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, global functions (parseInt, parseFloat, isNaN, isFinite), and the process surface outside its ambient slice.",
   "The ambient-nondeterminism and ambient-authority surfaces the library sidecar's determinism attestation scans ARE projected even where they lower through dedicated code paths — the Date compositions (stdlib.date.*), perf_hooks' performance.now, and the process global's ambient reads and authority calls (node-builtin.process.*) — so a determinism fence can name every surface the attestation demotes on.",
   "stdlib and node-builtin member entries name surface whose LOWERED call forms are constrained (arity, argument shapes); declared call forms outside the lowered set are refused per site, with code SC2020 for standard-library and node-builtin surface.",
-  "Entries with status 'unsupported' or 'dynamic-only' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
-  "Entries with status 'dynamic-only' compile when the build embeds the dynamic engine (--dynamic); without the flag each use site is refused with the entry's code.",
+  "Entries with status 'unsupported' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
   `The engine-free fetch projection targets Node ${NODE24_FETCH_COMPAT_PROFILE.target.node} with bundled Undici ${NODE24_FETCH_COMPAT_PROFILE.target.undici}. Each projected row names the differential evidence that guards it; changing the pinned Node or Undici version is an explicit profile update.`,
-  "The fetch profile also contains a runtime-reflected census of the selected fetch, abort, Headers, and readable-stream interfaces plus RequestInit/ResponseInit dictionary reads. Static, dynamic-only, and unsupported census rows are projected here; its explicitly out-of-scope metadata rows and adjacent-interface exclusions remain in the profile so absence is deliberate rather than ambiguous.",
+  "The fetch profile also contains a runtime-reflected census of the selected fetch, abort, Headers, and readable-stream interfaces plus RequestInit/ResponseInit dictionary reads. Static and unsupported census rows are projected here; its explicitly out-of-scope metadata rows and adjacent-interface exclusions remain in the profile so absence is deliberate rather than ambiguous.",
   "Process-level diagnostic codes are not surface entries: SC0001-SC0004 are preflight gates, SC1110 is a comptime evaluation failure, SC3001/SC3002 are backend/target tier refusals, SC9001/SC9002 are internal errors.",
   "Entry statuses are projected for the desktop targets. The mobile targets (aarch64-apple-ios, aarch64-apple-ios-simulator, aarch64-linux-android) compile library-mode archives only: the library-admissible surface (what SC4005's async_free requirement and the library link set admit) is supported there, the executable lane refuses those triples with SC3002, and no entry outside the library-admissible surface carries a mobile support claim. iOS archives build for iOS 15.0 on darwin hosts; Android archives build against NDK API level 26.",
   "No scheduling metadata is published; entry ids are the stable diff keys across releases.",
@@ -304,30 +303,29 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
     });
   }
 
-  // ── stdlib: the Math surface — static table first, island remainder ───
   const mathNames = new Set([
     ...Object.keys(STATIC_MATH_FNS),
-    ...Object.keys(ISLAND_SURFACE.math.fns),
+    ...Object.keys(STDLIB_SURFACE.math.fns),
   ]);
   for (const name of mathNames) {
     const stat = STATIC_MATH_FNS[name];
-    const island = ISLAND_SURFACE.math.fns[name];
+    const declared = STDLIB_SURFACE.math.fns[name];
     if (stat !== undefined) {
       add({
         id: `stdlib.math.${name}`,
         kind: "stdlib",
         name: `Math.${name}`,
         status: "static",
-        // Only the island overlap earns a tail: the tables prove where the
-        // untabled arities go there. Elsewhere untabled shapes may have
+
+        // Untabled shapes may have
         // their own special-cased lowerings (Math.min/max over one array
         // spread), so no claim is made about them.
         note:
           name === "hypot"
             ? "compiles statically at any arity, including number[] spreads"
             : `compiles statically at arity ${stat.arity}` +
-              (island !== undefined
-                ? "; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+              (declared !== undefined
+                ? "; other declared call shapes are refused with SC2012"
                 : ""),
       });
     } else {
@@ -335,17 +333,17 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
         id: `stdlib.math.${name}`,
         kind: "stdlib",
         name: `Math.${name}`,
-        status: "dynamic-only",
+        status: "unsupported",
         code: "SC2012",
       });
     }
   }
-  for (const name of Object.keys(ISLAND_SURFACE.math.props)) {
+  for (const name of Object.keys(STDLIB_SURFACE.math.props)) {
     add({
       id: `stdlib.math.${name}`,
       kind: "stdlib",
       name: `Math.${name}`,
-      status: "dynamic-only",
+      status: "unsupported",
       code: "SC2012",
     });
   }
@@ -360,7 +358,7 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
   }
   const numberNames = new Set([
     ...Object.keys(STATIC_NUMBER_METHODS),
-    ...Object.keys(ISLAND_SURFACE.number),
+    ...Object.keys(STDLIB_SURFACE.number),
   ]);
   for (const name of numberNames) {
     const stat = Object.hasOwn(STATIC_NUMBER_METHODS, name)
@@ -379,26 +377,24 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
         id: `stdlib.number.${name}`,
         kind: "stdlib",
         name: `number.prototype.${name}`,
-        status: "dynamic-only",
+        status: "unsupported",
         code: "SC2012",
       });
     }
   }
-  for (const name of Object.keys(ISLAND_SURFACE.string)) {
+  for (const name of Object.keys(STDLIB_SURFACE.string)) {
     if (STRING_INDEX_METHODS.has(name) || STRING_REPLACE_METHODS.has(name)) continue;
     add({
       id: `stdlib.string.${name}`,
       kind: "stdlib",
       name: `string.prototype.${name}`,
-      status: "dynamic-only",
+      status: "unsupported",
       code: "SC2012",
     });
   }
-  // ISLAND_SURFACE.globals (parseFloat, isFinite) is deliberately NOT
+  // STDLIB_SURFACE.globals (parseFloat, isFinite) is deliberately NOT
   // projected: those globals also lower statically over exactly-typed
-  // arguments through untabled call paths, so neither status would be
-  // truthful from the island table alone — the coverage notes carry the
-  // exclusion.
+  // arguments through untabled call paths; the table alone cannot classify them.
 
   // ── node-builtin: modules, members, constants, named fences ───────────
   const moduleId = (mod: string): string => `node-builtin.${mod.split("/").join(".")}`;
@@ -488,7 +484,7 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
     }
   }
   for (const row of NODE24_FETCH_COMPAT_PROFILE.inventory.entries) {
-    if (row.status !== "dynamic-only" && row.status !== "unsupported") continue;
+    if (row.status !== "unsupported") continue;
     if (row.code === undefined || row.reason === undefined) {
       throw new InternalCompilerError(`non-static fetch inventory row '${row.id}' is incomplete`);
     }

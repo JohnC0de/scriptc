@@ -1450,8 +1450,7 @@ function isCreateRequireBaseCall7(program: ts.Program, expr: ts.Expression): boo
   );
 }
 
-/** A node:module import alone does not require an engine. Retain npm
- * fallback for require indirection the lowering cannot erase, while
+/** Refuse require indirection the lowering cannot erase, while
  * admitting literal calls through the same stable/inline shapes as program
  * code. Inspect symbols, not names: nested shadows are unrelated bindings. */
 function npmStaticModuleImportReason7(
@@ -2178,25 +2177,6 @@ function backEdgeUseOffence7(
   return null;
 }
 
-/** The benign-cycle admission engine over one import graph, shared by
- * preflight's static-module walk and the --dynamic subgraph walk
- * (appendDynamicImportModules). Given a BACK edge (importer → e.dep with
- * e.dep already mid-initialization in a depth-first walk), answers null
- * to ADMIT the cycle — the guarded %init calls reproduce Node's cache-hit
- * order and nothing can observe the partial initialization — or the
- * human-readable reason it keeps the SC1016 fence. Three admission chances:
- *  - the CHEAP PER-EDGE rule: the closing statement binds nothing (a
- *    side-effect import) or binds only namespace objects whose every use
- *    is a bare expression statement — no read crosses the edge at all;
- *  - the DECLARATION-ONLY INIT WINDOW rule (the admission block above):
- *    every cluster member is an ES module with an inert top level, and
- *    the closing edge's bindings are used only in deferred positions;
- *  - the EXACT INITIALIZATION rule (exactCycleRefusal7): partial
- *    initialization is observable, but every observation is modeled —
- *    the lowering checks each binding cycleEarlyBindings reports.
- * Tarjan SCCs (lazy, rooted at each queried importer) and cluster
- * verdicts are memoized across calls, so `edgesOf` must answer the same
- * edges for the same file every time. */
 export function makeCycleAdmission(
   program: ts.Program,
   edgesOf: (sf: ts.SourceFile) => readonly CycleEdge[],
@@ -2758,11 +2738,6 @@ function resolveImport7(
     : null;
 }
 
-/** An import that resolves into node_modules: the package's shipped .d.ts
- * is the type surface, and the package's shipped JS runs in the dynamic
- * island under --dynamic. Resolution rides the own resolver (resolve.ts).
- * Null for relative and node: specifiers, and for anything that doesn't
- * resolve into node_modules. */
 function resolveNpmImport7(
   fromFileName: string,
   specifier: string,
@@ -2773,7 +2748,7 @@ function resolveNpmImport7(
   }
   // --provenance-sources: a registered specifier is NOT an npm import —
   // its attested source compiles as program modules (resolveProjectModule
-  // answers the entry), so no island embed and no .d.ts type surface.
+
   if (provenanceEntryFor(specifier) !== null) return null;
   const resolved = resolveBareModule(fromFileName, specifier, undefined, resolutionKind);
   if (!resolved) return null;
@@ -2893,9 +2868,8 @@ function preflight7(load: LoadResult): {
   // Workspace-linked packages register BEFORE the tsc gate. Their files
   // live at realpaths OUTSIDE node_modules (the monorepo-tool symlink
   // shape), so nothing path-shaped marks them as npm surface — yet their
-  // shipped JS is the identical foreign-tsconfig story as node_modules JS
-  // (the island executes it under --dynamic; the author's own build
-  // checked it, the program's author cannot fix it). The lazy
+  // shipped JS follows the same foreign-tsconfig rules as node_modules JS.
+  // The lazy
   // registration inside the import-fence walk below runs AFTER errorsOf,
   // too late for the gate, so one pass over the program's import edges
   // registers them up front: every bare specifier any program file loads —
@@ -2969,42 +2943,17 @@ function preflight7(load: LoadResult): {
     const sf = p.getSourceFile(d.fileName);
     return sf !== undefined && names.has(sf.text.slice(d.pos, d.end));
   };
-  /* --npm-static: checker errors INSIDE an opted-in package's files never
-   * gate the build — the package's author checked that JS under a foreign
-   * tsconfig (their own lib choices, their own strictness), the program's
-   * author cannot fix it, and the JS design already names where inference
-   * gaps land: the per-statement runtime fences (trust-but-verify — a
-   * statement the checker could not prove compiles to its honest trap,
-   * never to a silent guess). scriptc's OWN SC1xxx fences in those files
-   * still count — preflight structure problems mark the package an
-   * offender and it falls back to the island. */
+
   const npmStaticFileSuppressed = (d: ts.Diagnostic): boolean =>
     d.fileName !== undefined && npmStaticPackageOfPath(d.fileName) !== null;
-  /* The same doctrine for node_modules JS the opt-in never NAMED:
-   * maxNodeModuleJsDepth (set only on --npm-static loads) admits ANY
-   * node_modules JavaScript the checker's resolution touches — e.g. an
-   * ambient `declare module "punycode"` in @types/node now loses to an
-   * INSTALLED punycode package's JS, which checkJs then checks. Those
-   * files' errors are the identical foreign-tsconfig story (third-party
-   * shipped JS the program's author cannot fix), they were invisible to
-   * every flagless compile (depth 0 keeps node_modules JS out of the
-   * program), and the packages themselves still island — so their checker
-   * errors never gate a build. */
-  /* WORKSPACE-LINKED shipped JS is the same story at a different path: the
-   * package's files realpath OUTSIDE node_modules (so depth-0 exclusion
-   * never saw them and allowJs+checkJs pulls them straight into the
-   * program), but they are npm surface all the same — the island executes
-   * them, the program's author cannot fix them (a workspace package shipping
-   * an ncc bundle with dozens of checker errors). Registered up front (the
-   * pass above), suppressed here unless --npm-static opted them into being
-   * program modules. */
-  const islandJsFile = (file: string): boolean =>
+
+  const unselectedPackageJsFile = (file: string): boolean =>
     isJsSourceFileName(file) &&
     !entryPackageFile(file) &&
     npmStaticPackageOfPath(file) === null &&
     (isNodeModulesPath(file) || workspacePackageOfPath(file) !== null);
   const nodeModulesJsSuppressed = (d: ts.Diagnostic): boolean =>
-    d.fileName !== undefined && islandJsFile(d.fileName);
+    d.fileName !== undefined && unselectedPackageJsFile(d.fileName);
   /* JSDoc TYPE positions in JS files are documentation Node never reads:
    * a name-resolution failure THERE (2304/2552 — the pattern's utilities.js
    * spells a mapped type over a @template name it never declared) types
@@ -3034,17 +2983,7 @@ function preflight7(load: LoadResult): {
     if (insideBlockComment(sf.text, d.pos)) return true;
     return d.code === 2300 && commentDup.has(`${d.fileName}:${sf.text.slice(d.pos, d.end)}`);
   };
-  /* A workspace member installed by COPY ships its JS inside node_modules,
-   * where depth-0 exclusion keeps it out of the checker's program — an
-   * UNTYPED member then types as an implicit-any module (TS7016) at every
-   * import site. The symlinked install of the same tree never sees this
-   * (the realpath escapes node_modules and allowJs types the member from
-   * its JS), and the package is the program author's own workspace code
-   * with the island as its execution home — "install @types" is not
-   * actionable — so the copied shape must not gate either: a 7016 whose
-   * specifier names a REGISTERED workspace package (the eager
-   * registration pass above runs first) is suppressed, and the import
-   * takes the same per-site island story as any untyped npm package. */
+
   const workspaceImplicitAnySuppressed = (p: ts.Program, d: ts.Diagnostic): boolean => {
     if (d.code !== 7016 || d.fileName === undefined || d.pos === undefined || d.end === undefined)
       return false;
@@ -3117,7 +3056,7 @@ function preflight7(load: LoadResult): {
         (!isNodeModulesPath(sf.fileName) ||
           entryPackageFile(sf.fileName) ||
           npmStaticPackageOfPath(sf.fileName) !== null) &&
-        !islandJsFile(sf.fileName),
+        !unselectedPackageJsFile(sf.fileName),
     );
   const userFiles = npmStaticActive()
     ? planNpmStaticReexports(
@@ -3136,11 +3075,8 @@ function preflight7(load: LoadResult): {
     : programFiles;
   program.getTypeChecker().prefetchSourceFileStructures(userFiles);
 
-  // node_modules JS that no --npm-static opt-in claims is NOT program
-  // source even when maxNodeModuleJsDepth pulled it into the checker's
-  // program (see nodeModulesJsSuppressed above): its execution home is the
-  // island, so preflight's statement walks skip it — no import fences, no
-  // module edges, no statement counts from files the lowering never lowers.
+  // Unselected node_modules JS is not native program source even when
+  // maxNodeModuleJsDepth pulled it into the checker (nodeModulesJsSuppressed).
   // Node stops at the nearest package.json even when it is malformed, and
   // an explicit CommonJS scope (or .cjs/.cts extension) disables ambiguous-
   // file syntax detection entirely. TypeScript's bundler checker models
@@ -3289,13 +3225,8 @@ function preflight7(load: LoadResult): {
           // NAMED re-exports from an INSTALLED npm package (`export
           // { isUrl } from "url-or-path"` — the pattern's universal facade,
           // `export { visitorKeys as default } from "@glimmer/syntax"`):
-          // import-plus-export plumbing. collectNpmImports registers the
-          // island load at this statement's position in the exporter's
-          // init and keys each binding by the same aliased symbol a
-          // direct import would, so consumer reads resolve identically
-          // through the alias chain. Star re-exports and unresolvable
-          // specifiers keep the fence (no member list to bind / nothing
-          // installed to load).
+          // import-plus-export plumbing. The lowering owns the package
+          // value diagnostic when no compiled source can supply the binding.
           if (
             stmt.exportClause !== undefined &&
             ts.isNamedExports(stmt.exportClause) &&
@@ -3402,7 +3333,7 @@ function preflight7(load: LoadResult): {
       // clause fences below apply to it as to program JS. A miss (the
       // resolution still answers declarations, or the file never joined
       // the program) marks the package an OFFENDER: the frontend's
-      // fallback loop rebuilds without it and the import islands as ever.
+      // selection loop rebuilds without it and reports the package refusal.
       let npmStaticDep: ts.SourceFile | null = null;
       if (npm !== null) {
         if (isNpmStaticPackage(npm.packageName)) {
@@ -3412,7 +3343,7 @@ function preflight7(load: LoadResult): {
           // Types resolved, but Node's RUNTIME resolution can still refuse
           // the edge (a types-only package whose exports target ships no JS,
           // most commonly): that program is Node's startup crash, not an
-          // island candidate — there is nothing to execute anywhere.
+
           const refusal = probeNodeImportRefusal(sf.fileName, spec);
           if (refusal !== null) {
             refuse(
@@ -3648,8 +3579,7 @@ function preflight7(load: LoadResult): {
               if (dep === null) continue; // offender recorded — the fallback loop reloads
             } else {
               // createRequire's non-program targets belong to its own
-              // lowering: installed packages select static-vs-island
-              // there, and missing packages become catchable
+              // lowering, where missing packages become catchable
               // MODULE_NOT_FOUND throws. Only resolved program targets are
               // module-order edges in this preflight walk.
               if (bindingKind === "createRequire") continue;
@@ -4513,16 +4443,6 @@ function erasedTypeOnlyReexport(stmt: ts.ExportDeclaration): boolean {
   );
 }
 
-/** A file's import declarations — and value re-exports with a specifier
- * (`export { x } from "./y.js"`, `export * from "./y.js"`), which Node
- * evaluates exactly like imports — in SOURCE ORDER, each with its resolved
- * user-module dependency (null for npm/builtin/JSON specifiers — those are
- * not module-order edges). The per-file %init header (lowerFileInit) uses
- * this to interleave island imports with user-module init calls exactly
- * where Node would evaluate them. CommonJS require statements are
- * deliberately NOT here: Node evaluates a require AT ITS STATEMENT, inline
- * in the module body, so the statement lowering emits their guarded %init
- * calls in place instead of hoisting them. */
 export function orderedImportsOf(
   program: ts.Program,
   sf: ts.SourceFile,

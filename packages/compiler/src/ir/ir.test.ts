@@ -9,7 +9,6 @@ import {
   canConvertToDyn,
   canDynCheckTo,
   type IrBytesElem,
-  isIslandCallbackParamType,
   isJsonSafeType,
   isJsonStringifySafeType,
   isJsonStringifyDynamicType,
@@ -126,12 +125,10 @@ describe("checked records with opaque payloads", () => {
       expect(isJsonSafeType(type, record, union)).toBe(false);
       expect(isJsonStringifySafeType(type, record, union)).toBe(false);
       expect(isJsonStringifyDynamicType(type, record, union)).toBe(true);
-      expect(isIslandCallbackParamType(type, record, union)).toBe(false);
     },
   );
 
   test("opaque arrays and optional records retain their actual payload representation", () => {
-    expect(isIslandCallbackParamType(DYN, record, union)).toBe(true);
     expect(canDynCheckTo(arrayOf(DYN), record, union)).toBe(true);
     expect(canDynCheckTo({ kind: "union", unionId: "optional" }, record, union)).toBe(true);
   });
@@ -176,7 +173,6 @@ describe("native typed-array boundaries", () => {
       expect(canConvertToDyn(shape, record, union)).toBe(true);
       expect(canDynCheckTo(shape, record, union)).toBe(true);
       expect(isJsonSafeType(shape, record, union)).toBe(false);
-      expect(isIslandCallbackParamType(shape, record, union)).toBe(false);
     },
   );
 });
@@ -196,7 +192,6 @@ describe("native bigint checked storage", () => {
       expect(canDynCheckTo(type, record, union)).toBe(true);
       expect(isJsonSafeType(type, record, union)).toBe(false);
       expect(isJsonStringifySafeType(type, record, union)).toBe(false);
-      expect(isIslandCallbackParamType(type, record, union)).toBe(false);
     }
   });
 });
@@ -218,7 +213,6 @@ describe("native process stream checked storage", () => {
       expect(canConvertToDyn(type, record, union)).toBe(true);
       expect(canDynCheckTo(type, record, union)).toBe(true);
       expect(isJsonSafeType(type, record, union)).toBe(false);
-      expect(isIslandCallbackParamType(type, record, union)).toBe(false);
     }
     expect(canConvertToDyn(arrayOf(stream), record, union)).toBe(false);
     expect(canDynCheckTo(arrayOf(stream), record, union)).toBe(false);
@@ -274,7 +268,7 @@ describe("checked conversion graph traversal", () => {
           id: "parent",
           fields: [
             { name: "child", type: { kind: "record", shapeId: "child" } },
-            { name: "unsupported", type: { kind: "jsval" } },
+            { name: "unsupported", type: { kind: "caught" } },
           ],
         },
       ],

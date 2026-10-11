@@ -2,7 +2,7 @@ import { everyModuleNode, everyStmtList, transformStmtList } from "../ir/travers
 import type { LlvmUnsupportedError } from "./llvm/emitter.js";
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import { type IrModule, type SrcLoc } from "../ir/ir.js";
-import { moduleUsesFetch, moduleEmbedsBuiltin } from "../ir/runtime-features.js";
+import { moduleUsesFetch } from "../ir/runtime-features.js";
 
 /** Reflection tables expose methods that the program never calls. On WASI,
  * keep their host-only implementations as explicit runtime refusals. Typed
@@ -121,11 +121,6 @@ export function targetRefusalDiag(target: string, surface: string, loc: SrcLoc):
   };
 }
 
-/** APIs that require host capabilities absent from portable WASI Preview 1.
- * These are target diagnostics, not backend-tier gaps: the same language IR
- * (including async, generators, and the dynamic island) is otherwise valid.
- * Keep the fine-grained walk first so diagnostics point at the API use; the
- * embedded-module checks are the entry-anchored safety net for island code. */
 export function moduleWasiUnavailableSurface(
   mod: IrModule,
 ): { surface: string; loc: SrcLoc } | null {
@@ -203,11 +198,6 @@ export function moduleWasiUnavailableSurface(
 
   if (moduleUsesFetch(mod)) {
     return { surface: "network-backed fetch (WASI Preview 1 has no socket API)", loc: entryLoc };
-  }
-  for (const builtin of ["node:http", "node:https", "node:net", "node:tls"]) {
-    if (moduleEmbedsBuiltin(mod, builtin)) {
-      return { surface: `${builtin} networking (WASI Preview 1 has no socket API)`, loc: entryLoc };
-    }
   }
   return null;
 }

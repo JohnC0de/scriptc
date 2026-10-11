@@ -44,20 +44,9 @@ export interface CcOptions {
   systemLibraries?: readonly string[];
   /** Darwin framework names, emitted as distinct driver arguments. */
   frameworks?: readonly string[];
-  /** Embed the dynamic-island engine (--dynamic): compiles scr_island.c,
-   * defines SCR_DYNAMIC, and links the cached libqjs.a. Off retains the
-   * static runtime selection; executable section GC may still remove
-   * unreachable static-runtime code. */
-  dynamic?: boolean;
   /** Isolated native Worker contexts; every runtime object must use TLS. */
   workers?: boolean;
-  /** The program contains a regex construct (index.ts detects it on the
-   * IR): compiles scr_regex.c and links the vendored libregexp — as cached
-   * standalone objects in static builds, from the engine archive under
-   * --dynamic (one libregexp per binary; its host hooks want the island's
-   * JSContext there). Off = regex-free: the command line is exactly the
-   * historical runtime selection; executable section GC may remove unrelated
-   * unreachable code. */
+
   regex?: boolean;
   /** The program uses one of the copying/typed-array bridge intrinsics
    * implemented in scr_copying.c (index.ts detects them on the IR).
@@ -77,23 +66,10 @@ export interface CcOptions {
    * scr_tls + scr_http's client parser + zlib — the socket units join
    * the link implicitly, no libcurl anywhere), which builds for every
    * target the socket units reach: hosts, linux cross, win32 cross.
-   * Static user-code fetch compiles the same TU without the engine; the
-   * broader web surface still uses its dynamic half. Fetch-free builds
-   * keep their exact link line. SCRIPTC_FETCH_CURL=1 selects the retired
-   * curl reference instead
-   * (scr_fetch_curl.c + system libcurl on hosts / the generated soname
-   * stub on linux cross targets — ensureCurlStub), kept compilable for
-   * one release as the flip's reference. */
+   * Fetch-free builds keep their exact link line. */
   fetch?: boolean;
-  /** The embedded npm graph imports node:http or node:https (index.ts
-   * detects it on the IR): compiles the island's http/https client
-   * bridge (scr_net_island.c) and implies the socket units into the
-   * link, exactly like fetch. The emitted main calls
-   * scr_net_island_install on the same predicate (native-fetch builds
-   * also register it from scr_fetch_install). */
-  netIsland?: boolean;
   /** The program uses zlib (index.ts detects zlib.* libCalls on the IR):
-   * compiles scr_zlib.c — the regex/curl gating precedent, so zlib-free
+   * compiles scr_zlib.c — the regex gating precedent, so zlib-free
    * binaries keep their exact link line. The default host-clang build links
    * the SYSTEM libz (macOS ships it), byte-identical to the historical line;
    * every Zig build compiles the vendored zlib with the selected driver instead
@@ -199,7 +175,7 @@ export interface CcOptions {
   nodeTest?: boolean;
   /** The program uses the node:tls or node:https surface (moduleUsesTls on
    * the IR): compiles scr_tls.c and links the vendored mbedTLS archive
-   * (built lazily like the engine archive, cached per flavor). Always
+   * (built lazily and cached per flavor). Always
    * alongside scr_net.c and scr_http.c, which moduleUsesNet /
    * moduleUsesHttpServer answer true for whenever this does. TLS-free
    * binaries keep their exact link line and never compile mbedTLS. */

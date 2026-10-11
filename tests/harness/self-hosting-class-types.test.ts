@@ -16,7 +16,6 @@ test("native class type cleanup updates shared IR without dynamic snapshots", as
       outDir: directory,
       outPath: join(directory, "class-types" + (process.platform === "win32" ? ".exe" : "")),
       optimization: "dev",
-      dynamic: false,
       sanitize: process.env["SCRIPTC_SAN"] === "1",
     });
     if (!built.ok) throw new Error(JSON.stringify(built.diagnostics));

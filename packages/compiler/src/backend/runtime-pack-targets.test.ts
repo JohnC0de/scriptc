@@ -52,7 +52,7 @@ async function fixture(target: NativeTargetSpec, workers = false) {
       object_format: target.objectFormat,
       minimum_os: target.minimumOs,
     },
-    runtime_abi: { version: 8, marker: "scr_runtime_abi_v8" },
+    runtime_abi: { version: 9, marker: "scr_runtime_abi_v9" },
     compiler: { command: "fixture", identity: "fixture", target: target.llvmTriple },
     macros: { executable: [], excluded: ["SCR_LIB"], sanitizer: "external-toolchain-required" },
     flavors: {
@@ -90,13 +90,11 @@ async function fixture(target: NativeTargetSpec, workers = false) {
 }
 
 const features = {
-  dynamic: false,
   regex: false,
   copying: false,
   textDecoderLegacy: false,
   fileHandle: false,
   fetch: false,
-  netIsland: false,
   zlib: false,
   assert: false,
   inspect: false,
@@ -173,15 +171,12 @@ test.each([
 });
 
 test("worker runtime packs refuse dynamic and WASI execution", async () => {
-  for (const [target, dynamic] of [
-    [LINUX_X64_GNU_TARGET, true],
-    [WASM32_WASI_TARGET, false],
-  ] as const) {
+  for (const target of [WASM32_WASI_TARGET]) {
     const pack = await fixture(target, true);
     await expect(
       loadRuntimePack({
         target,
-        features: { ...features, workers: true, dynamic },
+        features: { ...features, workers: true },
         optimization: "release",
         resolver: () => pack.packagePath,
       }),

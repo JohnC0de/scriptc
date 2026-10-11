@@ -20,7 +20,7 @@ async function fixture(source: string) {
 const worker =
   'import { Worker } from "node:worker_threads"; new Worker(new URL(import.meta.url));';
 
-test.each(["dynamic", "wasi"])(
+test.each(["wasi"])(
   "worker constructors refuse %s execution before code generation",
   async (mode) => {
     const request = await fixture(worker);
@@ -28,7 +28,7 @@ test.each(["dynamic", "wasi"])(
       vi.stubEnv("SCRIPTC_CC", "zigcc");
       vi.stubEnv("SCRIPTC_TARGET", "wasm32-wasi");
     }
-    const result = await compile(request.entry, { ...request, dynamic: mode === "dynamic" });
+    const result = await compile(request.entry, { ...request });
     expect(result.ok).toBe(false);
     if (!result.ok)
       expect(result.diagnostics).toEqual(

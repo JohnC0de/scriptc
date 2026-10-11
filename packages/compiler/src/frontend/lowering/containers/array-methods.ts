@@ -12,7 +12,6 @@ import {
   type IrExpr,
   type IrStmt,
   type IrType,
-  JSVAL,
   STRING,
   type SrcLoc,
   UNDEFINED_T,
@@ -24,7 +23,7 @@ import {
 import { ARRAY_METHODS } from "../surfaces.js";
 import { tryLowerExpression } from "../expressions/try-lower-expression.js";
 import { isJsSourceFile, locOf } from "../../program.js";
-import { islandPrimitiveExit, lowerDynDispatchMethodCall } from "../lower-calls.js";
+import { lowerDynDispatchMethodCall } from "../lower-calls.js";
 import {
   arrayIndexPresent,
   arrayValueRead,
@@ -139,7 +138,7 @@ function lowerArrayJoinSeparator(
       };
     }
   }
-  if (value.type.kind === "dyn" || value.type.kind === "jsval") {
+  if (value.type.kind === "dyn") {
     lowerer.noLowering(".join separator with a runtime-dependent undefined value", node);
   }
   return lowerer.ensureString(value, node);
@@ -214,21 +213,14 @@ export function lowerArrayMethodCall(
     const type = lowerer.mapTypeOf(lowerer.typeOf(call));
     const receiver = lowerer.lowerExpr(access.expression);
     // Only a static array resolves to a generator here; other lowered
-    // receivers (island arrays, narrowed unions, checked dynamic values)
-    // continue to their dedicated handling below.
+    // values continue to their dedicated handling below.
     if (receiver.type.kind === "array") {
       const value = type ? lowerArrayIteratorValue(lowerer, receiver, name, type, loc) : null;
       if (value) return value;
       lowerer.unsupported("SC1090", call, `'${name}()' iterators over this array element type`);
     }
   }
-  // An island handle behind an array-typed .d.ts surface
-  // (`parts().join("-")` — arrays never exit eagerly, so the value
-  // stays jsval): the ENGINE's own Array.prototype method runs on the
-  // engine array — every declared call form (fromIndex, comparators
-  // and HOF callbacks as marshaled host functions), Node-exact by
-  // construction, with the declared-primitive result exit. Never a
-  // static arrIntrinsic over a jsval (the validator ICE).
+
   {
     const receiver = lowerer.lowerExpr(access.expression);
     if (receiver.type.kind === "union") {
@@ -252,30 +244,7 @@ export function lowerArrayMethodCall(
     if (receiver.type.kind === "record" && lowerer.shapes.get(receiver.type.shapeId)?.tuple) {
       return lowerTupleReadMethodCall(lowerer, call, access, receiver);
     }
-    if (receiver.type.kind === "jsval") {
-      const loweredArgs = call.arguments.map((a) => lowerer.lowerExpr(a));
-      if (
-        name === "filter" &&
-        loweredArgs[0]?.type.kind === "func" &&
-        loweredArgs[0].type.ret.kind === "void"
-      ) {
-        lowerer.unsupported(
-          "SC1090",
-          call.arguments[0]!,
-          "'.filter()' with a void-returning predicate (the callback return value is erased before its truthiness can be tested)",
-        );
-      }
-      const args = loweredArgs.map((arg, i) => lowerer.jsvalIn(arg, call.arguments[i]!));
-      const result: IrExpr = {
-        kind: "jsOp",
-        op: "callMethod",
-        name,
-        args: [receiver, ...args],
-        type: JSVAL,
-        loc,
-      };
-      return islandPrimitiveExit(lowerer, call, result);
-    }
+
     // An array-mapped CHECKER type whose VALUE lives in the checked-dynamic tree
     // (`Object.keys(dynObj).sort()` — the key-walk answers a dyn array):
     // the record family's array sibling. Methods with a runtime
@@ -338,7 +307,7 @@ export function lowerArrayMethodCall(
     const value = call.arguments[0] ? lowerer.lowerExpr(call.arguments[0]) : null;
     if (
       value &&
-      (value.type.kind === "dyn" || value.type.kind === "jsval") &&
+      value.type.kind === "dyn" &&
       isRefCounted(elem) &&
       elem.kind !== "string" &&
       !typeEquals(value.type, elem)
@@ -767,20 +736,6 @@ export function lowerArrayMethodCall(
         args.push(arg);
         continue;
       }
-      // A handle-element receiver given an argument whose CHECKER type
-      // spells evolved elements while its VALUE is a jsval-element
-      // array (`fns.concat(tail)` — both sides of the evolving-`any`
-      // adoption): the value's array-ness decides, exactly JS's
-      // IsArray — spread it. Non-array values fall through to the
-      // element push (the jsvalIn coercion).
-      if (elem.kind === "jsval") {
-        const arg = lowerer.lowerExpr(argNode);
-        if (arg.type.kind === "array" && arg.type.elem.kind === "jsval") {
-          shape.push(arg.type.elem);
-          args.push(arg);
-          continue;
-        }
-      }
       // An element value — union elements wrap exactly like a push.
       shape.push(null);
       args.push(lowerer.lowerExprExpecting(argNode, elem));
@@ -1008,12 +963,11 @@ function lowerArrayFlatCall(
   }
   const elemCouldNest = (elem: IrType): boolean =>
     elem.kind === "array" ||
-    elem.kind === "jsval" ||
     elem.kind === "dyn" ||
     (elem.kind === "union" &&
       (lowerer.unions
         .get(elem.unionId)
-        ?.arms.some((arm) => arm.kind === "array" || arm.kind === "jsval" || arm.kind === "dyn") ??
+        ?.arms.some((arm) => arm.kind === "array" || arm.kind === "dyn") ??
         true));
   if (!elemCouldNest(receiverType.elem) && call.arguments[0]) {
     const receiver = lowerer.lowerExpr(access.expression);
@@ -1149,12 +1103,12 @@ function lowerArraySearchValues(
   }
 
   let valueT = arrayValueType(lowerer, elem);
-  // jsval/dyn arrays have a single engine value representation rather than a
-  // static undefined arm. Keep their existing runtime path and its explicit
-  // type fence; typed static arrays take the state-aware helper below.
+
+  // Checked-value elements have no separate undefined union arm. Keep
+  // their runtime path; typed arrays take the state-aware helper below.
   if (valueT.kind !== "union") {
     if (method === "lastIndexOf")
-      lowerer.noLowering(".lastIndexOf on an array of engine values", call);
+      lowerer.noLowering(".lastIndexOf on an array of checked values", call);
     if (call.arguments.length > 1)
       lowerer.noLowering(`.${method} with fromIndex on '${lowerer.fmt(elem)}' elements`, call);
     if (!typeEquals(needle.type, elem)) lowerer.badType(argNode, lowerer.typeOf(argNode));
@@ -1811,9 +1765,7 @@ export function lowerTupleReadMethodCall(
   if (ret.kind === "void" || ret.kind === "func") lowerer.badType(call, lowerer.typeOf(call));
   if (
     method === "flatMap" &&
-    (ret.kind === "dyn" ||
-      ret.kind === "jsval" ||
-      (ret.kind === "record" && lowerer.shapes.get(ret.shapeId)?.tuple))
+    (ret.kind === "dyn" || (ret.kind === "record" && lowerer.shapes.get(ret.shapeId)?.tuple))
   ) {
     return {
       kind: "dynInvoke",

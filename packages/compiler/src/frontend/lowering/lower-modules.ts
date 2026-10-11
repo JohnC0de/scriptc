@@ -8,13 +8,8 @@ import { InternalCompilerError } from "../../errors.js";
 import * as ts from "../ts7/adapter.js";
 import { bindingSource } from "../binding-source.js";
 import type { Lowerer } from "./lowerer.js";
-import { dirname as dirnamePath, isAbsolute, resolve as resolvePath } from "node:path";
-import {
-  NpmGraphBuilder,
-  packageNameOfPath,
-  probeNodeImportRefusal,
-  probeNodeRequireRefusal,
-} from "../npm.js";
+import { dirname as dirnamePath, resolve as resolvePath } from "node:path";
+import { packageNameOfPath, probeNodeImportRefusal } from "../npm.js";
 import { isNpmStaticPackage } from "../npm-static.js";
 import { isJsSourceFileName } from "../tsc-codes.js";
 import { isRelativeSpecifier } from "../workspace-registry.js";
@@ -36,8 +31,7 @@ import type { CycleEdge } from "../program.js";
 import { markCycleEarlyBindings, withCycleInitFlags } from "./cycle-initialization.js";
 import {
   invalidJsonModuleDiag,
-  npmEmbedFailedDiag,
-  requiresDynamicImportDiag,
+  unsupportedPackageImportDiag,
 } from "../../diagnostics/diagnostic.js";
 import {
   BOOL,
@@ -51,7 +45,6 @@ import {
   type IrStmt,
   type IrType,
   type IrUnionDef,
-  JSVAL,
   RUNTIME_ERROR_CLASSES,
   STRING,
   type SrcLoc,
@@ -66,10 +59,8 @@ import {
   PoisonError,
   boundIdentifiersOf,
   dynFallbackType,
-  importCallHandleType,
   newFnCtx,
   staticImportNamespaceType,
-  uncheckedOverloadHandleCall,
 } from "./lowerer.js";
 import {
   isNativeFfiRequire,
@@ -78,7 +69,6 @@ import {
   createRequireBindingDecl,
   createRequireNamespaceDecl,
   createRequireProgramModuleDecl,
-  createRequireSpecOf,
 } from "./builtins/module-bindings.js";
 import { isPromisifyCall, registerBuiltinCallableAlias } from "./builtins/callable-aliases.js";
 import { stripTypeCasts } from "./builtins/arguments.js";
@@ -292,22 +282,6 @@ function dynamicProgramImportsOf(program: ts.Program, sf: ts.SourceFile): ts.Sou
   return out;
 }
 
-/** --dynamic builds: program modules reachable ONLY through dynamic
- * `import()` join the compiled module graph — appended to `order` (before
- * the entry, which stays last) in depth-first postorder over their own
- * static import edges, exactly like preflight ordered the static graph.
- * NOTHING calls their %init at startup (%main runs only the entry's init,
- * and no static import header names these), so a dynamic-only module
- * still evaluates exactly when Node evaluates it: the import() site's
- * namespace builder calls the guarded init on the engine microtask.
- * Fixpoint: an added module's own import() sites are scanned too. Static
- * cycles inside the added subgraph ride preflight's own admission engine
- * (makeCycleAdmission — preflight only walked the entry's static graph,
- * so it never judged these): benign back edges are Node cache hits the
- * run-once init guards reproduce, and inadmissible ones get preflight's
- * SC1016 with the same narrowed reason via `onCycle`. Idempotent —
- * re-running on an already-extended order adds nothing (both lowering
- * passes share one array). */
 export function appendDynamicImportModules(
   program: ts.Program,
   order: ts.SourceFile[],
@@ -511,33 +485,12 @@ export function collectProgram(lowerer: Lowerer, parts: FileParts[]): void {
   markCycleEarlyBindings(lowerer);
 }
 
-/** The npm-import chokepoint, run once per pass during collection (so
- * bodies lowered in ANY pass resolve the bindings). In a static build
- * every value-importing npm import reports the requires-dynamic
- * diagnostic naming the package — the package's shipped JS has exactly
- * one execution home, the embedded engine. Under --dynamic each value
- * binding becomes a jsval GLOBAL, registered by ALIASED symbol (modules
- * importing the same export share one global) and initialized at the
- * top of the importing module's %init by island.import — the engine's
- * module registry caches, so re-imports are lookups, not re-evaluations.
- * The runtime graph (the package entry plus everything it reaches)
- * builds here too; its failures are ordinary diagnostics at the import
- * site. Type-only imports are free either way: the .d.ts is a type
- * surface, not code. */
 export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
-  const services = lowerer.frontendServices;
-  if (lowerer.dynamic && services === undefined)
-    throw new Error("dynamic lowering requires frontend services");
-  const builder = lowerer.dynamic && services !== undefined ? new NpmGraphBuilder(services) : null;
   const entryPackageFile = entryPackageFilePredicate(lowerer.entry.fileName);
   for (const fp of parts) {
     for (const stmt of fp.sf.statements) {
       // NAMED re-exports from npm packages (`export { isUrl } from
-      // "url-or-path"` — preflight admitted them): import-plus-export
-      // plumbing — the island load registers at this statement's
-      // position, and each binding keys the same aliased symbol a
-      // direct import would, so consumers' alias chains land on the
-      // same storage.
+      // "url-or-path"`): use the same package bindings as direct imports.
       const reexport =
         ts.isExportDeclaration(stmt) &&
         !stmt.isTypeOnly &&
@@ -573,15 +526,12 @@ export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
       const spec = specNode.text;
       // --external-types owns this exact module interpretation. Even when
       // an install happens to resolve the same name (or --npm-static auto
-      // selects its package), the declaration mapping promises no npm or
-      // island runtime implementation; the preflight/import-use SC1010
-      // fences are the whole story.
+      // selects its package), the declaration mapping owns this boundary.
       if (lowerer.externalTypes.has(spec)) continue;
       // A source-only workspace package is part of the program module
       // graph: resolveImport follows its node_modules link to the loaded
       // TypeScript entry. Its internal `.js` spellings have already been
-      // resolved to `.ts` by that graph, and no source may be handed to
-      // the JavaScript island.
+      // resolved to `.ts` by that graph.
       if (!isRelativeSpecifier(spec) && resolveImport(lowerer.program, fp.sf, spec) !== null) {
         continue;
       }
@@ -590,7 +540,7 @@ export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
       // is a PROGRAM-MODULE dependency — its entry sits in the module
       // order, orderedImportsOf answers it for the %init header, and the
       // checker's alias chains bind the imports to its own exports. The
-      // island owns nothing here, in static and --dynamic builds alike.
+
       if (
         npm !== null &&
         isNpmStaticPackage(npm.packageName) &&
@@ -601,12 +551,8 @@ export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
       }
       // A RELATIVE specifier resolving INTO node_modules (the e2e driver
       // shape: `import "../node_modules/vercel/dist/index.js"`) is
-      // package code too — tsc pulls the FILE into the program under
-      // allowJs, but shipped JS has exactly one execution home, the
-      // embedded engine, so it takes the same island path as a bare
-      // specifier (previously it lowered to NOTHING: not an npm import,
-      // and node_modules files never lower as program modules — the
-      // import silently dropped).
+      // package code too. Attribute it to the package so unselected source
+      // receives a diagnostic instead of silently dropping the import.
       const relPkg =
         npm === null && isRelativeSpecifier(spec)
           ? packageNameOfPath(resolvePath(dirnamePath(fp.sf.fileName), spec))
@@ -618,7 +564,7 @@ export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
       if (relIsJs) {
         // An explicitly selected installed entry owns its package's
         // source graph. Preflight included these modules for native
-        // initialization; do not also embed them in the island.
+
         const dep = resolveImport(lowerer.program, fp.sf, spec);
         if (dep !== null && entryPackageFile(dep.fileName) && lowerer.fileTag.has(dep)) continue;
       }
@@ -627,94 +573,15 @@ export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
       // resolved, but the exports target ships no JS — the types-only
       // package shape): preflight registered Node's startup crash for
       // it, %main throws before any init runs, and the bindings never
-      // link — nothing to embed, no island requirement, in EITHER mode.
+
       if (npm !== null && probeNodeImportRefusal(fp.sf.fileName, spec) !== null) continue;
-      if (!builder) {
-        lowerer.pushDiag(requiresDynamicImportDiag(npm?.packageName ?? relPkg!, locOf(stmt)));
+      {
+        lowerer.pushDiag(unsupportedPackageImportDiag(npm?.packageName ?? relPkg!, locOf(stmt)));
         continue;
-      }
-      const before = builder.errors.length;
-      const entryKey = npm
-        ? (builder.addImport(fp.sf.fileName, spec), builder.entryOf(fp.sf.fileName, spec))
-        : builder.addFileImport(fp.sf.fileName, spec);
-      for (const err of builder.errors.slice(before)) {
-        lowerer.pushDiag(npmEmbedFailedDiag(err.message, locOf(stmt)));
-      }
-      if (entryKey === null) continue; // resolution failed — reported above
-      const loc = locOf(stmt);
-      const byStmt = lowerer.npmInitActions.get(fp.sf) ?? new Map<ts.Statement, IrStmt[]>();
-      lowerer.npmInitActions.set(fp.sf, byStmt);
-      const actions = byStmt.get(stmt) ?? [];
-      byStmt.set(stmt, actions);
-      const importExpr = (exportName: string): IrExpr => ({
-        kind: "libCall",
-        fn: "island.import",
-        args: [
-          { kind: "strLit", value: entryKey, type: STRING, loc },
-          { kind: "strLit", value: exportName, type: STRING, loc },
-          // The specifier as WRITTEN — Node's missing-export SyntaxError
-          // names it ("The requested module 'x' does not provide an
-          // export named 'y'"), and the runtime check reproduces that
-          // message exactly (scr_jsval_import).
-          { kind: "strLit", value: spec, type: STRING, loc },
-        ],
-        type: JSVAL,
-        loc,
-      });
-      const bind = (nameNode: ts.Identifier | ts.StringLiteral, exportName: string): void => {
-        let symbol = lowerer.checker.getSymbolAtLocation(nameNode);
-        if (symbol && symbol.flags & ts.SymbolFlags.Alias) {
-          symbol = lowerer.checker.getAliasedSymbol(symbol);
-        }
-        if (!symbol) return;
-        let g = lowerer.globalsBySymbol.get(symbol);
-        if (!g) {
-          g = {
-            id: `%g.npm.${lowerer.globalsList.length}`,
-            name: nameNode.text,
-            type: JSVAL,
-            mutable: false,
-          };
-          lowerer.globalsBySymbol.set(symbol, g);
-          lowerer.globalsList.push(g);
-        }
-        actions.push({ kind: "assign", localId: g.id, value: importExpr(exportName), loc });
-      };
-      if (reexport !== null) {
-        for (const el of reexport.elements) {
-          if (el.isTypeOnly) continue;
-          bind(el.name, el.propertyName?.text ?? el.name.text);
-        }
-        continue;
-      }
-      if (!clause) {
-        // Side-effect import: load for its top-level effects, keep nothing.
-        actions.push({ kind: "exprStmt", expr: importExpr("*"), loc });
-        continue;
-      }
-      if (clause.name) bind(clause.name, "default");
-      if (clause.namedBindings) {
-        if (ts.isNamespaceImport(clause.namedBindings)) {
-          bind(clause.namedBindings.name, "*");
-        } else {
-          for (const el of clause.namedBindings.elements) {
-            if (el.isTypeOnly) continue;
-            bind(el.name, el.propertyName?.text ?? el.name.text);
-          }
-        }
       }
     }
   }
-  for (const fp of parts) collectDynamicImports(lowerer, builder, fp.sf);
-  if (builder) {
-    for (const fp of parts) collectCreateRequires(lowerer, builder, fp.sf);
-    const graph = builder.finish();
-    if (graph.modules.length > 0) {
-      lowerer.npmEmbedded = { modules: graph.modules, edges: graph.edges };
-    }
-    if (graph.builtins.length > 0) lowerer.npmBuiltins = graph.builtins;
-    if (graph.lazyTraps.length > 0) lowerer.npmLazyTraps = graph.lazyTraps;
-  }
+  for (const fp of parts) collectDynamicImports(lowerer, fp.sf);
 }
 
 /** Literal dynamic-import collection: every
@@ -730,11 +597,7 @@ export function collectNpmImports(lowerer: Lowerer, parts: FileParts[]): void {
  * specifiers are skipped — the lowering owns that fence (the module
  * graph is a build-time artifact; there is nothing to embed for a
  * runtime-computed name). */
-function collectDynamicImports(
-  lowerer: Lowerer,
-  builder: NpmGraphBuilder | null,
-  sf: ts.SourceFile,
-): void {
+function collectDynamicImports(lowerer: Lowerer, sf: ts.SourceFile): void {
   ts.walkPreorder(sf, (node) => {
     if (
       ts.isCallExpression(node) &&
@@ -763,78 +626,17 @@ function collectDynamicImports(
         const builtin = canonicalBuiltinModule(spec);
         const res = ownModule
           ? ({ kind: "program-module" } as const)
-          : !lowerer.dynamic && builtin !== null
+          : builtin !== null
             ? ({ kind: "static-builtin", module: builtin } as const)
-            : builder?.addDynamicImport(sf.fileName, spec);
+            : undefined;
         if (res === undefined) {
           return undefined;
         }
         lowerer.dynImports.set(mapKey, res);
-        if (res.kind === "unsupported-builtin") {
-          lowerer.pushDiag(
-            npmEmbedFailedDiag(
-              `'${spec}' is a Node builtin the island does not provide a shim for`,
-              locOf(node),
-            ),
-          );
-        } else if (res.kind === "unresolved") {
-          lowerer.pushDiag(npmEmbedFailedDiag(res.message, locOf(node)));
-        }
       }
     }
     return undefined;
   });
-}
-
-/** The createRequire half of the npm chokepoint (--dynamic only): every
- * `require("bare-literal")` through a createRequire binding — whatever
- * body it sits in — resolves under Node's "require" condition and
- * embeds AT COLLECTION time, so the per-site lowering later just looks
- * its entry up (lowerCreateRequireCall). Builtins, relative documents,
- * "#" specifiers, --npm-static opt-ins, and Node-refused bare names
- * are the lowering's own arms — only resolvable installed packages
- * register here; resolution failures are diagnostics at the call
- * expression, exactly like static npm imports at their statements. */
-function collectCreateRequires(
-  lowerer: Lowerer,
-  builder: NpmGraphBuilder,
-  sf: ts.SourceFile,
-): void {
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node)) {
-      const cr = createRequireSpecOf(lowerer, node);
-      const spec = cr?.spec ?? null;
-      if (
-        cr !== null &&
-        spec !== null &&
-        canonicalBuiltinModule(spec) === null &&
-        !isRelativeSpecifier(spec) &&
-        !isAbsolute(spec) &&
-        !spec.startsWith("#") &&
-        probeNodeRequireRefusal(cr.baseFile.fileName, spec) === null
-      ) {
-        const pkgName = spec.startsWith("@")
-          ? spec.split("/").slice(0, 2).join("/")
-          : spec.split("/")[0]!;
-        const mapKey = `${cr.baseFile.fileName}\u0000${spec}`;
-        if (!lowerer.createRequireImports.has(mapKey) && !isNpmStaticPackage(pkgName)) {
-          const before = builder.errors.length;
-          const entryKey = builder.addRequire(cr.baseFile.fileName, spec);
-          for (const err of builder.errors.slice(before)) {
-            lowerer.pushDiag(npmEmbedFailedDiag(err.message, locOf(node)));
-          }
-          lowerer.createRequireImports.set(
-            mapKey,
-            entryKey === null
-              ? ""
-              : { entryKey, format: builder.moduleFormatOf(entryKey) ?? "cjs" },
-          );
-        }
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sf);
 }
 
 /** JSON module default imports (`import pkg from "../package.json"`):
@@ -2025,7 +1827,7 @@ export function collectGlobals(
               (!decl.type &&
                 !hasJsTypeAnnotation(decl) &&
                 checkedGlobalReference(lowerer, initializer)) ||
-              (!lowerer.dynamic && stdlibGlobalNameOf(lowerer, initializer) === "globalThis"))
+              stdlibGlobalNameOf(lowerer, initializer) === "globalThis")
           ) {
             const symbol = lowerer.checker.getSymbolAtLocation(nameNode);
             if (symbol && !lowerer.globalsBySymbol.has(symbol)) {
@@ -2205,37 +2007,6 @@ export function collectGlobals(
             }
             continue;
           }
-          // A JS file-scope object literal carrying GET accessors whose
-          // strict type has no mapping (the doc-printer root-indent
-          // shape — a self-referential getter): the literal builds
-          // ISLAND-NATIVE (the getter defines through the engine), so
-          // the binding holds the HANDLE — a jsval global, so exports
-          // and separately-declared functions reach the same engine
-          // object.
-          if (
-            lowerer.dynamic &&
-            isJsSourceFile(sf) &&
-            !lowerer.mapTypeOf(lowerer.typeOf(nameNode)) &&
-            ts.isIdentifier(decl.name) &&
-            nameNode === decl.name &&
-            decl.initializer !== undefined &&
-            ts.isObjectLiteralExpression(decl.initializer) &&
-            decl.initializer.properties.some((p) => ts.isGetAccessorDeclaration(p))
-          ) {
-            const symbol = lowerer.checker.getSymbolAtLocation(nameNode);
-            if (symbol && !lowerer.globalsBySymbol.has(symbol)) {
-              const g: IrGlobal = {
-                id: `%g.${tag}${nsPrefix}${nameNode.text}`,
-                name: nameNode.text,
-                type: JSVAL,
-                mutable: isLet,
-                source: bindingSource(nameNode),
-              };
-              lowerer.globalsBySymbol.set(symbol, g);
-              lowerer.globalsList.push(g);
-            }
-            continue;
-          }
           // A function initializer can have a native calling convention
           // even when its inferred return/parameter pieces need DYN. Keep
           // that closure in a checked-value global so class methods and
@@ -2304,24 +2075,13 @@ export function collectGlobals(
             ts.isNewExpression(decl.initializer)
               ? (objectFactoryGlobalType(lowerer, decl.initializer) ?? undefined)
               : undefined;
-          // `var p1 = import("./m")` at file scope: the global holds the
-          // island promise/handle — the import expression's only
-          // production — whatever the checker's namespace type mapped to
-          // (lowerVarDecl's rule at module scope; the init body assigns
-          // it).
+          // Prefer the initializer's native namespace or proxy storage
+          // where it is more precise than the declaration's checker type.
           const handleT =
             ts.isIdentifier(decl.name) && nameNode === decl.name
               ? ((isNativeProxyInitializer(lowerer, decl.initializer) ? DYN : null) ??
-                (lowerer.dynamic
-                  ? importCallHandleType(decl.initializer)
-                  : staticImportNamespaceType(lowerer, decl.initializer)) ??
-                (lowerer.dynamic
-                  ? // An unchecked-overload call result stores the handle,
-                    // exactly the local rule (uncheckedOverloadHandleCall).
-                    uncheckedOverloadHandleCall(lowerer, decl.initializer)
-                    ? JSVAL
-                    : null
-                  : null))
+                staticImportNamespaceType(lowerer, decl.initializer) ??
+                null)
               : null;
           // JavaScript factory results with unmappable annotations still
           // need shared storage. Unannotated callable unions also use a
@@ -2471,7 +2231,6 @@ export function collectGlobals(
           )
             type = DYN;
           if (
-            !lowerer.dynamic &&
             isJsSourceFile(sf) &&
             !decl.type &&
             !hasJsTypeAnnotation(decl) &&
@@ -2509,28 +2268,6 @@ export function collectGlobals(
           ) {
             type = DYN;
           }
-          // An evolving-`any` array's DERIVED file-scope binding under
-          // --dynamic (`const kept = fns.filter(...)` where `fns`
-          // registered array<jsval> at its `any[]` declaration): the
-          // receiver-type-preserving methods answer the receiver's
-          // handle-element array, while tsc's evolving-array analysis
-          // spells the pushed element type here — the value's element
-          // type is the truth, so the global slot takes the handle-
-          // element array (lowerVarDecl's adoption, the file-scope
-          // face). Annotated declarations keep the validated-boundary
-          // fence.
-          if (
-            lowerer.dynamic &&
-            ts.isIdentifier(decl.name) &&
-            nameNode === decl.name &&
-            decl.type === undefined &&
-            decl.initializer !== undefined &&
-            type.kind === "array" &&
-            type.elem.kind !== "jsval" &&
-            handleArrayPreservingCall(lowerer, decl.initializer)
-          ) {
-            type = arrayOf(JSVAL);
-          }
           // An exact class behind a generic interface keeps its native
           // representation so generic calls can specialize against its body.
           if (
@@ -2542,26 +2279,7 @@ export function collectGlobals(
             const initT = lowerer.mapTypeOf(lowerer.typeOf(decl.initializer!));
             if (initT?.kind === "object") type = initT;
           }
-          // A file-scope PATTERN over an ISLAND-bound source (`export
-          // let { toString } = 1;` — the engine reads the wrapper's
-          // prototype member): the bound value follows the island
-          // property-read rule, so the global slot must too — declared
-          // primitives exit eagerly to their static type, everything
-          // else stores the HANDLE (a func-typed slot could never take
-          // the engine value the desugar assigns).
-          if (lowerer.dynamic && !ts.isIdentifier(decl.name) && decl.initializer !== undefined) {
-            const srcT = lowerer.mapTypeOf(lowerer.typeOf(decl.initializer));
-            const island =
-              srcT !== null &&
-              (srcT.kind === "jsval" ||
-                srcT.kind === "f64" ||
-                srcT.kind === "bool" ||
-                srcT.kind === "string" ||
-                isUnitType(srcT));
-            if (island && type.kind !== "f64" && type.kind !== "bool" && type.kind !== "string") {
-              type = JSVAL;
-            }
-          }
+
           // File-scope unit-only bindings (`var x: undefined`, `const
           // y: void = undefined`) ride the unit-only union, exactly
           // like function-scope locals (lowerVarDecl's rule).
@@ -2663,34 +2381,6 @@ export function collectGlobals(
   }
 }
 
-/** True iff this initializer's VALUE is a jsval-element array from a
- * module global already registered as one (the evolving-`any` binding
- * under --dynamic): the global itself, or a receiver-TYPE-PRESERVING
- * array-method call chain over it (filter/slice/splice/concat — each
- * answers the receiver's own array type). Registration runs in source
- * order, so the root's global — declared above, TDZ-guaranteed — is
- * already in the table. */
-function handleArrayPreservingCall(lowerer: Lowerer, e: ts.Expression): boolean {
-  const PRESERVING = new Set(["filter", "slice", "splice", "concat"]);
-  let cur = e;
-  for (;;) {
-    while (ts.isParenthesizedExpression(cur)) cur = cur.expression;
-    if (
-      ts.isCallExpression(cur) &&
-      ts.isPropertyAccessExpression(cur.expression) &&
-      PRESERVING.has(cur.expression.name.text)
-    ) {
-      cur = cur.expression.expression;
-      continue;
-    }
-    break;
-  }
-  if (!ts.isIdentifier(cur)) return false;
-  const sym = lowerer.checker.getSymbolAtLocation(cur);
-  const g = sym ? lowerer.globalsBySymbol.get(sym) : undefined;
-  return g?.type.kind === "array" && g.type.elem.kind === "jsval";
-}
-
 /** Registers the entry-init note for a `var` module global: JS hoists
  * module vars to `undefined` at module entry, so an undefined-armed slot
  * must hold the interned undefined arm BEFORE the body runs (a function
@@ -2703,11 +2393,10 @@ function handleArrayPreservingCall(lowerer: Lowerer, e: ts.Expression): boolean 
 function noteVarGlobalEntryInit(lowerer: Lowerer, sf: ts.SourceFile, g: IrGlobal): void {
   // 'any' globals need the entry init exactly like undefined-armed
   // unions: tsc never guards `any` reads, so `var x: any;` is readable
-  // before any assignment and its slot must hold its world's undefined
-  // — the ENGINE's for jsval (--dynamic), the checked-dynamic tree's for dyn (static) —
+  // before any assignment and its slot must hold native undefined
   // rather than a C-level NULL (an op or validated exit on NULL is
   // memory-unsafe, not a TypeError).
-  if (g.type.kind !== "union" && g.type.kind !== "jsval" && g.type.kind !== "dyn") return;
+  if (g.type.kind !== "union" && g.type.kind !== "dyn") return;
   const inits = lowerer.varGlobalEntryInits.get(sf) ?? [];
   inits.push(g);
   lowerer.varGlobalEntryInits.set(sf, inits);
@@ -2875,20 +2564,6 @@ export function lowerDefaultExport(lowerer: Lowerer, stmt: ts.ExportAssignment):
   return { kind: "assign", localId: g.id, value, loc: locOf(stmt) };
 }
 
-/** One file's top-level statements as its init function — RUN-ONCE like a
- * Node module body: non-entry inits open with a guard flag test (already
- * ran → return) and set the flag before anything else, so every caller —
- * hoisted import headers, inline require statements, diamonds, cache-hit
- * re-requires — gets Node's module-cache semantics from the same call.
- * After the guard comes the file's HOISTED module-edge header: one
- * guarded %init call per imported user module and the island loads for
- * npm imports, in import order (Node evaluates every imported module
- * before the importer's body — depth-first postorder falls out of the
- * nesting). CommonJS requires are NOT in the header: Node runs them at
- * their statements, so the statement lowering emits their %init calls
- * inline in the body. JSON-import bindings (pure data) load next; then
- * the body. Top-level var statements assign the pre-registered globals
- * instead of declaring locals. */
 export function lowerFileInit(
   lowerer: Lowerer,
   sf: ts.SourceFile,

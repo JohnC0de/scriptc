@@ -3717,8 +3717,6 @@ void scr_http_client_add_trailers(ScrHttpClientReq *c, ScrArr *pairs /*borrowed*
   scr_http_trailers_replace(&c->trailers, pairs);
 }
 
-/* req.setTimeout(ms) after construction (the island bridge's late arm —
- * the constructor's timeout_ms is the static lane's route). */
 void scr_http_client_set_timeout(ScrHttpClientReq *c, double ms) {
   if (!scr_http_timeout_valid(ms)) return;
   if (c->sock) scr_net_sock_set_timeout(c->sock, ms);
@@ -4253,17 +4251,6 @@ static ScrHttpClientReq *scr_http_request_impl(ScrStr *host /*borrowed*/, double
   }
   if (cb) scr_net_ls_add(&c->resp_ls, cb, (void *)fn, true);
 
-  /* dial — or take the caller's pre-made socket (createConnection); dial
-   * failures are the async 'error' either way, the net story.
-   *
-   * The hostname resolves HERE, at the client dial, the way the island's
-   * client and the native fetch resolve at theirs: node:net's own connect
-   * surface stays resolver-less on purpose (Node's async lookup semantics
-   * are not this), so a client that dials by name has to ask. Only the
-   * dial takes the address — c->host keeps the ORIGINAL name, which is
-   * what the Host header carries and what the caller built the TLS
-   * client's SNI from. An unresolvable name comes back unchanged and the
-   * dial delivers Node's deferred ENOTFOUND. */
   if (presock != NULL) {
     c->sock = presock;
   } else {

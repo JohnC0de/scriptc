@@ -78,11 +78,10 @@ function numericModule(): IrModule {
 }
 
 test("the production IR serialization and validation pipeline lowers entirely statically", () => {
-  const { coverage } = analyze(entry, { dynamic: false });
+  const { coverage } = analyze(entry, {});
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(3000);
   expect(coverage.stats.statementsFailed).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -99,7 +98,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: executable("serializer"),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize,
       });
@@ -219,7 +217,6 @@ for (const backend of ["llvm"] as const) {
           outDir: dir,
           outPath: path,
           outputKind: "ir",
-          dynamic: false,
         });
         if (!emitted.ok)
           throw new Error(emitted.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

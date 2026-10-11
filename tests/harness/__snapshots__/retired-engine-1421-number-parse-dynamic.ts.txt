@@ -1,0 +1,35 @@
+retired-engine-1421-number-parse-dynamic.ts:3:13 - error SC2012: 'Number.parseFloat' cannot compile statically
+
+  2 | // aliases them) — the same island lowering, byte-compared against Node.
+  3 | console.log(Number.parseFloat("3.14"), Number.parseFloat("2e3"), Number.parseFloat("  -7.5abc"));
+    |             ^~~~~~~~~~~~~~~~~~~~~~~~~
+  4 | console.log(Number.parseFloat("x"), Number.parseFloat("Infinity"));
+
+  hint: use a supported API or rewrite this operation for native compilation
+
+retired-engine-1421-number-parse-dynamic.ts:4:13 - error SC2012: 'Number.parseFloat' cannot compile statically
+
+  3 | console.log(Number.parseFloat("3.14"), Number.parseFloat("2e3"), Number.parseFloat("  -7.5abc"));
+  4 | console.log(Number.parseFloat("x"), Number.parseFloat("Infinity"));
+    |             ^~~~~~~~~~~~~~~~~~~~~~
+  5 | console.log(Number.parseInt("42", 10), Number.parseInt("ff", 16), Number.parseInt("0x1f", 16));
+
+  hint: use a supported API or rewrite this operation for native compilation
+
+retired-engine-1421-number-parse-dynamic.ts:5:13 - error SC2012: 'Number.parseInt' cannot compile statically
+
+  4 | console.log(Number.parseFloat("x"), Number.parseFloat("Infinity"));
+  5 | console.log(Number.parseInt("42", 10), Number.parseInt("ff", 16), Number.parseInt("0x1f", 16));
+    |             ^~~~~~~~~~~~~~~~~~~~~~~~~
+  6 | console.log(Number.parseInt("x", 10), Number.parseInt("-101", 2));
+
+  hint: use a supported API or rewrite this operation for native compilation
+
+retired-engine-1421-number-parse-dynamic.ts:6:13 - error SC2012: 'Number.parseInt' cannot compile statically
+
+  5 | console.log(Number.parseInt("42", 10), Number.parseInt("ff", 16), Number.parseInt("0x1f", 16));
+  6 | console.log(Number.parseInt("x", 10), Number.parseInt("-101", 2));
+    |             ^~~~~~~~~~~~~~~~~~~~~~~~
+  7 | 
+
+  hint: use a supported API or rewrite this operation for native compilation

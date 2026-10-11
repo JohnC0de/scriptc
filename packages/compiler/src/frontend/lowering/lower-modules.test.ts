@@ -19,7 +19,6 @@ test("retains dependencies from function storage, captures, generator channels a
     { getTypeChecker: () => ({}) } as Program,
     { fileName: loc.file } as SourceFile,
     [],
-    false,
   );
   const record = (name: string, type: IrType = F64): IrType & { kind: "record" } => ({
     kind: "record",
@@ -69,7 +68,6 @@ test("retains a constructible grandchild through an unused intermediate class", 
     { getTypeChecker: () => ({}) } as Program,
     { fileName: loc.file } as SourceFile,
     [],
-    false,
   );
   const info = (name: string, base: ClassInfo | null): ClassInfo => {
     const value = {
@@ -109,7 +107,6 @@ test("retains references carried by executable metadata and generator completion
     { getTypeChecker: () => ({}) } as Program,
     { fileName: loc.file } as SourceFile,
     [],
-    false,
   );
   const shapeId = lowerer.shapes.intern([{ name: "payload", type: F64 }]);
   const completedId = lowerer.shapes.intern([{ name: "completed", type: F64 }]);
@@ -153,7 +150,6 @@ test("closes nested structural types and index-signature values", () => {
     { getTypeChecker: () => ({}) } as Program,
     { fileName: loc.file } as SourceFile,
     [],
-    false,
   );
   const record = (name: string): IrType & { kind: "record" } => ({
     kind: "record",
@@ -193,7 +189,6 @@ test("boxed child values retain native stdio classes through recursive storage",
     { getTypeChecker: () => ({}) } as Program,
     { fileName: loc.file } as SourceFile,
     [],
-    false,
   );
   for (const name of ["%Readable", "%Writable"])
     lowerer.classes.set(name, {

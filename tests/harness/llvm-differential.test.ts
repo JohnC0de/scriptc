@@ -60,10 +60,6 @@ function expectedExitCode(file: string): number {
   return 0;
 }
 
-function wantsDynamic(file: string): boolean {
-  return directiveHead(file).some((l) => /^\/\/ @dynamic\s*$/.test(l));
-}
-
 async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
   // Linux fork/exec race (observed on the sandbox lane): a sibling
   // worker's fork can inherit the freshly-linked binary's write fd across
@@ -104,7 +100,6 @@ function comparableStderr(stderr: Buffer): Buffer {
 }
 
 const comptimeShim = pathToFileURL(join(import.meta.dirname, "comptime-shim.mjs")).href;
-const islandShim = pathToFileURL(join(import.meta.dirname, "island-shim.mjs")).href;
 
 /** differential.test.ts's twin: the Node oracle runs with
  * --experimental-transform-types for corpus programs using non-erasable
@@ -158,9 +153,7 @@ function nodeOracleArgs(file: string): string[] {
   const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
   // --import makes Node load even a CJS entry through its ESM loader,
   // changing an entry throw's uncaughtException origin to unhandledRejection.
-  const shims = directiveHead(file).includes("// @no-node-shims")
-    ? []
-    : ["--import", comptimeShim, "--import", islandShim];
+  const shims = directiveHead(file).includes("// @no-node-shims") ? [] : ["--import", comptimeShim];
   return [...transform, ...nodep, ...shims, nodeOracleFile(file)];
 }
 
@@ -178,7 +171,6 @@ async function build(file: string, optimization: "release" | "dev") {
   for (const f of programInputs(file)) hash.update(f).update(readFileSync(f));
   const key = hash
     .update(sanitize ? "san" : "plain")
-    .update(wantsDynamic(file) ? "dyn" : "")
     .update("llvm-" + optimization)
     .digest("hex")
     .slice(0, 16);
@@ -188,7 +180,6 @@ async function build(file: string, optimization: "release" | "dev") {
     outPath: join(outDir, `program-llvm-${optimization}${sanitize ? "-san" : ""}`),
     outDir,
     sanitize,
-    dynamic: wantsDynamic(file),
     optimization,
   });
 }

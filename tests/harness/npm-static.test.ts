@@ -1,20 +1,3 @@
-/* --npm-static: opted-in npm packages' shipped JS compiles STATICALLY as
- * program modules (no island) — the slice-2 pilot. Three tiers pinned
- * here:
- *
- *   1. DRIVEN DIFFERENTIALS (escape-string-regexp, slash, ms, picocolors,
- *      commander):
- *      fully static builds whose stdout, stderr, and exit status byte-match
- *      Node for the exercised programs.
- *   2. COVERAGE FRONTIERS: dormant package paths may retain runtime fences;
- *      coverage floors keep that broader static frontier moving forward.
- *   3. The FALLBACK contract: a package whose preflight refuses (an
- *      unshimmed-builtin require inside its files) drops back to the
- *      island under --dynamic with a coverage note — never a build
- *      failure, and the flag never changes a flagless build.
- *
- * The flag defaults OFF: nothing here touches the production npm/island
- * lanes (npm.test.ts, vercel-e2e.test.ts pin those). */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -74,9 +57,6 @@ function comparableStderr(stderr: Buffer): Buffer {
   return Buffer.from(kept.join("\n"), "utf8");
 }
 
-/** Compile one pilot statically (no --dynamic — the whole point) with the
- * named packages opted in; cache-keyed over the program and the vendored
- * packages. */
 async function buildStatic(entry: string, npmStatic: string[] | "auto"): Promise<string> {
   const hash = createHash("sha256");
   const inputs = [
@@ -170,7 +150,6 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
         writeFileSync(entry, source);
         const result = await compile(entry, {
           backend: "llvm",
-          dynamic: false,
           npmStatic: ["dual"],
           sanitize,
           outDir: join(dir, name + "-out"),
@@ -236,7 +215,6 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
         ).toHaveLength(0);
         const result = await compile(entry, {
           backend,
-          dynamic: false,
           npmStatic: "auto",
           sanitize,
           outDir: join(dir, "out"),
@@ -293,7 +271,6 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
         expect(coverage.runtimeFences ?? [], JSON.stringify(coverage.runtimeFences)).toEqual([]);
         const result = await compile(entry, {
           backend,
-          dynamic: false,
           npmStatic: "auto",
           sanitize,
           outDir: dir,
@@ -325,7 +302,6 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       const outDir = join(cacheDir, "bundled-methods", sanitize ? "san" : "plain", backend);
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         npmStatic: "auto",
         sanitize,
         outDir,
@@ -387,7 +363,6 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       const outDir = join(cacheDir, "virtual-classes", sanitize ? "san" : "plain", backend);
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         npmStatic: "auto",
         sanitize,
         outDir,
@@ -416,7 +391,6 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       const outDir = join(cacheDir, "module-loader", sanitize ? "san" : "plain", backend);
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         npmStatic: "auto",
         sanitize,
         outDir,
@@ -527,7 +501,7 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       cpSync(join(pilotRoot, "module-loader-cli.ts"), join(dir, "main.ts"));
       const { coverage } = analyze(join(dir, "main.ts"), { npmStatic: "auto" });
       expect(coverage.npmStatic).toEqual([
-        { package: "module-loader", status: "fallback", detail: expect.stringContaining(reason!) },
+        { package: "module-loader", status: "refused", detail: expect.stringContaining(reason!) },
       ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -564,7 +538,6 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
       const outDir = join(cacheDir, "bundled-function", sanitize ? "san" : "plain", backend);
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         npmStatic: "auto",
         sanitize,
         outDir,
@@ -769,8 +742,8 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(coverage.npmStatic).toEqual([
       {
         package: "ms",
-        status: "fallback",
-        detail: "auto: it ships no own .d.ts declaration surface",
+        status: "refused",
+        detail: "it ships no own .d.ts declaration surface",
       },
     ]);
   }, 120_000);
@@ -862,19 +835,15 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 180_000);
 
-  // Tier 3: the island fallback — esbundled's chunk requires "net", an
-  // unshimmed-builtin edge preflight refuses for a static package, so the
-  // opt-in DROPS with a note and the --dynamic build keeps the exact
-  // island behavior lazybuiltin.ts pins in npm.test.ts.
-  test("a preflight-refused package falls back to the island with a note", () => {
+  // A package preflight failure stays visible as a package-specific refusal.
+  test("a preflight-refused package reports its native refusal", () => {
     const { coverage } = analyze(join(fixturesRoot, "npm/divergent/lazybuiltin.ts"), {
-      dynamic: true,
       npmStatic: ["esbundled"],
     });
     const statuses = coverage.npmStatic ?? [];
     expect(statuses).toHaveLength(1);
     expect(statuses[0]?.package).toBe("esbundled");
-    expect(statuses[0]?.status).toBe("fallback");
+    expect(statuses[0]?.status).toBe("refused");
     expect(coverage.preflightFailed).toBe(false);
   }, 120_000);
 
@@ -882,8 +851,7 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   // cannot infer. chainy is commander's getter/setter shape in miniature:
   // name()/tag() return strings with no argument and `this` with one. The
   // safe declaration groups project into JSDoc on the matching runtime
-  // class, so the body still compiles from JS while calls keep the authored
-  // surface — no island fallback and no unchecked declaration-only value.
+  // class, so the body compiles from JS while calls keep the authored surface.
   test("auto preserves safe declaration overloads while compiling the JavaScript body", async () => {
     const entry = join(pilotRoot, "chainy-cli.ts");
     const { coverage } = analyze(entry, { npmStatic: "auto" });
@@ -899,28 +867,25 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 180_000);
 
-  // Non-opted UNTYPED node_modules packages keep the checked-dynamic
-  // surface: maxNodeModuleJsDepth (active on every --npm-static load)
-  // would otherwise admit their JS and replace the flagless `any` with an
-  // inferred surface — changing the PROGRAM's own types under a flag that
-  // promised to touch only the opted-in packages (the jaro-winkler
-  // shape). The fs shadow serves those files as the any-surface stub:
-  // typegapped's import types `any` (its use sites meet the ordinary
-  // any fences, never its own checker errors), while
-  // escape-string-regexp compiles statically beside it.
-  test("a non-opted untyped package keeps the checked-dynamic any surface", () => {
+  // Ineligible packages remain declaration-only during analysis and receive
+  // a refusal, while eligible dependencies can still be analyzed natively.
+  test("an ineligible untyped package is refused alongside a compiled dependency", () => {
     const { coverage } = analyze(join(pilotRoot, "typegap-mix.ts"), {
-      dynamic: true,
       npmStatic: ["escape-string-regexp"],
     });
     expect(coverage.preflightFailed).toBe(false);
-    expect(coverage.npmStatic).toEqual([{ package: "escape-string-regexp", status: "static" }]);
-    // typegapped's own checker errors never gate; the one report is the
-    // consumer's any-value fence — the same story a flagless island
-    // import of an untyped package tells.
-    expect(coverage.diagnostics).toHaveLength(1);
-    expect(coverage.diagnostics[0]?.code).toBe("SC1090");
-    expect(coverage.diagnostics[0]?.message).toMatch(/console\.log of 'any'/);
+    expect(coverage.npmStatic).toEqual([
+      {
+        package: "typegapped",
+        status: "refused",
+        detail: "it ships no own .d.ts declaration surface",
+      },
+      { package: "escape-string-regexp", status: "static" },
+    ]);
+    // Report package eligibility rather than errors in unselected source.
+    expect(
+      coverage.diagnostics.some((d) => d.code === "SC2013" && d.message.includes("typegapped")),
+    ).toBe(true);
   }, 120_000);
 
   test("opted-in npm packages retain imports deeper than four JavaScript modules", async () => {
@@ -1108,21 +1073,18 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 120_000);
 
-  // The FLAGLESS classification of the same workspace link: an npm import
-  // like any other — island-capable sites (per-package attribution naming
-  // 'wslinked'), never "nothing installed resolves it".
+  // The workspace link compiles automatically without explicit selection.
   test("a workspace-linked package classifies as an npm import without flags", () => {
     const { coverage } = analyze(join(fixturesRoot, "npm/cases/workspace-linked/main.ts"));
     expect(coverage.preflightFailed).toBe(false);
-    const all = JSON.stringify(coverage.diagnostics);
-    expect(all).toContain("wslinked");
-    expect(all).not.toContain("nothing installed resolves");
+    expect(coverage.diagnostics).toEqual([]);
+    expect(coverage.npmStatic).toContainEqual({ package: "wslinked", status: "static" });
   }, 120_000);
 
   /* ── bundler-emitted CJS: the getter-table export shapes (cases
    * 2465-2469) ─ the canonical-table rewrite types each shape's named
    * exports by their resolved values, the compiled binaries byte-match
-   * Node, and the consumer-anchored offender attribution degrades what
+   * Node, and the consumer-anchored offender attribution refuses what
    * inference cannot carry. */
 
   // 2465: the esbuild __export getter table (renamed local, member-access
@@ -1190,37 +1152,30 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
     expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
   }, 180_000);
 
-  // The interop's require edge is a require like any other: with only
-  // gtwrap opted in, the erased wrapper's require("gtcore") meets the
-  // existing SC1010 fence anchored in gtwrap's files, and the package
-  // degrades with the module-naming note — preflight and lowering agree.
-  test("__toESM of an unopted dependency degrades the wrapping package with the require note", () => {
+  // The interop's require edges join recursive automatic package selection.
+  test("__toESM dependencies compile recursively without explicit selection", () => {
     const entry = join(fixturesRoot, "npm/cases/2556-toesm-external/main.ts");
     const { coverage } = analyze(entry, { npmStatic: ["gtwrap"] });
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.npmStatic).toEqual([
-      {
-        package: "gtwrap",
-        status: "fallback",
-        detail: expect.stringContaining("'gtcore'") as string,
-      },
+      { package: "gtwrap", status: "static" },
+      { package: "gtcore", status: "static" },
+      { package: "gtable", status: "static" },
     ]);
+    expect(coverage.diagnostics).toEqual([]);
   }, 120_000);
 
   // 2557: a __toESM whose TEXT deviates beyond the structural recognizer
-  // (a hand-rolled block-body interop). The rewrite must not guess: the
-  // package degrades to the island with a note NAMING the construct —
-  // never a failed build, and never the silent alternative (the live
-  // helper chain's `var __create = Object.create;` fences at module load
-  // while the report claims "static").
-  test("a deviant __toESM helper degrades the package with a construct-naming note", () => {
+  // (a hand-rolled block-body interop). Refuse the package and name the
+  // construct rather than claiming it compiled statically.
+  test("a deviant __toESM helper refuses the package with a construct-naming note", () => {
     const entry = join(fixturesRoot, "npm/cases/2557-toesm-drift/main.ts");
     const { coverage } = analyze(entry, { npmStatic: ["gtdrift", "gtcore"] });
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.npmStatic).toEqual([
       {
         package: "gtdrift",
-        status: "fallback",
+        status: "refused",
         detail: expect.stringContaining("__toESM") as string,
       },
       { package: "gtcore", status: "static" },
@@ -1230,14 +1185,14 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   // Auto must not newly admit what the recognition cannot finish: the
   // eligibility heuristics pick gtdrift (own .d.ts, unminified, no
   // runtime markers), the attempt runs, and the SAME construct-naming
-  // degrade answers — the preflight refusal and the lowering agree.
+  // refusal answers — the preflight refusal and the lowering agree.
   test("--npm-static=auto degrades a deviant __toESM package with the same note", () => {
     const entry = join(fixturesRoot, "npm/cases/2557-toesm-drift/main.ts");
     const { coverage } = analyze(entry, { npmStatic: "auto" });
     expect(coverage.npmStatic).toEqual([
       {
         package: "gtdrift",
-        status: "fallback",
+        status: "refused",
         detail: expect.stringContaining("__toESM") as string,
       },
     ]);
@@ -1279,9 +1234,7 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
   // workspace installers copy members into node_modules), so detection
   // reads the workspace ROOT's "workspaces" globs instead. The member is
   // UNTYPED: its implicit-any module error (the import-site 7016) must
-  // never gate — the package is the program author's own workspace code —
-  // and the flagless build reports the same island-capable per-package
-  // attribution the symlinked twin gets.
+  // never gate. Package-specific diagnostics retain the workspace attribution.
   test("a copied workspace member classifies identically to a symlinked one", () => {
     const { coverage } = analyze(join(fixturesRoot, "npm/cases/workspace-copied/main.ts"));
     expect(coverage.preflightFailed).toBe(false);

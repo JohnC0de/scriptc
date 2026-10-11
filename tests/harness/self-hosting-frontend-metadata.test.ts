@@ -14,15 +14,13 @@ for (const backend of ["llvm"] as const) {
       join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-frontend-metadata-"),
     );
     try {
-      const { coverage } = analyze(entry, { dynamic: false });
+      const { coverage } = analyze(entry, {});
       expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.stats.functionsSkipped).toBe(0);
       const built = await compile(entry, {
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize: process.env["SCRIPTC_SAN"] === "1",
         outDir: directory,

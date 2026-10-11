@@ -48,14 +48,12 @@ export interface EarlyExecutableNativeFeatures {
   backend: "llvm";
   /** Omitted is the historical release posture. */
   optimization?: "dev" | "speed";
-  dynamic: boolean;
   workers?: boolean;
   regex: boolean;
   copying: boolean;
   textDecoderLegacy: boolean;
   fileHandle: boolean;
   fetch: boolean;
-  netIsland: boolean;
   zlib: boolean;
   assert: boolean;
   inspect: boolean;
@@ -102,7 +100,6 @@ export interface EarlyExecutableCacheOptions {
   outPath: string;
   emitIr: boolean;
   sanitize: boolean;
-  dynamic: boolean;
   backend: "llvm";
   /** Omitted is the historical release posture and preserves v1 keys. */
   optimization?: "dev" | "speed";
@@ -160,13 +157,11 @@ export interface EarlyExecutableCachePublish extends EarlyExecutableCacheHit {
 }
 
 const BOOLEAN_NATIVE_KEYS = [
-  "dynamic",
   "regex",
   "copying",
   "textDecoderLegacy",
   "fileHandle",
   "fetch",
-  "netIsland",
   "zlib",
   "assert",
   "inspect",
@@ -215,7 +210,7 @@ function cacheKey(options: EarlyExecutableCacheOptions): string {
     resolve(options.outPath),
     options.emitIr ? "emit-ir" : "no-ir",
     options.sanitize ? "sanitize" : "plain",
-    options.dynamic ? "dynamic" : "static",
+    "static",
     options.backend,
     ...optimizationKeyParts(options.optimization),
     ...(options.strip ? ["strip"] : []),
@@ -251,7 +246,7 @@ function routeKey(options: Omit<EarlyExecutableRouteOptions, "nativeEnvironment"
     .update("\0")
     .update(options.sanitize ? "sanitize" : "plain")
     .update("\0")
-    .update(options.dynamic ? "dynamic" : "static")
+    .update("static")
     .update("\0")
     .update(options.backend)
     .update("\0");
