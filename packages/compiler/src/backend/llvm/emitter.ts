@@ -519,6 +519,9 @@ export class LlEmitter {
   readonly wasi: boolean;
   /** ELF worker executables give thread-locals the executable TLS models. */
   private readonly executableTls: boolean;
+  /** Source loops enclosing the statement being emitted in the current
+   * function body. */
+  private loopDepth = 0;
   private readonly emitLibraryIdentity: boolean;
   private readonly runtimeAbiMarker: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —
@@ -3851,12 +3854,15 @@ export class LlEmitter {
   /** Loads the running thread's exact pending word (ELF worker
    * executables, scr_exception.c): bit 0 mirrors the active cell, bit 1
    * requests the context's stop. It lives in the executable's static TLS
-   * block, so the access is one thread-pointer-relative load. Monotonic: a
-   * loop must not hoist the load out and miss a cross-thread stop. */
-  private loadExcFlag(): string {
+   * block, so the access is one thread-pointer-relative load. Monotonic by
+   * default: a loop must not hoist the load out and miss a cross-thread
+   * stop (see emitPendingCheck for the unordered tests). */
+  private loadExcFlag(unordered = false): string {
     this.declare(`@scr_exc_flag = external thread_local(localexec) global i32, align 4`);
     const word = this.B.tmp();
-    this.B.line(`${word} = load atomic i32, ptr @scr_exc_flag monotonic, align 4`);
+    this.B.line(
+      `${word} = load atomic i32, ptr @scr_exc_flag ${unordered ? "unordered" : "monotonic"}, align 4`,
+    );
     return word;
   }
 
@@ -3887,8 +3893,9 @@ export class LlEmitter {
    * call's result temp must join its frame BEFORE this runs so the unwind
    * releases the dummy (NULL for refcounted kinds) harmlessly. A scalar
    * call result of the function's return type may be passed as the unwind's
-   * dummy value (see emitUnwind). */
-  emitPendingCheck(passThrough?: { name: string; type: IrType }): void {
+   * dummy value (see emitUnwind). `poll` marks a worker termination poll
+   * (function entry or loop budget), whose test must stay ordered. */
+  emitPendingCheck(passThrough?: { name: string; type: IrType }, poll = false): void {
     const through =
       passThrough !== undefined &&
       this.llType(passThrough.type) === this.llType(this.currentReturnType) &&
@@ -3924,7 +3931,16 @@ export class LlEmitter {
     let word: string;
     const exact = this.mod.workers !== true || this.executableTls;
     if (this.executableTls) {
-      word = this.loadExcFlag();
+      // Termination stays observable where the polls were dropped for it:
+      // polls, tests inside source loops (exc's loop-poll rule relies on
+      // them every iteration) and tail-position tests (a dead ordered load
+      // keeps recursion from becoming a loop without stack growth) use an
+      // ordered load, which LLVM never deletes, hoists or merges. Every
+      // other test is an unordered load: it reads the same word, but LLVM's
+      // memory analyses no longer treat it as a write, so loads around it
+      // stay forwardable after inlining. Same-thread changes only happen in
+      // runtime calls, which clobber memory.
+      word = this.loadExcFlag(!poll && through === undefined && this.loopDepth === 0);
     } else if (this.mod.workers === true) {
       // dso_local: executables link the runtime statically, so the word is
       // addressed directly instead of through the GOT.
@@ -4058,7 +4074,7 @@ export class LlEmitter {
     // Calls and throwing operations retain their own checks. Amortize the
     // extra cancellation poll across bounded loop batches so scalar work
     // does not cross the runtime ABI on every iteration.
-    this.emitPendingCheck();
+    this.emitPendingCheck(undefined, true);
     B.br(next);
     B.startBlock(next);
   }
@@ -5052,6 +5068,7 @@ export class LlEmitter {
     this.chainSlots.clear();
     this.finallyStack = [];
     this.tryStack = [];
+    this.loopDepth = 0;
     this.currentReturnType = fn.returnType;
     this.currentGenerator = fn.generator ?? null;
     this.currentBorrowedReturn = this.borrowedReturns.has(fn.name);
@@ -5220,7 +5237,7 @@ export class LlEmitter {
       B.returnEpilogue = `call void @scr_stack_leave(ptr %source_frame)`;
     }
     if (this.stackChecks?.has(fn.name)) this.emitStackCheck();
-    if (this.workerEntryPolls?.has(fn.name)) this.emitPendingCheck();
+    if (this.workerEntryPolls?.has(fn.name)) this.emitPendingCheck(undefined, true);
     this.emitStmts(fn.body);
     // Implicit exit of a void function: release the function scope unless
     // the body already terminated its final block (return, or a throw
@@ -5423,10 +5440,14 @@ export class LlEmitter {
   emitStmt(s: IrStmt): void {
     const previous = this.B.debugLocation;
     this.B.debugLocation = this.debug?.location(s.loc, this.debugScope) ?? null;
+    const loop =
+      s.kind === "while" || s.kind === "doWhile" || s.kind === "for" || s.kind === "forOf";
+    if (loop) this.loopDepth++;
     try {
       this.emitStmtBody(s);
     } finally {
       this.B.debugLocation = previous;
+      if (loop) this.loopDepth--;
     }
   }
 
