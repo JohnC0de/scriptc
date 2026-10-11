@@ -53,8 +53,8 @@ describe("emitted object allocation", () => {
       "ok:",
       "  call void @scr_obj_alloc_note()",
     ]);
-    expect(emitObjectAlloc(h, "24", { trace: "@t", free: "@f" })).toEqual([
-      "  %o = call ptr @scr_cyc_alloc(i64 24, ptr @t, ptr @f)",
+    expect(emitObjectAlloc(h, "24", { type: "@ty" })).toEqual([
+      "  %o = call ptr @scr_cyc_alloc(i64 24, ptr @ty)",
       "  call void @scr_obj_alloc_note()",
     ]);
     expect(emitObjectFree(h, true)).toEqual([
@@ -83,10 +83,10 @@ describe("emitted object allocation", () => {
     expect(plain.filter((l) => l.includes("@scr_obj_alloc_note")).length).toBe(1);
     expect(plain.at(-1)).toBe("  %o = phi ptr [ %sa.blk, %sa.fast ], [ %sa.s, %sa.noted ]");
 
-    const cyc = emitObjectAlloc(h, "40", { trace: "@t", free: "@f" });
+    const cyc = emitObjectAlloc(h, "40", { type: "@ty" });
     expectSingleDefinitions(cyc);
-    expect(cyc).toContain("  %sa.n = add i64 40, 32");
-    expect(cyc).toContain("  %sa.s = call ptr @scr_cyc_alloc(i64 40, ptr @t, ptr @f)");
+    expect(cyc).toContain("  %sa.n = add i64 40, 16");
+    expect(cyc).toContain("  %sa.s = call ptr @scr_cyc_alloc(i64 40, ptr @ty)");
     expect(cyc).toContain("  store i64 %sa.live1, ptr @scr_cyc_live");
     expect(h.decls).toContain(
       "@scr_sa = external global { i64, i64, i32, [32 x ptr], [32 x ptr], [32 x ptr] }",

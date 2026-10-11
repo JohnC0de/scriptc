@@ -1230,7 +1230,8 @@ static ScrStreamState *scr_stream_state_new(bool has_r, bool has_w,
 static ScrStream *scr_stream_alloc(const ScrVt *vt, const char *cls, bool has_r, bool has_w,
                                     double rhwm, double whwm, bool auto_destroy,
                                     bool emit_close, bool allow_half_open) {
-  ScrStream *s = scr_cyc_alloc(sizeof *s, &scr_stream_trace, &scr_stream_gcfree);
+  static const ScrCycType cyc_type = { &scr_stream_trace, &scr_stream_gcfree, SCR_CYC_KIND_STREAM };
+  ScrStream *s = scr_cyc_alloc(sizeof *s, &cyc_type);
   s->rc = 1;
   s->vt = vt;
   s->reg = NULL;
