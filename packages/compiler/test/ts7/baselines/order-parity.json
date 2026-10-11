@@ -15775,12 +15775,6 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
-   "order": [
-    "<repo>/tests/corpus/native-worker-arena-reuse.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/4598-map-set-clear-reuse.ts": {
    "order": [
     "<repo>/tests/corpus/4598-map-set-clear-reuse.ts"
@@ -15838,6 +15832,61 @@
   "<repo>/tests/corpus/string-char-code-integer-loops.ts": {
    "order": [
     "<repo>/tests/corpus/string-char-code-integer-loops.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts": {
+   "order": [
+    "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts": {
+   "order": [
+    "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts": {
+   "order": [
+    "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-exception-state.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-exception-state.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4598-os-available-parallelism.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-os-available-parallelism.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/constant-module-globals/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/constant-module-globals/consts.ts",
+    "<repo>/tests/corpus/constant-module-globals/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts": {
+   "order": [
+    "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts"
    ],
    "diags": []
   }

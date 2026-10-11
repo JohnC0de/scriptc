@@ -62,7 +62,7 @@ void scr_init(void);
 /* Program objects emitted by the bundled LLVM helper reference this symbol.
  * Its versioned spelling makes a mismatched manual runtime link fail before
  * the program can start. */
-void scr_runtime_abi_v9(void);
+void scr_runtime_abi_v12(void);
 void scr_runtime_workers_v8(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -290,11 +290,26 @@ void scr_context_stop(int code);
 bool scr_context_stopping(void);
 bool scr_context_checkpoint(void);
 bool scr_context_quiet(void);
-/* The process-wide exception alert that emitted pending checks of worker
- * executables test inline (scr_exception.c): nonzero while some script
- * thread may have an exception pending in its active cell or must stop. */
+#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__CYGWIN__) && !defined(__wasi__)
+/* ELF worker executables (the LLVM emitter's executableTls targets): every
+ * script thread owns an exact pending word in the executable's static TLS
+ * block, which emitted pending checks load with one thread-pointer-relative
+ * access and no out-of-line slow path (scr_exception.c). */
+#define SCR_EXC_FLAG 1
+#define SCR_EXC_FLAG_PENDING 1u /* the active cell's kind is not NONE */
+#define SCR_EXC_FLAG_STOP 2u    /* the context must stop (never cleared) */
+extern SCR_TL _Atomic uint32_t scr_exc_flag;
+/* Requests the stop of the thread that owns `flag` (scr_worker.c holds the
+ * owner's word only while its script runs). */
+void scr_exc_flag_request_stop(_Atomic uint32_t *flag);
+#else
+/* The process-wide exception alert that emitted pending checks of other
+ * worker executables test inline (scr_exception.c): nonzero while some
+ * script thread may have an exception pending in its active cell or must
+ * stop. */
 extern _Atomic uint32_t scr_exc_alert;
 void scr_exc_alert_add(int delta); /* worker.terminate() references */
+#endif
 void scr_exc_alert_thread_exit(void);
 void scr_loop_context_shutdown(void);
 extern SCR_TL void (*scr_context_report_error)(void);
@@ -322,6 +337,22 @@ bool scr_context_is_main(void);
 extern SCR_TL uintptr_t scr_stack_guard;
 void scr_stack_guard_init(void);
 void scr_stack_overflow(void);
+#if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(__APPLE__) && \
+    (defined(__aarch64__) || defined(__x86_64__))
+/* Darwin worker executables: reading a thread-local variable calls its TLV
+ * thunk, so the emitted entry checks read the running stack's guard from a
+ * pthread thread-specific-data slot instead, addressed from the thread
+ * pointer (TPIDRRO_EL0 on arm64, %gs on x86-64) plus this byte offset.
+ * scr_stack_guard_init validates the slot on first use; zero means the
+ * direct read is unavailable and the checks call scr_stack_guard_get. */
+#define SCR_STACK_GUARD_TSD 1
+extern uintptr_t scr_stack_guard_tsd;
+uintptr_t scr_stack_guard_get(void);
+void scr_stack_guard_set(uintptr_t guard);
+#define SCR_STACK_GUARD_SET(guard) scr_stack_guard_set(guard)
+#else
+#define SCR_STACK_GUARD_SET(guard) (scr_stack_guard = (guard))
+#endif
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
 #define SCR_STACK_RESERVE_MAX ((size_t)2 << 20)
@@ -404,49 +435,83 @@ enum { SCR_CYC_BLACK = 0, SCR_CYC_GRAY = 1, SCR_CYC_WHITE = 2, SCR_CYC_DOOMED = 
  * SCR_CYC_OLD is a full pass. */
 enum { SCR_CYC_NURSERY = 0, SCR_CYC_MATURE = 1, SCR_CYC_OLD = 2, SCR_CYC_NGENS = 3 };
 
-typedef struct ScrCycHdr {
+/* A headered type's collector entry points, shared by all its objects: the
+ * header names one constant descriptor instead of carrying both function
+ * pointers, which keeps the header at 16 bytes. Emitted shapes define one
+ * per traced type (llvm/shapes.ts); runtime families use SCR_CYC_TYPE. */
+typedef struct ScrCycType {
   ScrTraceFn trace;
   ScrCycFreeFn free_fn;
+  /* Index of the type's per-thread collector statistics (scr_cycle.c's
+   * nursery bypass): a runtime family's SCR_CYC_KIND_*, or for emitted
+   * descriptors their number counting from SCR_CYC_KIND_EMITTED. 0 keeps
+   * no statistics. Statistics only steer
+   * when a candidate is walked, never what a pass frees, so two types that
+   * share an index (separately emitted code in one process) are merely
+   * judged together. */
+  uint32_t kind;
+} ScrCycType;
+/* Runtime families' kinds. Emitted descriptors count from
+ * SCR_CYC_KIND_EMITTED (llvm/alloc.ts FIRST_EMITTED_CYC_KIND). */
+enum {
+  SCR_CYC_KIND_NONE = 0,
+  SCR_CYC_KIND_ARRAY,
+  SCR_CYC_KIND_PROMISE,
+  SCR_CYC_KIND_BOX,
+  SCR_CYC_KIND_CLOSURE,
+  SCR_CYC_KIND_ERROR,
+  SCR_CYC_KIND_DOMEXCEPTION,
+  SCR_CYC_KIND_EMITTER,
+  SCR_CYC_KIND_CAUGHT,
+  SCR_CYC_KIND_DYN,
+  SCR_CYC_KIND_WEAK_MAP,
+  SCR_CYC_KIND_MAP,
+  SCR_CYC_KIND_CLASS_OBJECT,
+  SCR_CYC_KIND_STREAM,
+  SCR_CYC_KIND_UNION,
+  SCR_CYC_KIND_WORKER_VIEW,
+  SCR_CYC_KIND_EMITTED = 32
+};
+#define SCR_CYC_TYPE(name, trace_fn, free) static const ScrCycType name = { (trace_fn), (free), 0 }
+
+typedef struct ScrCycHdr {
 #if UINTPTR_MAX == UINT32_MAX
   /* calloc aligns the block for doubles; keep the payload aligned too.
-   * Padding BEFORE color preserves the emitted obj-8 `buffered` offset. */
+   * Padding BEFORE the descriptor keeps every object-relative offset of the
+   * fields below identical to 64-bit targets. */
   uint32_t payload_alignment;
 #endif
-  uint32_t color;    /* SCR_CYC_* */
-  uint16_t buffered; /* 1 = sitting in its generation's candidate buffer */
-  uint16_t gen;      /* SCR_CYC_NURSERY..SCR_CYC_OLD (the walk filter) */
-  size_t buf_index;  /* position there (O(1) removal when rc hits 0) */
+  const ScrCycType *type; /* trace and teardown */
+  uint8_t color;          /* SCR_CYC_* */
+  uint8_t gen;            /* SCR_CYC_NURSERY..SCR_CYC_OLD (the walk filter) */
+  uint16_t buffered;      /* 1 = sitting in its generation's candidate buffer */
+  uint32_t buf_index;     /* position there (O(1) removal when rc hits 0) */
 } ScrCycHdr;
 
 /* This layout is an ABI, not an implementation detail. Every emitted release
  * of a headered object (llvm/shapes.ts cycleRootLines, used by the record,
  * class and inline RC helpers) mirrors scr_cyc_on_release's early return:
- * it reads `buffered` as an i16 at obj-12 on 64-bit targets and obj-8 on
- * wasm32 (the backend's cycleColorOffset - 4) and calls scr_cyc_on_release
- * only when it is 0. Hence the target-width assertions. */
-#if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(ScrCycHdr) == 32, "LLVM backend expects a 32-byte cycle header");
-_Static_assert(offsetof(ScrCycHdr, color) == 16,
-               "LLVM backend's cycleColorOffset is obj-16 on 64-bit targets");
-_Static_assert(offsetof(ScrCycHdr, gen) == 22,
-               "LLVM backend's inline free reads the generation at header+22");
-#elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(ScrCycHdr) == 24, "wasm32 cycle payloads require an aligned 24-byte header");
-_Static_assert(offsetof(ScrCycHdr, color) == 12,
-               "LLVM backend's cycleColorOffset is obj-12 on wasm32");
-#endif
+ * it reads `buffered` as an i16 at obj-6 (the backend's cycleBufferedOffset)
+ * and calls scr_cyc_on_release only when it is 0; the emitted inline free
+ * reads the generation as an i8 at obj-7. Hence the assertions. */
+_Static_assert(sizeof(ScrCycHdr) == 16, "LLVM backend expects a 16-byte cycle header");
+_Static_assert(sizeof(ScrCycHdr) - offsetof(ScrCycHdr, buffered) == 6 &&
+                   sizeof(((ScrCycHdr *)0)->buffered) == 2,
+               "the emitted release fast path reads `buffered` as an i16 at obj-6");
+_Static_assert(sizeof(ScrCycHdr) - offsetof(ScrCycHdr, gen) == 7,
+               "LLVM backend's inline free reads the generation as an i8 at obj-7");
+_Static_assert(sizeof(ScrCycHdr) - offsetof(ScrCycHdr, type) == 16 ||
+                   UINTPTR_MAX == UINT32_MAX,
+               "LLVM backend stores the descriptor at the block start on 64-bit targets");
 _Static_assert(sizeof(ScrCycHdr) % _Alignof(double) == 0,
                "cycle-headered payloads must preserve double alignment");
-_Static_assert(offsetof(ScrCycHdr, buffered) == offsetof(ScrCycHdr, color) + 4 &&
-                   sizeof(((ScrCycHdr *)0)->buffered) == 2,
-               "the emitted release fast path reads `buffered` as an i16 four bytes "
-               "after color");
 
 static inline ScrCycHdr *scr_cyc_hdr(void *obj) { return (ScrCycHdr *)obj - 1; }
 
 /* Zeroed allocation with a cycle header in front; returns the OBJECT
- * pointer (header at scr_cyc_hdr). Aborts on OOM. */
-void *scr_cyc_alloc(size_t size, ScrTraceFn trace, ScrCycFreeFn free_fn);
+ * pointer (header at scr_cyc_hdr). `type` must outlive the object (a
+ * static descriptor). Aborts on OOM. */
+void *scr_cyc_alloc(size_t size, const ScrCycType *type);
 void scr_cyc_free(void *obj); /* frees the block, header included */
 
 /* ── small-object allocator (scr_alloc.c) ───────────────────────────────
@@ -641,12 +706,11 @@ extern SCR_TL size_t scr_cyc_live;
 extern SCR_TL size_t scr_cyc_old_freed;
 extern SCR_TL void (*scr_weak_dispose_hook)(void *);
 #endif
-static inline void *scr_cyc_alloc_inline(size_t size, ScrTraceFn trace, ScrCycFreeFn free_fn) {
+static inline void *scr_cyc_alloc_inline(size_t size, const ScrCycType *type) {
   if (size > SIZE_MAX - sizeof(ScrCycHdr)) scr_trap("scriptc: out of memory\n");
   ScrCycHdr *h = (ScrCycHdr *)scr_mem_calloc(sizeof(ScrCycHdr) + size);
   if (!h) scr_trap("scriptc: out of memory\n");
-  h->trace = trace;
-  h->free_fn = free_fn;
+  h->type = type;
   scr_cyc_live++;
   return h + 1;
 }
@@ -657,8 +721,8 @@ static inline void scr_cyc_free_inline(void *obj) {
   scr_mem_free(scr_cyc_hdr(obj));
 }
 _Static_assert(SCR_CYC_NURSERY == 0, "zeroed cycle headers start in the nursery");
-_Static_assert(sizeof(((ScrCycHdr *)0)->gen) == 2 && SCR_CYC_OLD == 2,
-               "LLVM backend's inline free compares an i16 generation against 2");
+_Static_assert(sizeof(((ScrCycHdr *)0)->gen) == 1 && SCR_CYC_OLD == 2,
+               "LLVM backend's inline free compares an i8 generation against 2");
 
 /* Dispose an object whose reference count already reached zero. The caller
  * removes its cycle candidate first. Nested disposals keep bounded stack
@@ -1529,6 +1593,13 @@ typedef struct ScrArr {
   ScrTraceFn elem_trace;
   uint64_t *data;
   uint8_t *present; /* one state per dense slot; heap arrays share data allocation */
+  /* Rarely used storage (sparse indices, noncanonical numeric properties,
+   * match-result metadata) lives out of line: NULL until first needed, so
+   * the common dense array stays small. */
+  struct ScrArrExt *ext;
+} ScrArr;
+
+typedef struct ScrArrExt {
   struct ScrArrSparseSlot *sparse;
   size_t sparse_len;
   size_t sparse_cap;
@@ -1536,7 +1607,7 @@ typedef struct ScrArr {
   size_t prop_len;
   size_t prop_cap;
   struct ScrDyn *metadata; /* heterogeneous named properties of match results */
-} ScrArr;
+} ScrArrExt;
 /* The LLVM backend's inline retain/release read elem_trace through its
  * mirrored %ScrArr type (field 6) to decide mark-live / candidate buffering
  * exactly like scr_arr_retain and scr_arr_release. */
@@ -1578,6 +1649,11 @@ static inline ScrArr *scr_arr_retain(ScrArr *a) {
  * non-NULL) feed the candidate-root buffer like every headered type. */
 void scr_arr_release(ScrArr *a);
 void scr_arr_copy_metadata(ScrArr *a, struct ScrDyn *target);
+/* The array's out-of-line storage, allocated (zeroed) on first use. */
+ScrArrExt *scr_arr_ext(ScrArr *a);
+/* Swaps the sparse slots and numeric properties of two arrays; each keeps
+ * its own match metadata (refresh of a cached typed view, llvm/dyn.ts). */
+void scr_arr_swap_indexed_ext(ScrArr *a, ScrArr *b);
 
 /* Trace entry point for cycle-capable arrays — stored in their collector
  * header and passed wherever a container stores an ARRAY payload's RC entry
@@ -2156,6 +2232,23 @@ typedef struct ScrBox {
   ScrTraceFn obj_trace;
   uint64_t slot; /* double/bool/pointer via memcpy and casts */
 } ScrBox;
+
+/* A box can lie on a cycle only when its trace visits its payload: a
+ * closure, or a class instance that carries a cycle header. Every other box
+ * is a leaf of the object graph, so its releases buffer no candidate. The
+ * emitted inline release (llvm/shapes.ts, the box row) mirrors this test,
+ * reading `kind` and `obj_trace` at the asserted offsets. */
+static inline bool scr_box_traced(const ScrBox *b) {
+  return b->kind == SCR_BOX_FUNC || b->obj_trace != NULL;
+}
+_Static_assert(SCR_BOX_FUNC == 4, "the emitted box release compares kind against 4");
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(offsetof(ScrBox, kind) == 8 && offsetof(ScrBox, obj_trace) == 32,
+               "the emitted box release reads kind at 8 and obj_trace at 32");
+#else
+_Static_assert(offsetof(ScrBox, kind) == 4 && offsetof(ScrBox, obj_trace) == 16,
+               "the emitted box release reads kind at 4 and obj_trace at 16");
+#endif
 
 ScrBox *scr_box_new(ScrBoxKind kind); /* returns +1, slot zeroed */
 ScrBox *scr_box_new_obj(void *(*retain)(void *), void (*release)(void *),
@@ -4089,6 +4182,7 @@ ScrStr *scr_os_tmpdir(void);
 ScrStr *scr_os_release(void); /* uname(2) release — +1 fresh */
 ScrStr *scr_os_type(void);    /* uname(2) sysname — +1 fresh */
 double scr_os_totalmem(void); /* total physical memory, bytes */
+double scr_os_available_parallelism(void); /* uv_available_parallelism: CPUs this process may use, >= 1 */
 /* os.userInfo()'s field trio (pw_name / pw_shell / pw_dir — the passwd
  * home, not the $HOME cascade). +1 fresh; abort on lookup failure. */
 ScrStr *scr_os_user_name(void);

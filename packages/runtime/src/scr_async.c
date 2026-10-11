@@ -285,7 +285,8 @@ static void scr_promise_gcfree(void *o) {
 }
 
 ScrPromise *scr_promise_new(void) {
-  ScrPromise *p = scr_cyc_alloc(sizeof *p, &scr_promise_trace, &scr_promise_gcfree);
+  static const ScrCycType cyc_type = { &scr_promise_trace, &scr_promise_gcfree, SCR_CYC_KIND_PROMISE };
+  ScrPromise *p = scr_cyc_alloc(sizeof *p, &cyc_type);
   p->rc = 1;
   p->identity = malloc(sizeof *p->identity);
   if (!p->identity) scr_oom();
@@ -1256,7 +1257,7 @@ static void scr_switch(ScrCtx *from, ScrCtx *to, ScrFiber *to_fiber) {
   /* The stack guard follows the running stack. A fresh fiber starts with
    * its own; every resumed context restores the guard it saved here. */
   uintptr_t guard = scr_stack_guard;
-  if (to_fiber) scr_stack_guard = scr_stack_guard_for((uintptr_t)to_fiber->stack, SCR_FIBER_STACK);
+  if (to_fiber) SCR_STACK_GUARD_SET(scr_stack_guard_for((uintptr_t)to_fiber->stack, SCR_FIBER_STACK));
 #endif
 #ifdef _WIN32
   /* SwitchToFiber snapshots the outgoing fiber's state inside its own
@@ -1287,7 +1288,7 @@ static void scr_switch(ScrCtx *from, ScrCtx *to, ScrFiber *to_fiber) {
   swapcontext(from, to);
 #endif
 #if !defined(_WIN32) && !defined(__wasi__)
-  scr_stack_guard = guard;
+  SCR_STACK_GUARD_SET(guard);
 #endif
 }
 
@@ -1537,8 +1538,9 @@ static void scr_fiber_finish(ScrFiber *self) {
   }
   ScrPromise *p = self->promise;
 #ifdef SCR_WORKERS
-  if (scr_context_stopping()) {
-    scr_context_checkpoint();
+  /* Checkpoint, not just test: the body may have unwound for a stop
+   * request that its cell does not show yet. */
+  if (scr_context_checkpoint()) {
     scr_promise_reject_from_cell(p, &self->exc);
     p->rejection_observed = true;
     self->done = true;

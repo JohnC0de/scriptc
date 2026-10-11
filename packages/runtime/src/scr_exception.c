@@ -62,7 +62,53 @@ ScrExcCell *scr_exc_active = &scr_main_exc;
  * localized library archive would otherwise leave shared. */
 SCR_TL uintptr_t scr_stack_guard = 0;
 
-#if defined(SCR_WORKERS) && !defined(SCR_LIB)
+#if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(SCR_EXC_FLAG)
+/* The thread's exact pending word, tested inline by every emitted pending
+ * check in ELF worker executables (one %fs/tpidr-relative load: the word is
+ * in the executable's static TLS block). Nonzero means the running code
+ * must unwind, so the emitted check needs no out-of-line answer:
+ *
+ * - SCR_EXC_FLAG_PENDING mirrors `active cell kind != NONE` exactly. Only
+ *   the owner thread writes it, at every change of its active cell (throws,
+ *   rethrows, take/clear, fiber switches, payload moves, the termination
+ *   sentinel), because a stale bit would unwind a normal path.
+ * - SCR_EXC_FLAG_STOP means the context must stop. worker.terminate() sets
+ *   it from the owner's thread (scr_exc_flag_request_stop, through the
+ *   pointer the worker registers while its script runs), scr_context_stop
+ *   sets it for process.exit() and fatal paths, and nothing clears it.
+ *
+ * A set STOP bit unwinds while the active cell may still be NONE: the
+ * TERMINATE sentinel is installed by whoever consumes the unwind before it
+ * inspects the cell. scr_exc_pending and scr_context_checkpoint do that,
+ * emitted try regions test the bit before entering a handler, and the
+ * runtime's unwind consumers (fiber completion, the uncaught reporters,
+ * exit listeners) checkpoint first. */
+SCR_TL _Atomic uint32_t scr_exc_flag;
+
+static inline void scr_exc_flag_pending(bool pending) {
+  uint32_t word = atomic_load_explicit(&scr_exc_flag, memory_order_relaxed);
+  if (((word & SCR_EXC_FLAG_PENDING) != 0) == pending) return;
+  if (pending) atomic_fetch_or_explicit(&scr_exc_flag, SCR_EXC_FLAG_PENDING, memory_order_relaxed);
+  else atomic_fetch_and_explicit(&scr_exc_flag, ~SCR_EXC_FLAG_PENDING, memory_order_relaxed);
+}
+
+void scr_exc_flag_request_stop(_Atomic uint32_t *flag) {
+  /* Release: a thread that observes the bit also observes the requester's
+   * earlier writes (the worker's cancel flag). */
+  atomic_fetch_or_explicit(flag, SCR_EXC_FLAG_STOP, memory_order_release);
+}
+
+/* The active cell, or the context's stop state, may have changed. */
+void scr_exc_cell_changed(void) {
+  if (!scr_context_quiet() &&
+      !(atomic_load_explicit(&scr_exc_flag, memory_order_relaxed) & SCR_EXC_FLAG_STOP))
+    atomic_fetch_or_explicit(&scr_exc_flag, SCR_EXC_FLAG_STOP, memory_order_relaxed);
+  scr_exc_flag_pending(SCR_EXC_CUR()->kind != SCR_EXC_NONE);
+}
+
+void scr_exc_alert_thread_exit(void) {}
+#define SCR_EXC_RAISED() scr_exc_flag_pending(true)
+#elif defined(SCR_WORKERS) && !defined(SCR_LIB)
 /* The process-wide exception alert, tested inline by every emitted pending
  * check in worker executables: one ordinary load, where reading the active
  * cell would be a thread-local access (a call on Darwin). It counts the
@@ -186,7 +232,10 @@ bool(scr_exc_pending)(void) {
   if (scr_context_checkpoint()) return true;
 #endif
   bool pending = scr_exc_kind != SCR_EXC_NONE;
-#if defined(SCR_WORKERS) && !defined(SCR_LIB)
+#if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(SCR_EXC_FLAG)
+  /* The pending bit is exact; settling it here is only a safety net. */
+  scr_exc_flag_pending(pending);
+#elif defined(SCR_WORKERS) && !defined(SCR_LIB)
   /* The slow path of the alert test: settle this thread's share. */
   if (pending != scr_exc_alerted) scr_exc_cell_changed();
 #endif
@@ -233,7 +282,8 @@ static void scr_caught_gcfree(void *object) {
 }
 
 ScrCaught *scr_exc_take(void) {
-  ScrCaught *c = scr_cyc_alloc(sizeof *c, scr_caught_trace_v, scr_caught_gcfree);
+  static const ScrCycType cyc_type = { &scr_caught_trace_v, &scr_caught_gcfree, SCR_CYC_KIND_CAUGHT };
+  ScrCaught *c = scr_cyc_alloc(sizeof *c, &cyc_type);
   c->rc = 1;
   c->kind = scr_exc_kind;
   c->f64 = scr_exc_f64;
@@ -518,7 +568,9 @@ static SCR_TL bool scr_uncaught_handler_failed = false;
 
 bool scr_exc_handle_uncaught(bool from_promise) {
 #ifdef SCR_WORKERS
-  if (scr_context_stopping()) return false;
+  /* Checkpoint, not just test: the unwind that brought control here may
+   * have been a stop request the cell does not show yet. */
+  if (scr_context_checkpoint()) return false;
 #endif
   if (!scr_exc_pending()) return true;
   if (!scr_uncaught_exception_hook || scr_uncaught_handler_failed) return false;
@@ -554,7 +606,7 @@ static bool scr_uncaught_print_dyn_primitive(const ScrDyn *d) {
 
 void scr_exc_print_uncaught(void) {
 #ifdef SCR_WORKERS
-  if (scr_context_stopping()) { scr_exc_clear(); return; }
+  if (scr_context_checkpoint()) { scr_exc_clear(); return; }
   if (scr_context_report_error) {
     scr_exit_code_note(scr_uncaught_handler_failed ? 7 : 1);
     scr_context_report_error();
@@ -610,4 +662,5 @@ void scr_exc_print_uncaught(void) {
   }
   fputc('\n', stderr);
   scr_exc_reset(); /* the payload counts as live until released */
+  scr_exc_cell_changed();
 }

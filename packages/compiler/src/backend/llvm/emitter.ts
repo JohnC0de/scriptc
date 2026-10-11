@@ -1,5 +1,5 @@
 import { emitLlvmLayouts } from "./layouts.js";
-import { inlineAllocSupported } from "./alloc.js";
+import { FIRST_EMITTED_CYC_KIND, inlineAllocSupported } from "./alloc.js";
 import { llvmBytes as llBytes } from "../literals.js";
 import { InternalCompilerError } from "../../errors.js";
 /** Lower typed IR to LLVM, using the runtime's C ABI.
@@ -28,6 +28,7 @@ import {
   undefinedArmTag,
 } from "../../ir/analysis.js";
 import { emitLibraryIdentityLines } from "../library-identity-markers.js";
+import { loopTestsEveryIteration } from "../loop-polls.js";
 import type {
   IrBytesElem,
   IrExpr,
@@ -521,7 +522,10 @@ export class LlEmitter {
   private debugScope: string | null = null;
   readonly sizeType: "i32" | "i64";
   readonly ffiExtendNarrowIntegers: boolean;
-  readonly cycleColorOffset: number;
+  readonly cycleBufferedOffset: number;
+  /** Emitted ScrCycType descriptors so far (their collector statistics
+   * indices; see ShapeHost.nextCycKind). */
+  private cycKinds = 0;
   readonly wasi: boolean;
   /** The target lacks a rounding instruction at its baseline CPU (x86-64
    * before SSE4.1), so `llvm.trunc` would lower to a libm call: emit
@@ -529,6 +533,13 @@ export class LlEmitter {
   readonly inlineTrunc: boolean;
   /** ELF worker executables give thread-locals the executable TLS models. */
   private readonly executableTls: boolean;
+  /** Source loops enclosing the statement being emitted in the current
+   * function body. */
+  private loopDepth = 0;
+  /** Darwin worker executables read the stack guard from a pthread
+   * thread-specific-data slot off the thread pointer (scr_runtime.h's
+   * SCR_STACK_GUARD_TSD): the architecture names the access sequence. */
+  private readonly stackGuardTsd: "aarch64" | "x86_64" | null;
   private readonly emitLibraryIdentity: boolean;
   private readonly runtimeAbiMarker: boolean;
   private readonly detachedExit: boolean;
@@ -838,14 +849,23 @@ export class LlEmitter {
       mod.lib === undefined &&
       !this.wasi &&
       !/apple|darwin|windows|mingw|cygwin|win32/.test(options.targetTriple || process.platform);
+    const host = options.targetTriple || `${process.arch}-${process.platform}`;
+    this.stackGuardTsd =
+      mod.workers === true && mod.lib === undefined && !this.wasi && /apple|darwin/.test(host)
+        ? /^(arm64|aarch64)/.test(host)
+          ? "aarch64"
+          : /^(x86_64|amd64|x64)/.test(host)
+            ? "x86_64"
+            : null
+        : null;
     this.emitLibraryIdentity = options.emitLibraryIdentity !== false;
     this.runtimeAbiMarker = options.runtimeAbiMarker === true;
     this.detachedExit = options.detachedExit === true;
     this.rcHelpers = options.inlineRc === true ? new Set() : null;
-    // ScrCycHdr.color stays 12 bytes behind a wasm32 object and 16 bytes
-    // behind a 64-bit object. The wasm32 header pads before color so its
-    // payload remains double-aligned without changing this ABI offset.
-    this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
+    // ScrCycHdr.buffered sits 6 bytes behind every object. The wasm32
+    // header pads before its descriptor so its payload remains
+    // double-aligned without changing this ABI offset.
+    this.cycleBufferedOffset = 6;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
     this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
@@ -877,7 +897,10 @@ export class LlEmitter {
     this.nullableFields = new NullableRefFields(mod.classes ?? [], this.boxedUnionsById);
     // Optional array reads also cover nullable unions: emitLocalArrayRead
     // then yields the (borrowed or owned) element pointer, not a stack box.
-    this.optionalArrayReads = new OptionalArrayReads(this.fnByName, this.unionsById);
+    // Arrays of such a union are read the same way.
+    this.optionalArrayReads = new OptionalArrayReads(this.fnByName, this.unionsById, (id) =>
+      this.nullableUnions.has(id),
+    );
     this.checkedNarrows = new CheckedNarrows(this.fnByName);
     this.referenceEffects = new ReferenceEffects(
       this.fnByName,
@@ -939,7 +962,7 @@ export class LlEmitter {
     this.tracedUnions = traced.unions;
     this.shapeHost = {
       sizeType: this.sizeType,
-      cycleColorOffset: this.cycleColorOffset,
+      cycleBufferedOffset: this.cycleBufferedOffset,
       tracedShapes: this.tracedShapes,
       tracedUnions: this.tracedUnions,
       nullableUnions: this.nullableUnions,
@@ -956,6 +979,7 @@ export class LlEmitter {
       // paths address its thread-local state.
       threadLocalAlloc: mod.workers === true,
       rcHelpers: this.rcHelpers,
+      nextCycKind: () => FIRST_EMITTED_CYC_KIND + this.cycKinds++,
       unionsById: this.unionsById,
       declare: (decl) => this.declare(decl),
       needOom: () => this.needOom(),
@@ -1454,11 +1478,13 @@ export class LlEmitter {
     const parts = this.emitModuleParts();
     if (!this.executableTls) return parts;
     // A worker executable's thread-locals all live in the executable's own
-    // TLS block (the program's internal ones, the runtime's external ones),
-    // so on ELF they can use the executable models: LLVM's default
-    // general-dynamic sequence (relaxed by the linker to `mov %fs:0` plus
-    // an add) becomes one %fs-relative access LLVM can fold into loads.
-    // Darwin's thread-local variables have a single model.
+    // TLS block: the program's internal ones, and the runtime's external
+    // ones, because the runtime is always linked statically into the
+    // executable. So on ELF they can all use the local-exec model: LLVM's
+    // default general-dynamic sequence (relaxed by the linker to `mov %fs:0`
+    // plus an add), and even initial-exec (relaxed to `mov $offset` plus an
+    // indexed access), become one %fs-relative operand LLVM can fold into
+    // loads and compares. Darwin's thread-local variables have one model.
     return parts.map((part) =>
       part
         .replace(
@@ -1467,7 +1493,7 @@ export class LlEmitter {
         )
         .replace(
           /^(@[-$._A-Za-z0-9]+ = external )thread_local global /gm,
-          "$1thread_local(initialexec) global ",
+          "$1thread_local(localexec) global ",
         ),
     );
   }
@@ -1854,10 +1880,13 @@ export class LlEmitter {
       `%ScrClosure = type { ${this.sizeType}, ptr, ${this.sizeType}, ptr, i32, i32, ptr }`,
       `%ScrFfiTable = type { ptr, ${this.sizeType}, ${this.sizeType}, ptr, i8, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ptr }`,
       `%ScrRegex = type { ${this.sizeType}, ptr, ptr, ptr, double, ptr, ptr }`,
-      // ScrArr mirrors scr_runtime.h field-for-field. Live dynamic stream
-      // commits swap its mutable dense, sparse, presence, and property
-      // storage while preserving the target object's identity.
-      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ${this.sizeType}, ptr }`,
+      // ScrArr mirrors scr_runtime.h field-for-field: { rc, len, cap, elem,
+      // elem_retain, elem_release, elem_trace, data, present, ext }, where
+      // ext points at the out-of-line sparse, property and metadata storage
+      // (NULL until first used). Live dynamic stream commits swap its dense,
+      // presence and out-of-line storage while preserving the target
+      // object's identity.
+      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr, ptr, ptr }`,
       // The ScrMap prefix { rc, key_kind, val_kind, val_retain, val_release,
       // val_trace, key_retain, key_release, key_trace } — the inline RC
       // fast paths test the two trace slots (shapes.ts).
@@ -2038,7 +2067,7 @@ export class LlEmitter {
       out.push(
         `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
         `@${inst.sym}_present = internal constant [${n} x i8] ${present}`,
-        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null, ${this.sizeType} 0, ${this.sizeType} 0, ptr null, ${this.sizeType} 0, ${this.sizeType} 0, ptr null }`,
+        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null }`,
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);
@@ -3795,13 +3824,27 @@ export class LlEmitter {
    * return and stays eligible for tail-call and recursion elimination. */
   private emitUnwind(passThrough?: string): void {
     if (this.mod.workers && this.tryStack.length > 0) {
-      this.declare(`declare zeroext i1 @scr_context_stopping()`);
-      const stopped = this.B.tmp();
-      this.B.line(`${stopped} = call zeroext i1 @scr_context_stopping()`);
       const stop = this.B.newLabel("context.stop");
       const ordinary = this.B.newLabel("context.throw");
-      this.B.condBr(stopped, stop, ordinary);
-      this.B.startBlock(stop);
+      if (this.executableTls) {
+        // A set stop bit unwinds while the active cell may still be clear:
+        // install the termination sentinel before skipping the handlers.
+        const word = this.loadExcFlag();
+        const bit = this.B.tmp();
+        const stopped = this.B.tmp();
+        this.B.line(`${bit} = and i32 ${word}, 2`);
+        this.B.line(`${stopped} = icmp ne i32 ${bit}, 0`);
+        this.B.condBr(stopped, stop, ordinary);
+        this.B.startBlock(stop);
+        this.declare(`declare zeroext i1 @scr_context_checkpoint()`);
+        this.B.line(`call zeroext i1 @scr_context_checkpoint()`);
+      } else {
+        this.declare(`declare zeroext i1 @scr_context_stopping()`);
+        const stopped = this.B.tmp();
+        this.B.line(`${stopped} = call zeroext i1 @scr_context_stopping()`);
+        this.B.condBr(stopped, stop, ordinary);
+        this.B.startBlock(stop);
+      }
       const handlers = this.tryStack;
       this.tryStack = [];
       this.emitUnwind();
@@ -3855,6 +3898,21 @@ export class LlEmitter {
     this.B.br(cleanup.label);
   }
 
+  /** Loads the running thread's exact pending word (ELF worker
+   * executables, scr_exception.c): bit 0 mirrors the active cell, bit 1
+   * requests the context's stop. It lives in the executable's static TLS
+   * block, so the access is one thread-pointer-relative load. Monotonic by
+   * default: a loop must not hoist the load out and miss a cross-thread
+   * stop (see emitPendingCheck for the unordered tests). */
+  private loadExcFlag(unordered = false): string {
+    this.declare(`@scr_exc_flag = external thread_local(localexec) global i32, align 4`);
+    const word = this.B.tmp();
+    this.B.line(
+      `${word} = load atomic i32, ptr @scr_exc_flag ${unordered ? "unordered" : "monotonic"}, align 4`,
+    );
+    return word;
+  }
+
   /** Instructions (two-space indented) that set the i1 `dest` to "an
    * exception is pending in the active context" — scr_exc_pending()'s
    * meaning — for the helper and adapter bodies that test it outside
@@ -3882,8 +3940,9 @@ export class LlEmitter {
    * call's result temp must join its frame BEFORE this runs so the unwind
    * releases the dummy (NULL for refcounted kinds) harmlessly. A scalar
    * call result of the function's return type may be passed as the unwind's
-   * dummy value (see emitUnwind). */
-  emitPendingCheck(passThrough?: { name: string; type: IrType }): void {
+   * dummy value (see emitUnwind). `poll` marks a worker termination poll
+   * (function entry or loop budget), whose test must stay ordered. */
+  emitPendingCheck(passThrough?: { name: string; type: IrType }, poll = false): void {
     const through =
       passThrough !== undefined &&
       this.llType(passThrough.type) === this.llType(this.currentReturnType) &&
@@ -3905,16 +3964,34 @@ export class LlEmitter {
       return;
     }
     // Executables test the active exception cell's kind inline (its first
-    // field). Worker programs test the process-wide alert word instead: it
-    // is nonzero while any script thread may have an exception pending in
-    // its active cell or has been asked to stop, so the common case is one
-    // ordinary global load (a thread-local access is a call on Darwin) and
-    // the out-of-line scr_exc_pending answers for this thread, observing
-    // cancellation and reinstalling the termination sentinel.
+    // field). ELF worker executables test the thread's exact pending word,
+    // which is also nonzero once the context must stop, and unwind directly:
+    // no site carries an out-of-line call, so LLVM's inliner sees the check
+    // as two instructions. Other worker programs test the process-wide
+    // alert word: it is nonzero while any script thread may have an
+    // exception pending in its active cell or has been asked to stop, so
+    // the common case is one ordinary global load (a thread-local access is
+    // a call on Darwin) and the out-of-line scr_exc_pending answers for this
+    // thread, observing cancellation and reinstalling the termination
+    // sentinel.
     this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
     let word: string;
-    if (this.mod.workers === true) {
-      this.declare(`@scr_exc_alert = external global i32, align 64`);
+    const exact = this.mod.workers !== true || this.executableTls;
+    if (this.executableTls) {
+      // Termination stays observable where the polls were dropped for it:
+      // polls, tests inside source loops (exc's loop-poll rule relies on
+      // them every iteration) and tail-position tests (a dead ordered load
+      // keeps recursion from becoming a loop without stack growth) use an
+      // ordered load, which LLVM never deletes, hoists or merges. Every
+      // other test is an unordered load: it reads the same word, but LLVM's
+      // memory analyses no longer treat it as a write, so loads around it
+      // stay forwardable after inlining. Same-thread changes only happen in
+      // runtime calls, which clobber memory.
+      word = this.loadExcFlag(!poll && through === undefined && this.loopDepth === 0);
+    } else if (this.mod.workers === true) {
+      // dso_local: executables link the runtime statically, so the word is
+      // addressed directly instead of through the GOT.
+      this.declare(`@scr_exc_alert = external dso_local global i32, align 64`);
       word = B.tmp();
       B.line(`${word} = load atomic i32, ptr @scr_exc_alert monotonic, align 64`);
     } else {
@@ -3942,7 +4019,7 @@ export class LlEmitter {
     B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${hit}, i1 false)`);
     const lu = B.newLabel("exc.u");
     const lk = B.newLabel("exc.k");
-    if (this.mod.workers === true) {
+    if (!exact) {
       this.declare(`declare zeroext i1 @scr_exc_pending()`);
       const slow = B.newLabel("exc.s");
       B.condBr(cold, slow, lk);
@@ -3974,30 +4051,98 @@ export class LlEmitter {
    * throw Node's RangeError and unwind like any other pending exception. */
   private emitStackCheck(): void {
     const B = this.B;
-    const tl = this.mod.workers === true ? "thread_local " : "";
-    this.declare(`@scr_stack_guard = external ${tl}global ptr`);
     this.declare(`declare ptr @llvm.stacksave.p0()`);
     this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
     this.declare(`declare void @scr_stack_overflow()`);
-    const sp = B.tmp();
-    const guard = B.tmp();
-    const low = B.tmp();
-    const cold = B.tmp();
-    B.line(`${sp} = call ptr @llvm.stacksave.p0()`);
-    B.line(`${guard} = load ptr, ptr @scr_stack_guard`);
-    B.line(`${low} = icmp ult ptr ${sp}, ${guard}`);
-    B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${low}, i1 false)`);
     const over = B.newLabel("stack.over");
     const ok = B.newLabel("stack.ok");
-    B.condBr(cold, over, ok);
+    const sp = B.tmp();
+    B.line(`${sp} = call ptr @llvm.stacksave.p0()`);
+    const test = (guard: string): void => {
+      const low = B.tmp();
+      const cold = B.tmp();
+      B.line(`${low} = icmp ult ptr ${sp}, ${guard}`);
+      B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${low}, i1 false)`);
+      B.condBr(cold, over, ok);
+    };
+    if (this.stackGuardTsd !== null) {
+      // A Darwin thread-local access is a call to its TLV thunk: read the
+      // guard from its thread-specific-data slot at the runtime-validated
+      // offset instead, and call out only when the runtime found no slot.
+      this.declare(`@scr_stack_guard_tsd = external dso_local global i64`);
+      this.declare(`declare i64 @scr_stack_guard_get()`);
+      const offset = B.tmp();
+      const direct = B.tmp();
+      const likely = B.tmp();
+      B.line(`${offset} = load i64, ptr @scr_stack_guard_tsd`);
+      B.line(`${direct} = icmp ne i64 ${offset}, 0`);
+      B.line(`${likely} = call i1 @llvm.expect.i1(i1 ${direct}, i1 true)`);
+      const fast = B.newLabel("stack.tsd");
+      const slow = B.newLabel("stack.tlv");
+      B.condBr(likely, fast, slow);
+      B.startBlock(fast);
+      const guard = B.tmp();
+      if (this.stackGuardTsd === "aarch64") {
+        this.declare(`declare i64 @llvm.read_register.i64(metadata)`);
+        const thread = B.tmp();
+        const base = B.tmp();
+        const slot = B.tmp();
+        const address = B.tmp();
+        B.line(`${thread} = call i64 @llvm.read_register.i64(metadata !{!"tpidrro_el0"})`);
+        B.line(`${base} = and i64 ${thread}, -8`);
+        B.line(`${slot} = add i64 ${base}, ${offset}`);
+        B.line(`${address} = inttoptr i64 ${slot} to ptr`);
+        B.line(`${guard} = load ptr, ptr ${address}`);
+      } else {
+        const address = B.tmp();
+        B.line(`${address} = inttoptr i64 ${offset} to ptr addrspace(256)`);
+        B.line(`${guard} = load ptr, ptr addrspace(256) ${address}`);
+      }
+      test(guard);
+      B.startBlock(slow);
+      // uintptr_t scr_stack_guard_get(void): an i64 in the C ABI.
+      const raw = B.tmp();
+      const fallback = B.tmp();
+      B.line(`${raw} = call i64 @scr_stack_guard_get()`);
+      B.line(`${fallback} = inttoptr i64 ${raw} to ptr`);
+      test(fallback);
+    } else {
+      const tl = this.mod.workers === true ? "thread_local " : "";
+      this.declare(`@scr_stack_guard = external ${tl}global ptr`);
+      const guard = B.tmp();
+      B.line(`${guard} = load ptr, ptr @scr_stack_guard`);
+      test(guard);
+    }
     B.startBlock(over);
     B.line(`call void @scr_stack_overflow()`);
     this.emitUnwind();
     B.startBlock(ok);
   }
 
-  private workerLoopBudget(): string | null {
+  /** Whether the emitter follows this call with a pending test (the
+   * conditions in expr-calls.ts). */
+  private callTestsPending(e: IrExpr): boolean {
+    switch (e.kind) {
+      case "call":
+        return this.mayThrow.has(e.callee);
+      case "new":
+        return this.mayThrow.has(`%${e.className}.constructor`);
+      case "virtualCall":
+        return this.mayThrowMethods.has(e.method);
+      case "callValue":
+        return this.indirectMayThrow;
+      default:
+        return false;
+    }
+  }
+
+  private workerLoopBudget(
+    loop: Extract<IrStmt, { kind: "while" | "doWhile" | "for" | "forOf" }>,
+  ): string | null {
     if (!this.mod.workers) return null;
+    // A loop that runs a pending test on every iteration observes a
+    // terminate request through it; a separate poll would only add work.
+    if (loopTestsEveryIteration(loop, (e) => this.callTestsPending(e))) return null;
     const slot = this.B.slot();
     this.B.entryAllocas.push(`${slot} = alloca i32 ; worker cancellation budget`);
     this.B.line(`store i32 0, ptr ${slot}`);
@@ -4022,7 +4167,7 @@ export class LlEmitter {
     // Calls and throwing operations retain their own checks. Amortize the
     // extra cancellation poll across bounded loop batches so scalar work
     // does not cross the runtime ABI on every iteration.
-    this.emitPendingCheck();
+    this.emitPendingCheck(undefined, true);
     B.br(next);
     B.startBlock(next);
   }
@@ -4994,12 +5139,14 @@ export class LlEmitter {
       this.callLifetimes,
       this.optionalArrayReads,
       this.loopArrayBorrows,
+      this.debug === null ? this.referenceEffects : undefined,
     );
     this.callArrayReads = findCallArrayReads(
       fn,
       this.optionalArrayReads,
       this.referenceEffects.functions,
       this.callLifetimes,
+      this.debug === null ? this.referenceEffects : undefined,
     );
     this.scalarStringSlices =
       this.debug === null ? findScalarStringSlices(fn, this.callLifetimes) : new Map();
@@ -5018,6 +5165,7 @@ export class LlEmitter {
     this.chainSlots.clear();
     this.finallyStack = [];
     this.tryStack = [];
+    this.loopDepth = 0;
     this.currentReturnType = fn.returnType;
     this.currentGenerator = fn.generator ?? null;
     this.currentBorrowedReturn = this.borrowedReturns.has(fn.name);
@@ -5186,7 +5334,7 @@ export class LlEmitter {
       B.returnEpilogue = `call void @scr_stack_leave(ptr %source_frame)`;
     }
     if (this.stackChecks?.has(fn.name)) this.emitStackCheck();
-    if (this.workerEntryPolls?.has(fn.name)) this.emitPendingCheck();
+    if (this.workerEntryPolls?.has(fn.name)) this.emitPendingCheck(undefined, true);
     this.emitStmts(fn.body);
     // Implicit exit of a void function: release the function scope unless
     // the body already terminated its final block (return, or a throw
@@ -5403,10 +5551,14 @@ export class LlEmitter {
   emitStmt(s: IrStmt): void {
     const previous = this.B.debugLocation;
     this.B.debugLocation = this.debug?.location(s.loc, this.debugScope) ?? null;
+    const loop =
+      s.kind === "while" || s.kind === "doWhile" || s.kind === "for" || s.kind === "forOf";
+    if (loop) this.loopDepth++;
     try {
       this.emitStmtBody(s);
     } finally {
       this.B.debugLocation = previous;
+      if (loop) this.loopDepth--;
     }
   }
 
@@ -5968,7 +6120,7 @@ export class LlEmitter {
         break;
       }
       case "while": {
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         const lc = B.newLabel("loop.c");
         const lb = B.newLabel("loop.b");
         const le = B.newLabel("loop.e");
@@ -5993,7 +6145,7 @@ export class LlEmitter {
         break;
       }
       case "doWhile": {
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         // Body first (runs at least once); continue jumps to the CONDITION.
         const lb = B.newLabel("loop.b");
         const lc = B.newLabel("loop.c");
@@ -6197,7 +6349,7 @@ export class LlEmitter {
         };
         const lu = s.update || capturedLets.length > 0 ? B.newLabel("loop.u") : lc;
         freshenBindings();
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         B.br(lc);
         B.startBlock(lc);
         this.emitWorkerLoopCheck(workerBudget);
@@ -6300,7 +6452,7 @@ export class LlEmitter {
         const lb = B.newLabel("fof.b");
         const lu = B.newLabel("fof.u");
         const le = B.newLabel("fof.e");
-        const workerBudget = this.workerLoopBudget();
+        const workerBudget = this.workerLoopBudget(s);
         B.br(lc);
         B.startBlock(lc);
         this.emitWorkerLoopCheck(workerBudget);

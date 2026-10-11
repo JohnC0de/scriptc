@@ -25,6 +25,9 @@ import { isSafeToDiscard } from "./expressions/evaluation-safety.js";
 import { defaultAfterUndefined, lowerStaticallyUndefinedArgument } from "./optional-arguments.js";
 import { checkedIterableSpread } from "./checked-iterable-spread.js";
 import { type ParamShape } from "./call-signatures.js";
+import { arrayValueRead, arrayValueType } from "./array-values.js";
+import { buildArrayConversion } from "./coercions/builders.js";
+import { typeKey } from "../type-mapper.js";
 
 function fixedTupleSpreadInfo(
   lowerer: Lowerer,
@@ -63,11 +66,25 @@ export function completeArgs(
 ): IrExpr[] {
   // Conversion eligibility can traverse the whole recursive parameter
   // graph. Ordinary calls and fixed tuples never need that analysis.
+  const runtimeSpreads = argNodes.filter(
+    (arg): arg is ts.SpreadElement =>
+      ts.isSpreadElement(arg) && !fixedTupleSpreadInfo(lowerer, arg.expression),
+  );
+  // Spread operands lowered while choosing the completion, each exactly once.
+  const loweredSpreads = new Map<ts.Expression, IrExpr>();
+  const lowerSpread = (arg: ts.SpreadElement): IrExpr =>
+    loweredSpreads.get(arg) ?? lowerer.lowerExpr(arg.expression);
   if (
-    argNodes.some(
-      (arg) => ts.isSpreadElement(arg) && !fixedTupleSpreadInfo(lowerer, arg.expression),
-    ) &&
-    canCompleteRuntimeSpread(lowerer, shapes)
+    runtimeSpreads.length > 0 &&
+    canCompleteRuntimeSpread(lowerer, shapes) &&
+    !spreadsFillTypedRest(
+      lowerer,
+      shapes,
+      argNodes,
+      leading?.length ?? 0,
+      runtimeSpreads,
+      loweredSpreads,
+    )
   ) {
     // Runtime-length spreads determine the complete argument list before
     // any parameter default runs. Build it once in source order, then
@@ -96,7 +113,7 @@ export function completeArgs(
         push(lowerer.lowerExprExpecting(arg, DYN), "dyn.packPush");
         return;
       }
-      let value = lowerer.lowerExpr(arg.expression);
+      let value = lowerSpread(arg);
       if (value.type.kind === "set") {
         value = {
           kind: "setIntrinsic",
@@ -390,7 +407,11 @@ export function completeArgs(
     const elems = sources.slice(restAt).map((a, i) => {
       if (isIr(a)) return lowerer.coerceInto(blame, a.ir, restType.elem);
       if (ts.isSpreadElement(a)) {
-        let src = lowerer.lowerExpr(a.expression);
+        let src = lowerSpread(a);
+        // A `T[]` into a `(T | undefined)[]` rest: read every element as JS
+        // does, holes and present undefined as undefined.
+        const lift = holeReadingLift(lowerer, src.type, restType, loc);
+        if (lift) src = { kind: "call", callee: lift, args: [src], type: restType, loc: src.loc };
         // A same-element Set spread drains first (setIntrinsic toArray).
         if (src.type.kind === "set" && typeEquals(src.type.elem, restType.elem)) {
           src = {
@@ -686,6 +707,102 @@ export function spreadNeedsRuntimeArity(
     position++;
   }
   return false;
+}
+
+/** True when every runtime-length spread only fills a typed rest with its
+ * own array type, or a `T[]` into an argument-widened `(T | undefined)[]`
+ * rest. The static completion then builds one fresh rest array and converts
+ * no argument to a checked-dynamic value: boxing an instance would give its
+ * class (and, through the generated property helpers, the classes it
+ * references) a hidden property bag. Lowers the spread operands it checks
+ * into `lowered`, so each is lowered exactly once. */
+function spreadsFillTypedRest(
+  lowerer: Lowerer,
+  shapes: readonly ParamShape[],
+  argNodes: readonly ts.Expression[],
+  leading: number,
+  runtimeSpreads: readonly ts.SpreadElement[],
+  lowered: Map<ts.Expression, IrExpr>,
+): boolean {
+  const restAt = typedRestAfterSpreads(lowerer, shapes, argNodes, leading);
+  const restType = restAt >= 0 ? shapes[restAt]!.type : null;
+  if (restType?.kind !== "array") return false;
+  for (const arg of runtimeSpreads) lowered.set(arg, lowerer.lowerExpr(arg.expression));
+  return runtimeSpreads.every((arg) => {
+    const type = lowered.get(arg)!.type;
+    return typeEquals(type, restType) || canReadHolesInto(lowerer, type, restType);
+  });
+}
+
+/** The index of the typed `rest` parameter when every runtime-length spread
+ * lands in it (after the fixed positions), else -1. */
+function typedRestAfterSpreads(
+  lowerer: Lowerer,
+  shapes: readonly ParamShape[],
+  argNodes: readonly ts.Expression[],
+  leading: number,
+): number {
+  const restAt = shapes.findIndex((s) => s.mode !== "required" && s.mode !== "omittable");
+  if (restAt < 0 || shapes[restAt]!.mode !== "rest") return -1;
+  let position = leading;
+  for (const arg of argNodes) {
+    if (ts.isSpreadElement(arg)) {
+      const tuple = fixedTupleSpreadInfo(lowerer, arg.expression);
+      if (tuple) {
+        position += tuple.fields.length;
+        continue;
+      }
+      if (position < restAt) return -1;
+    }
+    position++;
+  }
+  return restAt;
+}
+
+/** A `T[]` spread into a `(T | undefined)[]` rest, `T | undefined` being
+ * exactly what a JS read of a `T[]` element yields. */
+function canReadHolesInto(lowerer: Lowerer, from: IrType, to: IrType): boolean {
+  if (from.kind !== "array" || to.kind !== "array" || typeEquals(from, to)) return false;
+  const elem = from.elem;
+  if (elem.kind === "dyn" || elem.kind === "jsval") return false;
+  return typeEquals(arrayValueType(lowerer, elem), to.elem);
+}
+
+/** The interned `%arr.holes.<n>` copy for canReadHolesInto pairs: spread
+ * iteration reads holes and present undefined as undefined. Null for any
+ * other pair. */
+function holeReadingLift(lowerer: Lowerer, from: IrType, to: IrType, loc: SrcLoc): string | null {
+  if (from.kind !== "array" || !canReadHolesInto(lowerer, from, to)) return null;
+  const elem = from.elem;
+  const key = `arr.holes:${typeKey(elem)}`;
+  const existing = lowerer.valueHelpers.get(key);
+  if (existing) return existing;
+  const name = `%arr.holes.${lowerer.valueHelpers.size}`;
+  lowerer.valueHelpers.set(key, name);
+  lowerer.liftedFns.push(
+    buildArrayConversion(
+      name,
+      from,
+      { kind: "arrayLit", elems: [], type: to, loc },
+      (element, index, result) => ({
+        kind: "arrIntrinsic",
+        method: "push",
+        receiver: result,
+        args: [arrayValueRead(lowerer, sourceArray(element), index, elem, loc)],
+        type: F64,
+        loc,
+      }),
+      loc,
+    ),
+  );
+  return name;
+}
+
+/** The array a buildArrayConversion element read indexes. */
+function sourceArray(element: IrExpr): IrExpr {
+  if (element.kind !== "arrayGet")
+    throw new InternalCompilerError("array conversion element is not an array read");
+  return element.arr;
 }
 
 function canCompleteRuntimeSpread(lowerer: Lowerer, shapes: readonly ParamShape[]): boolean {
