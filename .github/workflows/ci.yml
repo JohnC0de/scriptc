@@ -314,8 +314,24 @@ jobs:
           path: ${{ runner.temp }}
       - name: Restore bootstrap seed
         run: tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/bootstrap-seed.tar"
+      # The sanitized emitter peaks near 13 GB while it emits the compiler,
+      # then clang compiles the 348 MB module under AddressSanitizer. Together
+      # they exceed the runner's 16 GB of memory, so back them with swap.
+      - name: Enlarge swap for the sanitized emitter
+        if: matrix.phase == 'rebuild-emit'
+        run: |
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 24G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
       - name: Native bootstrap and package installation checks
-        run: node scripts/ci-native-bootstrap.mjs
+        # The instrumented emitter's recursion can exceed the default 8 MiB stack.
+        run: |
+          if [ "$SCRIPTC_BOOTSTRAP_PHASE" = rebuild-emit ]; then ulimit -s unlimited; fi
+          node scripts/ci-native-bootstrap.mjs
         env:
           SCRIPTC_BOOTSTRAP_SEED_DIRECTORY: ${{ runner.temp }}/native-bootstrap
           SCRIPTC_BOOTSTRAP_PACKAGE_DIR: ${{ runner.temp }}/native-cli-package
