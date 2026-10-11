@@ -1044,7 +1044,27 @@ export function lowerToIr(
   if (divergences.length > 0) result = { ...result, divergences };
   // Contract types (@scriptc/types): written annotations, checked against
   // the IR by the compile pipeline (contracts/check.ts).
-  const contracts = collectContractAnnotations(program.getTypeChecker(), moduleOrder);
+  // Acyclic object types name the IR unit the program lowered them to; a
+  // type the module never uses has no unit (mapping it now only touches the
+  // lowerer's tables, never the finished module).
+  const lowered = result.module;
+  const contracts = collectContractAnnotations(program.getTypeChecker(), moduleOrder, (type) => {
+    if (lowered === null) return null;
+    const mapped = panicSafe(() => resultLowerer.mapTypeOf(type), null);
+    if (mapped?.kind === "object")
+      return lowered.classes?.some((c) => c.name === mapped.className)
+        ? `object:${mapped.className}`
+        : null;
+    if (mapped?.kind === "record")
+      return lowered.records?.some((r) => r.id === mapped.shapeId)
+        ? `record:${mapped.shapeId}`
+        : null;
+    if (mapped?.kind === "union")
+      return lowered.unions?.some((u) => u.id === mapped.unionId)
+        ? `union:${mapped.unionId}`
+        : null;
+    return null;
+  });
   timing("contract-annotations", { found: contracts.count });
   if (contracts.diagnostics.length > 0)
     result = {

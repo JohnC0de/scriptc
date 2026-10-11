@@ -11789,6 +11789,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/contract-acyclic-positions.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-acyclic-positions.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-acyclic.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-acyclic.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/create-require.ts": {
    "order": [
     "<repo>/tests/diagnostics/create-require.ts"
@@ -15875,6 +15887,12 @@
   "<repo>/tests/corpus/4632-contract-immutable.ts": {
    "order": [
     "<repo>/tests/corpus/4632-contract-immutable.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4642-acyclic-contract.ts": {
+   "order": [
+    "<repo>/tests/corpus/4642-acyclic-contract.ts"
    ],
    "diags": []
   },

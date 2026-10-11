@@ -10,6 +10,9 @@
  *   proven by the same integer range analysis the int32 storage uses,
  *   assuming every Int32 slot holds an int32 (sound by induction: every
  *   write is checked under that assumption).
+ * - Acyclic: the class or object type cannot lie on a reference cycle, by
+ *   the cycle analysis that decides tracing (backend/cycle-analysis.ts), or
+ *   the diagnostic shows the cycle.
  * - Immutable<T>: no mutation can reach a value that may come from an
  *   Immutable slot, values stored into Immutable slots are fresh (nothing
  *   else references them), and such values never escape to code the IR
@@ -40,6 +43,13 @@ import {
 import { findInitializerBindings, withInitializerBindings } from "../ir/initializer-bindings.js";
 import { dynamicallyStoredFamilies, functionCallFacts, Int32Slots } from "../ir/int32-slots.js";
 import { computeMayThrow, type MayThrowReason } from "../backend/may-throw.js";
+import {
+  computeTraced,
+  explainCycle,
+  type CycleEdgeLabel,
+  type CycleExplanation,
+  type CycleStep,
+} from "../backend/cycle-analysis.js";
 import { SourceLocations } from "../backend/source-locations.js";
 import {
   contractLocKey,
@@ -229,6 +239,7 @@ class ContractChecker {
 
   run(): ContractCheckResult {
     this.checkNoThrow();
+    this.checkAcyclic();
     const int32 = new Int32Contracts(this);
     int32.run();
     const immutable = new ImmutableContracts(this);
@@ -243,6 +254,192 @@ class ContractChecker {
     if (list.length === 0) return;
     this.contracts[field] = list;
     this.recorded = true;
+  }
+
+  /* ── Acyclic ── */
+
+  private checkAcyclic(): void {
+    if (this.notes.acyclic.length === 0) return;
+    const traced = computeTraced(this.mod);
+    const proven: string[] = [];
+    // Object types are structural in the IR: name a record by the
+    // interface or alias that declared it Acyclic.
+    for (const { note, unit } of this.notes.acyclic)
+      if (unit != null && unit.startsWith("record:")) this.unitNames.set(unit, note.name);
+    for (const { note, classKey, unit } of this.notes.acyclic) {
+      // A class may lower to several IR classes (generic instantiations);
+      // an unused type has no unit and no values, so it holds trivially.
+      const units =
+        classKey !== undefined
+          ? this.classesAt(classKey).map((cls) => `object:${cls.name}`)
+          : unit != null
+            ? [unit]
+            : [];
+      for (const key of units) {
+        const isTraced = key.startsWith("union:")
+          ? traced.unions.has(key.slice("union:".length))
+          : traced.shapes.has(key);
+        if (!isTraced) {
+          proven.push(key);
+          continue;
+        }
+        const why = explainCycle(this.mod, key);
+        this.report(
+          "SC7007",
+          note.loc,
+          `'${note.name}' is declared Acyclic but can lie on a reference cycle: ${why ? this.cycleText(key, why) : "the cycle analysis traces it"}`,
+          why ? this.cycleHint(why) : "remove Acyclic",
+        );
+        break;
+      }
+    }
+    this.record("acyclic", proven);
+  }
+
+  private readonly unitNames = new Map<string, string>();
+
+  /** A unit key's spelling: a class name, a record's declared name or
+   * `{ a, b }`, the arms of a union. */
+  unitText(key: string): string {
+    const named = this.unitNames.get(key);
+    if (named !== undefined) return named;
+    const colon = key.indexOf(":");
+    const kind = key.slice(0, colon),
+      id = key.slice(colon + 1);
+    if (kind === "object" || kind === "subtree")
+      return this.typeText({ kind: "object", className: id });
+    if (kind === "union") return this.typeText({ kind: "union", unionId: id });
+    const record = this.mod.records?.find((r) => r.id === id);
+    return record ? `{ ${record.fields.map((f) => f.name).join(", ")} }` : "an object";
+  }
+
+  private fieldText(field: string): string {
+    if (field === "%dynProperties") return "(dynamic properties)";
+    if (field === "<listeners>") return "(event listeners)";
+    if (field === "<class>") return "(class object)";
+    if (field === "<overflow>") return "[key]";
+    return field;
+  }
+
+  /** The path as `A.f → B.g → A`, folding union and subclass hops into the
+   * field that reaches them. */
+  private stepsText(steps: readonly CycleStep[], end: string): string {
+    const parts: string[] = [];
+    // A slot of class type C holding a subclass D reads `D (as a C)`.
+    let asBase: string | null = null;
+    const unit = (key: string): string => {
+      const text = this.unitText(key);
+      const suffix = asBase !== null && asBase !== text ? ` (as a ${asBase})` : "";
+      asBase = null;
+      return `${text}${suffix}`;
+    };
+    for (const step of steps) {
+      if (step.label.kind === "subclass") {
+        asBase ??= this.unitText(step.from);
+        continue;
+      }
+      if (step.label.kind === "field")
+        parts.push(`${unit(step.from)}.${this.fieldText(step.label.field)}`);
+    }
+    parts.push(unit(end));
+    return parts.join(" → ");
+  }
+
+  private cycleText(key: string, why: CycleExplanation): string {
+    switch (why.kind) {
+      case "hierarchy":
+        return `its subclass '${this.unitText(why.member)}' shares its object layout, and ${this.cycleText(why.member, why.because)}`;
+      case "intrinsic": {
+        const holds =
+          why.holds === "func"
+            ? "a function"
+            : why.holds === "dyn"
+              ? "a dynamic value"
+              : why.holds === "caught"
+                ? "a caught exception"
+                : why.holds === "promise"
+                  ? "a promise"
+                  : "a class object";
+        const field =
+          why.field === "%dynProperties"
+            ? `${this.unitText(why.owner)} instances reach dynamic code, whose properties`
+            : why.field === ""
+              ? this.unitText(why.owner)
+              : `${this.unitText(why.owner)}.${this.fieldText(why.field)}`;
+        const path = why.steps.length > 0 ? `${this.stepsText(why.steps, why.owner)}, and ` : "";
+        return `${path}${field} can hold ${holds}, which can reference any object, including a ${this.unitText(key)}`;
+      }
+      case "cycle": {
+        const mutable = why.steps.find(
+          (s): s is CycleStep & { label: CycleEdgeLabel & { kind: "field" } } =>
+            s.label.kind === "field" && (s.label.mutable || s.label.via !== undefined),
+        );
+        let reason = "";
+        if (mutable) {
+          const where = `${this.unitText(mutable.from)}.${this.fieldText(mutable.label.field)}`;
+          if (mutable.label.via !== undefined)
+            reason = ` (${where} is ${mutable.label.via === "array" ? "an array" : `a ${mutable.label.via === "map" ? "Map" : "Set"}`}, whose contents can change)`;
+          else {
+            const write = this.writeOutsideConstructor(mutable.from, mutable.label.field);
+            reason = ` (${where} can be assigned after construction${write !== null ? `, as at ${this.where(write)}` : ""})`;
+          }
+        }
+        return `${this.stepsText(why.steps, key)}${reason}`;
+      }
+    }
+  }
+
+  private cycleHint(why: CycleExplanation): string {
+    const inner = why.kind === "hierarchy" ? why.because : why;
+    if (inner.kind === "intrinsic")
+      return "a function, dynamic or promise field can capture the object itself; store plain data instead, or remove Acyclic";
+    if (
+      inner.kind === "cycle" &&
+      !inner.steps.some(
+        (s) => s.label.kind === "field" && s.label.mutable && s.label.via === undefined,
+      )
+    )
+      return "an array, Map or Set can come to hold an object that refers back; make the element type unable to reach this type, or remove Acyclic";
+    return "assign the reference only in the constructor (before `this` escapes), so a new object can only point to older ones, or remove Acyclic";
+  }
+
+  /** The first store into the field outside its own class's constructors. */
+  private writeOutsideConstructor(unit: string, field: string): SrcLoc | null {
+    const colon = unit.indexOf(":");
+    const kind = unit.slice(0, colon),
+      id = unit.slice(colon + 1);
+    let found: SrcLoc | null = null;
+    for (const fn of this.mod.functions) {
+      if (found !== null) break;
+      const ctor = /^%(.*)\.constructor$/.exec(fn.name)?.[1];
+      const self = ctor !== undefined ? fn.params[0]?.localId : undefined;
+      walk(fn.body, {
+        stmt: (s) => {
+          if (found !== null) return;
+          if (kind === "record" && s.kind === "recordSet" && s.shapeId === id && s.field === field)
+            found = s.loc;
+          else if (
+            kind !== "record" &&
+            s.kind === "fieldSet" &&
+            s.field === field &&
+            this.sameHierarchy(s.className, id) &&
+            !(self !== undefined && s.obj.kind === "varRef" && s.obj.localId === self)
+          )
+            found = s.loc;
+        },
+      });
+    }
+    return found;
+  }
+
+  private sameHierarchy(a: string, b: string): boolean {
+    const root = (name: string): string => {
+      let cur = name;
+      for (let cls = this.classes.get(cur); cls?.base !== undefined; cls = this.classes.get(cur))
+        cur = cls.base;
+      return cur;
+    };
+    return root(a) === root(b);
   }
 
   /* ── NoThrow ── */

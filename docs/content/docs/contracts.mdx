@@ -28,6 +28,11 @@ Contract types are type aliases that mean nothing to TypeScript or Node.js but a
       <td>No code writes to the value, through any reference.</td>
       <td>A module constant built from literals becomes immortal data: never reference counted, never traced by the collector.</td>
     </tr>
+    <tr>
+      <td><code>Acyclic</code></td>
+      <td>No chain of references leads from an object of the class or type back to itself.</td>
+      <td>Its objects carry no cycle-collector header and are freed by reference counting alone.</td>
+    </tr>
   </tbody>
 </table>
 
@@ -110,6 +115,8 @@ scriptc recognizes a contract where it is written as the annotation of a declara
   <dd>Parameters, variables, class instance fields and function results whose type is a plain <code>number</code>.</dd>
   <dt><code>Immutable&lt;T&gt;</code></dt>
   <dd>Parameters, variables, class instance fields and function results.</dd>
+  <dt><code>Acyclic</code></dt>
+  <dd>Classes (<code>class C implements Acyclic</code>), interfaces (<code>interface I extends Acyclic</code>) and object type aliases (<code>type T = Acyclic&lt;&#123; ... &#125;&gt;</code>).</dd>
 </dl>
 
 A contract anywhere else (a type alias, an interface member, an element or type argument such as `Int32[]`, a function type) would promise something scriptc does not check, so the build reports it with SC7006.
@@ -143,6 +150,77 @@ scriptc refuses an `Int32` slot whose writes it cannot all see (SC7003): a param
 - a value stored into an `Immutable` slot that another reference can still change.
 
 A value stored into an `Immutable` slot must be fresh: a literal, a `new` expression whose constructor keeps `this` to itself, or a function that returns what it builds. Values that reach dynamic code, or functions scriptc cannot see, are refused.
+
+## Acyclic
+
+scriptc frees objects by reference counting and finds unreachable reference cycles with a cycle collector. Objects of a type that can never lie on a cycle need neither the collector's object header nor its bookkeeping. scriptc already proves this for many types; `Acyclic` turns the proof into a guarantee and shows the cycle when it does not hold.
+
+A reference can close a cycle when it is stored after its object was constructed (a later write can point an older object at a newer one), when it sits in an array, `Map` or `Set` (whose contents change), or when a field holds a function, a promise or a dynamic value (which can reference anything). Scalar fields never matter. A subclass shares its base class's object layout, so a class hierarchy is acyclic only as a whole.
+
+```ts:tree.ts
+import type { Acyclic } from "@scriptc/types";
+
+class Tree implements Acyclic {
+  readonly left: Tree | null;
+  readonly right: Tree | null;
+  constructor(left: Tree | null, right: Tree | null) {
+    this.left = left;
+    this.right = right;
+  }
+  count(): number {
+    return 1 + (this.left?.count() ?? 0) + (this.right?.count() ?? 0);
+  }
+}
+
+function build(depth: number): Tree {
+  return depth === 0 ? new Tree(null, null) : new Tree(build(depth - 1), build(depth - 1));
+}
+
+console.log(build(20).count());
+```
+
+```console
+$ node tree.ts
+2097151
+$ scriptc build tree.ts -o tree >/dev/null
+$ ./tree
+2097151
+```
+
+When a cycle can form, the diagnostic shows its path:
+
+```ts:graph.ts
+import type { Acyclic } from "@scriptc/types";
+
+class Graph implements Acyclic {
+  readonly nodes: GraphNode[] = [];
+}
+
+class GraphNode {
+  readonly graph: Graph;
+  constructor(graph: Graph) {
+    this.graph = graph;
+  }
+}
+
+const graph = new Graph();
+graph.nodes.push(new GraphNode(graph));
+console.log(graph.nodes.length);
+```
+
+```console
+$ scriptc build graph.ts
+/tmp/app/graph.ts:3:24 - error SC7007: 'Graph' is declared Acyclic but can lie on a reference cycle: Graph.nodes → GraphNode.graph → Graph (Graph.nodes is an array, whose contents can change)
+
+  2 | 
+  3 | class Graph implements Acyclic {
+    |                        ^~~~~~~
+  4 |   readonly nodes: GraphNode[] = [];
+
+  hint: an array, Map or Set can come to hold an object that refers back; make the element type unable to reach this type, or remove Acyclic
+
+1 error.
+```
 
 ## Diagnostics
 
@@ -237,6 +315,10 @@ $ scriptc build reject.ts
     <tr>
       <td>SC7006</td>
       <td>A contract is written where scriptc does not check it.</td>
+    </tr>
+    <tr>
+      <td>SC7007</td>
+      <td>An <code>Acyclic</code> class or type can lie on a reference cycle; the message shows the cycle.</td>
     </tr>
   </tbody>
 </table>

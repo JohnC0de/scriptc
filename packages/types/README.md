@@ -21,5 +21,6 @@ function isLetter(ch: number): NoThrow<boolean> {
 - `NoThrow<T>` on a function's return type: the function never throws. Callers need no exception checks.
 - `Int32` on a parameter, variable, class instance field or function result: every stored value is a signed 32-bit integer by construction (an integer literal in range, a bitwise result such as `x | 0`, `Math.imul`, another `Int32`, or arithmetic scriptc can bound). The slot is stored as a 32-bit integer.
 - `Immutable<T>` on a parameter, variable, class instance field or function result: a deep read-only view, and no code writes to the value through any reference. A module constant built from literals becomes immortal data.
+- `Acyclic` on a class (`class C implements Acyclic`), interface (`interface I extends Acyclic`) or object type alias (`type T = Acyclic<{ ... }>`): no chain of references can lead from such an object back to itself. Its objects carry no cycle-collector header.
 
-scriptc proves each contract or rejects the program with a diagnostic (SC7001-SC7006) that explains why it does not hold. A program that compiles behaves exactly as under Node.js. See https://scriptc.dev/docs/contracts.
+scriptc proves each contract or rejects the program with a diagnostic (SC7001-SC7007) that explains why it does not hold. A program that compiles behaves exactly as under Node.js. See https://scriptc.dev/docs/contracts.
