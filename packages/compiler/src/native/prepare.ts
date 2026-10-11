@@ -25,15 +25,18 @@ import { provenanceSources } from "../frontend/provenance-registry.js";
 import { prepareLibrary } from "../library/prepare.js";
 import type { LibraryProfile } from "../library/library-profile.js";
 import type { IrModule } from "../ir/ir.js";
-import { deserializeModule, serializeModule } from "../ir/serialize.js";
-import { contentDigest, type NativeCache } from "./cache.js";
+import { deserializeModuleBytes, serializeModuleParts } from "../ir/serialize.js";
+import { contentDigest, NATIVE_STRING_BYTES, type NativeCache } from "./cache.js";
+import { batchTextParts } from "./text-file.js";
 import type { NativeToolchain } from "./toolchain.js";
 import { nativeFileIdentity } from "./file-identity.js";
 
 export interface NativeExecutableInput {
   ok: true;
   llvm: string;
-  ir: string | null;
+  /** Compact serialized IR as bounded parts (`batchTextParts`): compiler-scale
+   * modules exceed one native string. */
+  ir: string[] | null;
   sidecarJson: string | null;
   features: NativeLinkFeatures;
   sources: [string, string][];
@@ -42,10 +45,62 @@ export interface NativeExecutableInput {
   warnings?: ScrDiagnostic[];
 }
 
+/** The two large artifacts follow the input metadata as separate members so
+ * an entry can be written as parts instead of one JSON string; the stored
+ * input carries empty placeholders (`""`, `null`) for them. */
 interface FrontendCacheEntry {
-  schema: "scriptc.native-frontend.v2";
+  schema: "scriptc.native-frontend.v3";
   probes: FrontendInputSnapshot;
   input: NativeExecutableInput;
+  llvm: string;
+  ir: string[] | null;
+}
+
+function frontendCacheParts(probes: FrontendInputSnapshot, input: NativeExecutableInput): string[] {
+  const metadata = JSON.stringify({
+    schema: "scriptc.native-frontend.v3",
+    probes,
+    input: { ...input, llvm: "", ir: null },
+  });
+  const parts = [metadata.slice(0, metadata.length - 1) + ',"llvm":', JSON.stringify(input.llvm)];
+  if (input.ir === null) parts.push(',"ir":null}');
+  else {
+    parts.push(',"ir":[');
+    for (let index = 0; index < input.ir.length; index++) {
+      if (index > 0) parts.push(",");
+      parts.push(JSON.stringify(input.ir[index]!));
+    }
+    parts.push("]}");
+  }
+  return parts;
+}
+
+/** Publish an entry only when a native reader can decode it as one string;
+ * UTF-16 length never exceeds the UTF-8 byte length. */
+function publishFrontendCache(
+  cache: NativeCache,
+  key: string,
+  probes: FrontendInputSnapshot,
+  input: NativeExecutableInput,
+): void {
+  const parts = frontendCacheParts(probes, input);
+  let length = 0;
+  for (const part of parts) length += part.length;
+  if (length <= NATIVE_STRING_BYTES) cache.writeParts("frontend", key, parts);
+}
+
+function readFrontendCache(
+  cache: NativeCache,
+  key: string,
+  exclusions: FrontendInputExclusions,
+): NativeExecutableInput | null {
+  // The entry is decoded as one string; larger entries are misses.
+  const bytes = cache.read("frontend", key, NATIVE_STRING_BYTES);
+  if (bytes === null) return null;
+  const cached: unknown = JSON.parse(bytes.toString("utf8"));
+  if (!validCachedInput(cached) || !frontendInputsStillMatch(cached.probes, exclusions))
+    return null;
+  return { ...cached.input, llvm: cached.llvm, ir: cached.ir };
 }
 
 function implementationIdentity(toolchain: NativeToolchain): string {
@@ -106,7 +161,7 @@ function validCachedInput(value: unknown): value is FrontendCacheEntry {
   const entry = value as Partial<FrontendCacheEntry>;
   const input = entry.input;
   if (
-    entry.schema !== "scriptc.native-frontend.v2" ||
+    entry.schema !== "scriptc.native-frontend.v3" ||
     !validFrontendInputSnapshot(entry.probes) ||
     input === undefined ||
     input === null ||
@@ -115,8 +170,9 @@ function validCachedInput(value: unknown): value is FrontendCacheEntry {
     return false;
   return (
     input.ok === true &&
-    typeof input.llvm === "string" &&
-    (input.ir === null || typeof input.ir === "string") &&
+    typeof entry.llvm === "string" &&
+    (entry.ir === null ||
+      (Array.isArray(entry.ir) && entry.ir.every((part) => typeof part === "string"))) &&
     (input.sidecarJson === null || typeof input.sidecarJson === "string") &&
     validFeatures(input.features) &&
     Array.isArray(input.sources) &&
@@ -144,7 +200,7 @@ function preparedFromIr(
 ): { ok: true; mod: IrModule; sourceTexts: Map<string, string>; warnings: ScrDiagnostic[] } {
   if ((options.outputKind ?? "exe") !== "exe" || options.strip !== true)
     throw new Error(`${BOOTSTRAP_IR_INPUT} requires a stripped executable build`);
-  const mod = deserializeModule(readFileSync(path, "utf8"));
+  const mod = deserializeModuleBytes(readFileSync(path));
   if (resolve(mod.sourceFile) !== resolve(entry))
     throw new Error(`${BOOTSTRAP_IR_INPUT} was lowered from a different entry`);
   return { ok: true, mod, sourceTexts: new Map(), warnings: [] };
@@ -194,14 +250,10 @@ export function prepareNativeExecutable(
             .sort(([a], [b]) => a.localeCompare(b)),
         }),
       );
-      const bytes = cache.read("frontend", key);
-      if (bytes !== null) {
-        const cached: unknown = JSON.parse(bytes.toString("utf8"));
-        if (validCachedInput(cached) && frontendInputsStillMatch(cached.probes, exclusions)) {
-          const input: NativeExecutableInput = cached.input;
-          timing("frontend-cache-hit");
-          return input;
-        }
+      const input = readFrontendCache(cache, key, exclusions);
+      if (input !== null) {
+        timing("frontend-cache-hit");
+        return input;
       }
     } catch {
       key = null;
@@ -217,7 +269,10 @@ export function prepareNativeExecutable(
         );
   if (!prepared.ok) return prepared;
   if (irInput !== "") timing("ir-input");
-  const ir = outputKind === "ir" || options.emitIr ? serializeModule(prepared.mod, true) : null;
+  const ir =
+    outputKind === "ir" || options.emitIr
+      ? batchTextParts(serializeModuleParts(prepared.mod))
+      : null;
   timing("ir-serialize");
   const llvm =
     outputKind === "ir"
@@ -251,8 +306,7 @@ export function prepareNativeExecutable(
     probes.stable &&
     frontendInputsStillMatch(probes, exclusions)
   ) {
-    const saved: FrontendCacheEntry = { schema: "scriptc.native-frontend.v2", probes, input };
-    cache.write("frontend", key, JSON.stringify(saved));
+    publishFrontendCache(cache, key, probes, input);
   }
   timing("frontend-cache-publish");
   return input;
@@ -307,14 +361,10 @@ export function prepareNativeLibrary(
             .sort(([a], [b]) => a.localeCompare(b)),
         }),
       );
-      const bytes = cache.read("frontend", key);
-      if (bytes !== null) {
-        const cached: unknown = JSON.parse(bytes.toString("utf8"));
-        if (validCachedInput(cached) && frontendInputsStillMatch(cached.probes, exclusions)) {
-          const input: NativeExecutableInput = cached.input;
-          timing("frontend-cache-hit");
-          return input;
-        }
+      const input = readFrontendCache(cache, key, exclusions);
+      if (input !== null) {
+        timing("frontend-cache-hit");
+        return input;
       }
     } catch {
       key = null;
@@ -350,7 +400,7 @@ export function prepareNativeLibrary(
   const input: NativeExecutableInput = {
     ok: true,
     llvm,
-    ir: options.emitIr ? serializeModule(prepared.mod, true) : null,
+    ir: options.emitIr ? batchTextParts(serializeModuleParts(prepared.mod)) : null,
     sidecarJson: prepared.sidecarJson,
     features: executableLinkFeatures(prepared.mod, false),
     sources: [...prepared.sourceTexts],
@@ -363,8 +413,7 @@ export function prepareNativeLibrary(
     probes.stable &&
     frontendInputsStillMatch(probes, exclusions)
   ) {
-    const saved: FrontendCacheEntry = { schema: "scriptc.native-frontend.v2", probes, input };
-    cache.write("frontend", key, JSON.stringify(saved));
+    publishFrontendCache(cache, key, probes, input);
   }
   timing("frontend-cache-publish");
   return input;

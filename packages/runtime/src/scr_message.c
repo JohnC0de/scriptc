@@ -465,12 +465,14 @@ static ScrMessage *scr_message_try_publish(const ScrDyn *value) {
 #ifdef SCR_RC_AUDIT
         scr_str_live_forget();
 #endif
+        scr_lsan_immortal(text);
       } else if (d->rc != SIZE_MAX) {
         scr_cyc_on_dead(d); /* leave the candidate and tenured buffers */
         d->rc = SIZE_MAX;
 #ifdef SCR_RC_AUDIT
         scr_dyn_live_forget();
 #endif
+        scr_lsan_immortal(d);
       }
     }
     message = scr_message_alloc(1, sizeof(*message));
