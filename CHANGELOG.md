@@ -27,7 +27,7 @@ All notable changes to scriptc will be documented in this file.
 - **More values behave as in Node.js.** Missing array and typed-array reads stay `undefined` through number arguments, narrowed slots and lambda results, and `null` stays distinct from the temporal dead zone in forward-captured bindings.
 - **Union class fields work in more shapes.** Optional base-class receivers are narrowed before shared field access, and fields declared with different types across a union can be read and written.
 - **Workers share descriptor tables safely,** and live array references are accessed one element at a time.
-- **Native program objects use runtime ABI v10.** The collector header changed size, so external object consumers must link the matching v0.2.9 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
+- **Native program objects use runtime ABI v12.** Runtime object layouts changed, so external object consumers must link the matching v0.2.9 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
 
 <!-- release:end -->
 
