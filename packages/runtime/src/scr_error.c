@@ -170,10 +170,11 @@ ScrTraceFn scr_error_trace_arg(void) {
  * slots' defaults (code 0, no cause). */
 static ScrError *scr_error_alloc(int kind) {
   size_t size = kind == SCR_ERR_DOMEX ? sizeof(ScrDomException) : sizeof(ScrError);
-  void (*gcfree)(void *) = kind == SCR_ERR_DOMEX ? &scr_domex_gcfree : &scr_error_gcfree;
+  static const ScrCycType error_type = { &scr_error_trace, &scr_error_gcfree, SCR_CYC_KIND_ERROR };
+  static const ScrCycType domex_type = { &scr_error_trace, &scr_domex_gcfree, SCR_CYC_KIND_DOMEXCEPTION };
   ScrError *e;
   if (scr_error_traced) {
-    e = scr_cyc_alloc(size, &scr_error_trace, gcfree);
+    e = scr_cyc_alloc(size, kind == SCR_ERR_DOMEX ? &domex_type : &error_type);
   } else {
     e = calloc(1, size);
     if (!e) scr_error_oom();

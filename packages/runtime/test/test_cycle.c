@@ -63,7 +63,8 @@ static Node *make_ring(size_t count) {
   Node **nodes = calloc(count, sizeof(*nodes));
   if (!nodes) scr_trap("cycle test: out of memory\n");
   for (size_t i = 0; i < count; i++) {
-    nodes[i] = scr_cyc_alloc(sizeof(*nodes[i]), node_trace, node_free);
+    static const ScrCycType cyc_type = { &node_trace, &node_free, 0 };
+    nodes[i] = scr_cyc_alloc(sizeof(*nodes[i]), &cyc_type);
     nodes[i]->rc = 1; /* the ring edge that will point at this node */
   }
   for (size_t i = 0; i < count; i++)
@@ -118,7 +119,8 @@ static void check_age_reset_when_last_mature_root_dies(void) {
   ring = make_ring(32);
   ring->rc++;
   release_live(ring);
-  leaf = scr_cyc_alloc(sizeof(*leaf), node_trace, node_free);
+  static const ScrCycType cyc_type = { &node_trace, &node_free, 0 };
+  leaf = scr_cyc_alloc(sizeof(*leaf), &cyc_type);
   leaf->rc = 1;
   leaf->rc++; /* temporary release makes it a nursery candidate */
   release_live(leaf);
@@ -153,7 +155,8 @@ static void check_dead_backlog_rearms_release_trigger(void) {
   Node *leaves[BACKLOG];
 
   for (size_t i = 0; i < BACKLOG; i++) {
-    leaves[i] = scr_cyc_alloc(sizeof(*leaves[i]), node_trace, node_free);
+    static const ScrCycType cyc_type = { &node_trace, &node_free, 0 };
+    leaves[i] = scr_cyc_alloc(sizeof(*leaves[i]), &cyc_type);
     leaves[i]->rc = 2; /* external owner plus a temporary reference */
     release_live(leaves[i]);
   }
@@ -180,7 +183,8 @@ static void check_dead_backlog_rearms_release_trigger(void) {
 }
 
 static Node *make_leaf(void) {
-  Node *leaf = scr_cyc_alloc(sizeof(*leaf), node_trace, node_free);
+  static const ScrCycType cyc_type = { &node_trace, &node_free, 0 };
+  Node *leaf = scr_cyc_alloc(sizeof(*leaf), &cyc_type);
   leaf->rc = 1;
   return leaf;
 }
@@ -609,7 +613,8 @@ static void check_deep_cross_generation_chain(void) {
   size_t before = freed;
   Node *chain = NULL;
   for (size_t i = 0; i < DEPTH; i++) {
-    Node *node = scr_cyc_alloc(sizeof(*node), node_trace, node_free);
+    static const ScrCycType cyc_type = { &node_trace, &node_free, 0 };
+    Node *node = scr_cyc_alloc(sizeof(*node), &cyc_type);
     node->rc = 1;
     node->next = chain;
     chain = node;
@@ -661,6 +666,259 @@ static void check_deferred_white_restoration(void) {
   check(freed == before + DEPTH, "restored deferred nodes leaked");
 }
 
+/* Nursery bypass (scr_cycle.c): candidates of an emitted type (kind != 0)
+ * that keep surviving their nursery passes are promoted on release instead
+ * of walked; dead cycles of that type are still found by older passes; and
+ * once the type's objects die in nursery cycles again, it is walked again.
+ * Window, ratio and sample mirror SCR_CYC_BYPASS_*. */
+/* Tests only (SCR_CYC_TESTING): one pass at exactly `gen`. */
+size_t scr_cyc_pass_at(unsigned gen);
+static size_t bypass_traced; /* trace calls on bypass-kind nodes */
+static size_t bypass_freed;  /* bypass-kind nodes freed */
+static void bypass_trace(void *obj, ScrTraceVisit visit, void *ctx) {
+  bypass_traced++;
+  node_trace(obj, visit, ctx);
+}
+static void bypass_free(void *obj) {
+  bypass_freed++;
+  node_free(obj);
+}
+static const ScrCycType bypass_type = { &bypass_trace, &bypass_free, 7 };
+
+static Node *make_bypass_node(void) {
+  Node *node = scr_cyc_alloc(sizeof(*node), &bypass_type);
+  node->rc = 1;
+  return node;
+}
+
+/* Run release-triggered passes, as a program does by releasing: a pass's
+ * level then follows growth and backlogs only, never the scheduled age. */
+static void run_release_passes(void) {
+  for (size_t i = 0; i <= configured_nursery_threshold(); i++)
+    release_live(make_ring(1));
+}
+
+/* Trace calls spent on PROBE fresh, externally owned bypass-kind
+ * candidates. A full pass first resets the growth baselines, so the probe
+ * never trips a mature or full pass: only nursery passes walk. */
+static size_t probe_bypass_walks(Node **owned, size_t probe) {
+  scr_collect_cycles();
+  size_t before = bypass_traced;
+  for (size_t i = 0; i < probe; i++) {
+    owned[i] = make_bypass_node();
+    read_live(owned[i]);
+  }
+  run_release_passes();
+  return bypass_traced - before;
+}
+
+static void check_nursery_bypass(void) {
+  enum { WINDOW = 8192, SAMPLE = 16, LIVE = 3 * WINDOW, PROBE = 4096, RINGS = 32 };
+  Node **live = calloc(LIVE + 3 * PROBE, sizeof(*live));
+  if (!live) scr_trap("cycle test: out of memory\n");
+  size_t nlive = 0;
+
+  /* A walked candidate costs two trace calls (markGray and the restoring
+   * scan). Every survivor of the first window is walked; afterwards only
+   * one in SAMPLE is. */
+  for (; nlive < LIVE; nlive++) {
+    live[nlive] = make_bypass_node();
+    read_live(live[nlive]);
+  }
+  size_t walks = probe_bypass_walks(live + nlive, PROBE);
+  nlive += PROBE;
+  check(walks < PROBE / 2, "a type whose candidates always survive was not bypassed");
+
+  /* Dead rings of the bypassed type wait in the mature buffer for an older
+   * pass, which finds them. */
+  size_t before = bypass_freed;
+  for (size_t r = 0; r < RINGS; r++) {
+    Node *a = make_bypass_node(), *b = make_bypass_node();
+    a->next = b;
+    b->next = a;
+    a->rc++; /* the outside owner */
+    release_live(a);
+  }
+  run_release_passes();
+  check(bypass_freed - before < 2 * RINGS, "bypassed dead rings were all walked by the nursery");
+  scr_collect_cycles();
+  check(bypass_freed - before == 2 * RINGS, "an older pass missed dead rings of a bypassed type");
+
+  /* Now the type's objects die in nursery cycles. The sampled candidates
+   * keep measuring the yield, so after one window the type is walked again.
+   * A nursery pass after each release walks every sampled candidate at its
+   * own level: the promoted rings pile up in older buffers, and an older
+   * pass the growth schedule runs there would otherwise sweep sampled
+   * candidates too and leave the nursery's window unfinished. */
+  for (size_t r = 0; r < (size_t)WINDOW * SAMPLE; r++) {
+    Node *a = make_bypass_node(), *b = make_bypass_node();
+    a->next = b;
+    b->next = a;
+    a->rc++;
+    release_live(a);
+    scr_cyc_pass_at(SCR_CYC_NURSERY);
+  }
+  scr_collect_cycles();
+  walks = probe_bypass_walks(live + nlive, PROBE);
+  nlive += PROBE;
+  check(walks >= PROBE, "a type whose objects die in nursery cycles stayed bypassed");
+
+  for (size_t i = 0; i < nlive; i++) {
+    live[i]->rc = 0;
+    scr_cyc_on_dead(live[i]);
+    node_free(live[i]);
+  }
+  free(live);
+  scr_collect_cycles();
+}
+
+/* The mature level's bypass: a type whose mature candidates keep surviving
+ * goes straight to the old generation, its dead cycles are found by full
+ * passes, and once its objects die at the mature level again it is judged
+ * there again. Passes run at exact levels through the test entry point. */
+static size_t mature_kind_freed;
+static void mature_kind_free(void *obj) {
+  mature_kind_freed++;
+  node_free(obj);
+}
+static const ScrCycType mature_kind_type = { &node_trace, &mature_kind_free, 8 };
+
+static Node *make_mature_kind_node(void) {
+  Node *node = scr_cyc_alloc(sizeof(*node), &mature_kind_type);
+  node->rc = 1;
+  return node;
+}
+
+/* How many of PROBE fresh, externally owned candidates a release buffers
+ * straight into the old generation. */
+static size_t probe_old_on_release(Node **owned, size_t probe) {
+  scr_collect_cycles(); /* reset the growth baselines: no pass runs below */
+  size_t old = 0;
+  for (size_t i = 0; i < probe; i++) {
+    owned[i] = make_mature_kind_node();
+    read_live(owned[i]);
+    old += scr_cyc_hdr(owned[i])->gen == SCR_CYC_OLD;
+  }
+  return old;
+}
+
+static void check_mature_bypass(void) {
+  enum { WINDOW = 8192, SAMPLE = 16, LIVE = 3 * WINDOW, PROBE = 4096, BATCH = 1024 };
+  Node **live = calloc(LIVE + 2 * PROBE, sizeof(*live));
+  Node **batch = calloc(BATCH, sizeof(*batch));
+  if (!live || !batch) scr_trap("cycle test: out of memory\n");
+  size_t nlive = 0;
+
+  for (; nlive < LIVE; nlive++) {
+    live[nlive] = make_mature_kind_node();
+    read_live(live[nlive]);
+  }
+  /* Whatever passes those releases ran, put every node in the mature
+   * generation as a candidate (any generation is sound), and walk them all
+   * at that level: none dies. */
+  scr_collect_cycles();
+  for (size_t i = 0; i < nlive; i++) {
+    scr_cyc_hdr(live[i])->gen = SCR_CYC_MATURE;
+    read_live(live[i]);
+  }
+  scr_cyc_pass_at(SCR_CYC_MATURE);
+  size_t old = probe_old_on_release(live + nlive, PROBE);
+  nlive += PROBE;
+  check(old >= PROBE / 2, "a type whose mature candidates always survive kept its mature passes");
+
+  /* Dead rings of it wait for a full pass, which finds them. */
+  size_t before = mature_kind_freed;
+  for (size_t r = 0; r < 32; r++) {
+    Node *a = make_mature_kind_node(), *b = make_mature_kind_node();
+    a->next = b;
+    b->next = a;
+    a->rc++;
+    release_live(a);
+  }
+  scr_cyc_pass_at(SCR_CYC_NURSERY);
+  scr_cyc_pass_at(SCR_CYC_MATURE);
+  check(mature_kind_freed - before < 64, "rings past the mature level were all walked by it");
+  scr_collect_cycles();
+  check(mature_kind_freed - before == 64, "a full pass missed dead rings of a type past the mature level");
+
+  /* Now its rings survive the nursery and die before the next mature pass.
+   * The candidates kept at the mature level measure that, and after one
+   * window the type is judged there again. */
+  for (size_t round = 0; round < (size_t)WINDOW * SAMPLE / BATCH; round++) {
+    for (size_t r = 0; r < BATCH; r++) {
+      Node *a = make_mature_kind_node(), *b = make_mature_kind_node();
+      a->next = b;
+      b->next = a;
+      a->rc++; /* the outside owner */
+      read_live(a);
+      batch[r] = a;
+    }
+    scr_cyc_pass_at(SCR_CYC_NURSERY);
+    for (size_t r = 0; r < BATCH; r++) release_live(batch[r]);
+    scr_cyc_pass_at(SCR_CYC_MATURE);
+  }
+  scr_collect_cycles();
+  old = probe_old_on_release(live + nlive, PROBE);
+  nlive += PROBE;
+  check(old < PROBE / 4, "a type whose objects die at the mature level stayed past it");
+
+  for (size_t i = 0; i < nlive; i++) {
+    live[i]->rc = 0;
+    scr_cyc_on_dead(live[i]);
+    node_free(live[i]);
+  }
+  free(live);
+  free(batch);
+  scr_collect_cycles();
+}
+
+/* A nursery pass re-buffers its survivors past the mature level when
+ * their type bypasses it, even if the type's nursery candidates are
+ * walked (here half of them die young, in rings). */
+static const ScrCycType young_dying_type = { &node_trace, &node_free, 9 };
+
+static void check_rebuffer_past_mature(void) {
+  enum { BATCH = 1024, ROUNDS = 24, PROBE = 1024 };
+  Node **live = calloc((size_t)BATCH * ROUNDS + PROBE, sizeof(*live));
+  if (!live) scr_trap("cycle test: out of memory\n");
+  size_t nlive = 0;
+  for (size_t round = 0; round < ROUNDS; round++) {
+    for (size_t i = 0; i < BATCH; i++) {
+      Node *keep = scr_cyc_alloc(sizeof(*keep), &young_dying_type);
+      keep->rc = 1;
+      read_live(keep);
+      live[nlive++] = keep;
+      Node *a = scr_cyc_alloc(sizeof(*a), &young_dying_type);
+      Node *b = scr_cyc_alloc(sizeof(*b), &young_dying_type);
+      a->rc = 2; /* b's edge and the outside owner */
+      b->rc = 1;
+      a->next = b;
+      b->next = a;
+      release_live(a); /* dead, buffered in the nursery */
+    }
+    scr_cyc_pass_at(SCR_CYC_NURSERY); /* frees the rings, re-buffers the rest */
+    scr_cyc_pass_at(SCR_CYC_MATURE);  /* finds nothing */
+  }
+  scr_collect_cycles();
+  for (size_t i = 0; i < PROBE; i++) {
+    Node *keep = scr_cyc_alloc(sizeof(*keep), &young_dying_type);
+    keep->rc = 1;
+    read_live(keep);
+    live[nlive++] = keep;
+  }
+  scr_cyc_pass_at(SCR_CYC_NURSERY);
+  size_t old = 0;
+  for (size_t i = nlive - PROBE; i < nlive; i++) old += scr_cyc_hdr(live[i])->gen == SCR_CYC_OLD;
+  check(old >= PROBE / 2, "nursery survivors were re-buffered into a level their type bypasses");
+  for (size_t i = 0; i < nlive; i++) {
+    live[i]->rc = 0;
+    scr_cyc_on_dead(live[i]);
+    node_free(live[i]);
+  }
+  free(live);
+  scr_collect_cycles();
+}
+
 int main(void) {
   check_old_garbage_reclaimed_while_growing();
   check_older_rings_into_old();
@@ -680,6 +938,9 @@ int main(void) {
   check_teardown_rebuffers_and_immortals();
   check_growth_schedule_follows_yield();
   check_growth_cap_bounds_floating_garbage();
+  check_nursery_bypass();
+  check_mature_bypass();
+  check_rebuffer_past_mature();
   printf("cycle collection checks passed: threshold=%zu growth_cap=%zu\n",
          configured_nursery_threshold(), configured_growth_cap());
   return 0;
