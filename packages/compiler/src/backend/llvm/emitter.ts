@@ -6874,7 +6874,7 @@ export class LlEmitter {
     const caseLabels = s.cases.map(() => B.newLabel("sw.c"));
     const defaultIdx = s.cases.findIndex((c) => c.test === null);
     const fallback = defaultIdx >= 0 ? caseLabels[defaultIdx]! : end;
-    if (!emitLiteralSwitch(this, disc, s.cases, caseLabels, fallback)) {
+    if (!emitLiteralSwitch(this, disc, s.disc, s.cases, caseLabels, fallback)) {
       s.cases.forEach((c, i) => {
         if (c.test === null) return;
         // Lazy source-order test evaluation (a test after the match never

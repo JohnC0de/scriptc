@@ -15859,6 +15859,12 @@
     "<repo>/tests/corpus/constant-module-globals/main.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/switch-integer-dispatch.ts": {
+   "order": [
+    "<repo>/tests/corpus/switch-integer-dispatch.ts"
+   ],
+   "diags": []
   }
  }
 }
