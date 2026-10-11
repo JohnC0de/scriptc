@@ -2091,6 +2091,26 @@ void scr_map_live_forget(void);
 void scr_union_live_forget(void);
 #endif
 
+/* For the same reason LeakSanitizer must not report a published object
+ * whose last reference is dropped (scr_message.c, scr_publish.c). Ignored
+ * chunks are leak-scan roots, so everything an immortal object reaches is
+ * covered and the verdict on the rest of the heap is unchanged. Weak: ASan
+ * runtimes without a leak checker leave it NULL; other builds compile the
+ * hook away. */
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SCR_LSAN_IMMORTAL 1
+void __lsan_ignore_object(const void *p) __attribute__((weak));
+#endif
+#endif
+static inline void scr_lsan_immortal(const void *obj) {
+#ifdef SCR_LSAN_IMMORTAL
+  if (__lsan_ignore_object) __lsan_ignore_object(obj);
+#else
+  (void)obj;
+#endif
+}
+
 /* ── closures ───────────────────────────────────────────────────────
  * A closure is a function pointer plus the boxes of its captured bindings.
  * A box is one shared, refcounted variable cell: every function that
