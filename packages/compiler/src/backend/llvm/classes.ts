@@ -26,7 +26,7 @@ import {
   mangleVtInstance,
   mangleVtStruct,
 } from "../mangle.js";
-import { emitObjectAlloc, emitObjectFree } from "./alloc.js";
+import { cycTypeDescriptor, emitObjectAlloc, emitObjectFree } from "./alloc.js";
 import { llvmCommentText } from "./common.js";
 import { NullableRefFields } from "./nullable-fields.js";
 import type { Int32Slots } from "../../ir/int32-slots.js";
@@ -591,15 +591,18 @@ export function emitClassShapes(
       `define internal ptr @${mangleClassNew(cls.name)}() ${FN_ATTRS} { ; new ${cls.name}`,
       `entry:`,
     ];
+    const cycType = `@${mangleClassTrace(cls.name)}.cyctype`;
+    if (traced)
+      defs.push(
+        cycTypeDescriptor(
+          cycType,
+          `@${mangleClassTrace(cls.name)}`,
+          `@${mangleClassGcFree(cls.name)}`,
+        ),
+        ``,
+      );
     nw.push(
-      ...emitObjectAlloc(
-        host,
-        sizeOf,
-        traced
-          ? { trace: `@${mangleClassTrace(cls.name)}`, free: `@${mangleClassGcFree(cls.name)}` }
-          : null,
-        meta.hierarchy ? 16 : 8,
-      ),
+      ...emitObjectAlloc(host, sizeOf, traced ? { type: cycType } : null, meta.hierarchy ? 16 : 8),
     );
     nw.push(`  store ${host.sizeType} 1, ptr %o`);
     if (meta.hierarchy) {

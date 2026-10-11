@@ -259,13 +259,15 @@ SCR_TL size_t scr_cyc_live = 0;
 SCR_TL size_t scr_cyc_old_freed = 0;
 #endif
 
-void *scr_cyc_alloc(size_t size, ScrTraceFn trace, ScrCycFreeFn free_fn) {
-  return scr_cyc_alloc_inline(size, trace, free_fn);
+void *scr_cyc_alloc(size_t size, const ScrCycType *type) {
+  return scr_cyc_alloc_inline(size, type);
 }
 
 void scr_cyc_free(void *obj) { scr_cyc_free_inline(obj); }
 
 static void scr_cyc_grow(ScrVec *vec) {
+  /* Candidate positions are 32-bit (ScrCycHdr.buf_index). */
+  if (vec->cap > (size_t)UINT32_MAX / 2) scr_cyc_oom();
   vec->cap = vec->cap ? vec->cap * 2 : 64;
   void **grown = realloc(vec->v, vec->cap * sizeof *grown);
   if (!grown) scr_cyc_oom();
@@ -580,7 +582,7 @@ void scr_cyc_on_dead(void *obj) {
   size_t i = h->buf_index;
   void *last = b->v[--b->n];
   b->v[i] = last;
-  if (last != obj) scr_cyc_hdr(last)->buf_index = i;
+  if (last != obj) scr_cyc_hdr(last)->buf_index = (uint32_t)i;
   h->buffered = 0;
   scr_cyc_nbuffered--;
   /* A death must not consume room reserved for a future candidate. */
@@ -600,7 +602,7 @@ void scr_cyc_on_release(void *obj) {
   ScrVec *b = &scr_roots[h->gen];
   if (b->n == b->cap) scr_cyc_grow(b);
   h->buffered = 1;
-  h->buf_index = b->n;
+  h->buf_index = (uint32_t)b->n;
   b->v[b->n++] = obj;
   scr_cyc_nbuffered++;
   /* Never re-entered: a teardown's releases of untraced children can buffer
@@ -636,7 +638,7 @@ static void scr_mark_gray(void *obj, uintptr_t depth) {
     scr_cyc_push(&scr_pending, obj);
     return;
   }
-  h->trace(obj, scr_mg_visit, (void *)(depth + 1));
+  h->type->trace(obj, scr_mg_visit, (void *)(depth + 1));
 }
 
 static void scr_scan_black(void *obj, uintptr_t depth);
@@ -654,7 +656,7 @@ static void scr_scan_black(void *obj, uintptr_t depth) {
     scr_cyc_push(&scr_restore_pending, obj);
     return;
   }
-  h->trace(obj, scr_sb_visit, (void *)(depth + 1));
+  h->type->trace(obj, scr_sb_visit, (void *)(depth + 1));
 }
 
 static void scr_scan(void *obj, uintptr_t depth);
@@ -669,7 +671,7 @@ static void scr_scan(void *obj, uintptr_t depth) {
     scr_scan_black(obj, 0);
     while (scr_restore_pending.n) {
       void *next = scr_restore_pending.v[--scr_restore_pending.n];
-      scr_cyc_hdr(next)->trace(next, scr_sb_visit, NULL);
+      scr_cyc_hdr(next)->type->trace(next, scr_sb_visit, NULL);
     }
     return;
   }
@@ -681,7 +683,7 @@ static void scr_scan(void *obj, uintptr_t depth) {
     scr_cyc_push(&scr_pending, obj);
     return;
   }
-  h->trace(obj, scr_scan_visit, (void *)(depth + 1));
+  h->type->trace(obj, scr_scan_visit, (void *)(depth + 1));
 }
 
 /* ── cross-generation edges ───────────────────────────────────────────── */
@@ -738,8 +740,8 @@ static void scr_xg_child_visit(void *child, void *ctx) {
 /* One genuine release, generically: the header carries everything needed. */
 static void scr_xg_destroy(void *obj) {
   ScrCycHdr *h = scr_cyc_hdr(obj);
-  h->trace(obj, scr_xg_child_visit, NULL);
-  h->free_fn(obj);
+  h->type->trace(obj, scr_xg_child_visit, NULL);
+  h->type->free_fn(obj);
   scr_xg_freed++;
 }
 
@@ -779,7 +781,7 @@ static SCR_CYC_COMPACT size_t scr_cyc_settle(unsigned gen_limit) {
   if (gen_limit < SCR_CYC_OLD) {
     for (size_t i = 0; i < scr_white.n; i++) {
       void *obj = scr_white.v[i];
-      scr_cyc_hdr(obj)->trace(obj, scr_xg_pin_visit, NULL);
+      scr_cyc_hdr(obj)->type->trace(obj, scr_xg_pin_visit, NULL);
     }
   }
 
@@ -814,7 +816,7 @@ static SCR_CYC_COMPACT size_t scr_cyc_settle(unsigned gen_limit) {
       if (h->color == SCR_CYC_DOOMED) continue; /* being freed below */
       if (!h->buffered) {
         h->buffered = 1;
-        h->buf_index = scr_roots[h->gen].n;
+        h->buf_index = (uint32_t)scr_roots[h->gen].n;
         scr_cyc_push(&scr_roots[h->gen], obj);
       }
     }
@@ -826,7 +828,7 @@ static SCR_CYC_COMPACT size_t scr_cyc_settle(unsigned gen_limit) {
   size_t freed = scr_white.n;
   for (size_t i = 0; i < scr_white.n; i++) {
     void *obj = scr_white.v[i];
-    scr_cyc_hdr(obj)->free_fn(obj);
+    scr_cyc_hdr(obj)->type->free_fn(obj);
   }
   scr_white.n = 0;
 
@@ -882,7 +884,7 @@ static size_t scr_cyc_pass(unsigned gen_limit) {
   for (size_t i = 0; i < scr_cands.n; i++) scr_mark_gray(scr_cands.v[i], 0);
   while (scr_pending.n) {
     void *obj = scr_pending.v[--scr_pending.n];
-    scr_cyc_hdr(obj)->trace(obj, scr_mg_visit, NULL);
+    scr_cyc_hdr(obj)->type->trace(obj, scr_mg_visit, NULL);
   }
 
   scr_white.n = 0;
@@ -892,7 +894,7 @@ static size_t scr_cyc_pass(unsigned gen_limit) {
     /* A later outside root may have restored this deferred white node and
      * its descendants already. Never scan a black node's edges again. */
     if (scr_cyc_hdr(obj)->color == SCR_CYC_WHITE)
-      scr_cyc_hdr(obj)->trace(obj, scr_scan_visit, NULL);
+      scr_cyc_hdr(obj)->type->trace(obj, scr_scan_visit, NULL);
   }
 
   return scr_cyc_settle(gen_limit);

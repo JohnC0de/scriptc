@@ -17,8 +17,8 @@ static void scr_classobj_gcfree(void *object) {
 ScrClassObj *scr_classobj_new(const ScrClassObj *template, size_t ncaps) {
   if (ncaps > (SIZE_MAX - sizeof(ScrClassObj)) / sizeof(ScrBox *))
     scr_trap("scriptc: class capture allocation overflow\n");
-  ScrClassObj *c = scr_cyc_alloc(sizeof(ScrClassObj) + ncaps * sizeof(ScrBox *),
-      &scr_classobj_trace_v, &scr_classobj_gcfree);
+  static const ScrCycType cyc_type = { &scr_classobj_trace_v, &scr_classobj_gcfree };
+  ScrClassObj *c = scr_cyc_alloc(sizeof(ScrClassObj) + ncaps * sizeof(ScrBox *), &cyc_type);
   c->rc = 1;
   c->pre = template->pre;
   c->post = template->post;

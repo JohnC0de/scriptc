@@ -62,7 +62,7 @@ void scr_init(void);
 /* Program objects emitted by the bundled LLVM helper reference this symbol.
  * Its versioned spelling makes a mismatched manual runtime link fail before
  * the program can start. */
-void scr_runtime_abi_v9(void);
+void scr_runtime_abi_v10(void);
 void scr_runtime_workers_v8(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -404,49 +404,54 @@ enum { SCR_CYC_BLACK = 0, SCR_CYC_GRAY = 1, SCR_CYC_WHITE = 2, SCR_CYC_DOOMED = 
  * SCR_CYC_OLD is a full pass. */
 enum { SCR_CYC_NURSERY = 0, SCR_CYC_MATURE = 1, SCR_CYC_OLD = 2, SCR_CYC_NGENS = 3 };
 
-typedef struct ScrCycHdr {
+/* A headered type's collector entry points, shared by all its objects: the
+ * header names one constant descriptor instead of carrying both function
+ * pointers, which keeps the header at 16 bytes. Emitted shapes define one
+ * per traced type (llvm/shapes.ts); runtime families use SCR_CYC_TYPE. */
+typedef struct ScrCycType {
   ScrTraceFn trace;
   ScrCycFreeFn free_fn;
+} ScrCycType;
+#define SCR_CYC_TYPE(name, trace_fn, free) static const ScrCycType name = { (trace_fn), (free) }
+
+typedef struct ScrCycHdr {
 #if UINTPTR_MAX == UINT32_MAX
   /* calloc aligns the block for doubles; keep the payload aligned too.
-   * Padding BEFORE color preserves the emitted obj-8 `buffered` offset. */
+   * Padding BEFORE the descriptor keeps every object-relative offset of the
+   * fields below identical to 64-bit targets. */
   uint32_t payload_alignment;
 #endif
-  uint32_t color;    /* SCR_CYC_* */
-  uint16_t buffered; /* 1 = sitting in its generation's candidate buffer */
-  uint16_t gen;      /* SCR_CYC_NURSERY..SCR_CYC_OLD (the walk filter) */
-  size_t buf_index;  /* position there (O(1) removal when rc hits 0) */
+  const ScrCycType *type; /* trace and teardown */
+  uint8_t color;          /* SCR_CYC_* */
+  uint8_t gen;            /* SCR_CYC_NURSERY..SCR_CYC_OLD (the walk filter) */
+  uint16_t buffered;      /* 1 = sitting in its generation's candidate buffer */
+  uint32_t buf_index;     /* position there (O(1) removal when rc hits 0) */
 } ScrCycHdr;
 
 /* This layout is an ABI, not an implementation detail. Every emitted release
  * of a headered object (llvm/shapes.ts cycleRootLines, used by the record,
  * class and inline RC helpers) mirrors scr_cyc_on_release's early return:
- * it reads `buffered` as an i16 at obj-12 on 64-bit targets and obj-8 on
- * wasm32 (the backend's cycleColorOffset - 4) and calls scr_cyc_on_release
- * only when it is 0. Hence the target-width assertions. */
-#if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(ScrCycHdr) == 32, "LLVM backend expects a 32-byte cycle header");
-_Static_assert(offsetof(ScrCycHdr, color) == 16,
-               "LLVM backend's cycleColorOffset is obj-16 on 64-bit targets");
-_Static_assert(offsetof(ScrCycHdr, gen) == 22,
-               "LLVM backend's inline free reads the generation at header+22");
-#elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(ScrCycHdr) == 24, "wasm32 cycle payloads require an aligned 24-byte header");
-_Static_assert(offsetof(ScrCycHdr, color) == 12,
-               "LLVM backend's cycleColorOffset is obj-12 on wasm32");
-#endif
+ * it reads `buffered` as an i16 at obj-6 (the backend's cycleBufferedOffset)
+ * and calls scr_cyc_on_release only when it is 0; the emitted inline free
+ * reads the generation as an i8 at obj-7. Hence the assertions. */
+_Static_assert(sizeof(ScrCycHdr) == 16, "LLVM backend expects a 16-byte cycle header");
+_Static_assert(sizeof(ScrCycHdr) - offsetof(ScrCycHdr, buffered) == 6 &&
+                   sizeof(((ScrCycHdr *)0)->buffered) == 2,
+               "the emitted release fast path reads `buffered` as an i16 at obj-6");
+_Static_assert(sizeof(ScrCycHdr) - offsetof(ScrCycHdr, gen) == 7,
+               "LLVM backend's inline free reads the generation as an i8 at obj-7");
+_Static_assert(sizeof(ScrCycHdr) - offsetof(ScrCycHdr, type) == 16 ||
+                   UINTPTR_MAX == UINT32_MAX,
+               "LLVM backend stores the descriptor at the block start on 64-bit targets");
 _Static_assert(sizeof(ScrCycHdr) % _Alignof(double) == 0,
                "cycle-headered payloads must preserve double alignment");
-_Static_assert(offsetof(ScrCycHdr, buffered) == offsetof(ScrCycHdr, color) + 4 &&
-                   sizeof(((ScrCycHdr *)0)->buffered) == 2,
-               "the emitted release fast path reads `buffered` as an i16 four bytes "
-               "after color");
 
 static inline ScrCycHdr *scr_cyc_hdr(void *obj) { return (ScrCycHdr *)obj - 1; }
 
 /* Zeroed allocation with a cycle header in front; returns the OBJECT
- * pointer (header at scr_cyc_hdr). Aborts on OOM. */
-void *scr_cyc_alloc(size_t size, ScrTraceFn trace, ScrCycFreeFn free_fn);
+ * pointer (header at scr_cyc_hdr). `type` must outlive the object (a
+ * static descriptor). Aborts on OOM. */
+void *scr_cyc_alloc(size_t size, const ScrCycType *type);
 void scr_cyc_free(void *obj); /* frees the block, header included */
 
 /* ── small-object allocator (scr_alloc.c) ───────────────────────────────
@@ -641,12 +646,11 @@ extern SCR_TL size_t scr_cyc_live;
 extern SCR_TL size_t scr_cyc_old_freed;
 extern SCR_TL void (*scr_weak_dispose_hook)(void *);
 #endif
-static inline void *scr_cyc_alloc_inline(size_t size, ScrTraceFn trace, ScrCycFreeFn free_fn) {
+static inline void *scr_cyc_alloc_inline(size_t size, const ScrCycType *type) {
   if (size > SIZE_MAX - sizeof(ScrCycHdr)) scr_trap("scriptc: out of memory\n");
   ScrCycHdr *h = (ScrCycHdr *)scr_mem_calloc(sizeof(ScrCycHdr) + size);
   if (!h) scr_trap("scriptc: out of memory\n");
-  h->trace = trace;
-  h->free_fn = free_fn;
+  h->type = type;
   scr_cyc_live++;
   return h + 1;
 }
@@ -657,8 +661,8 @@ static inline void scr_cyc_free_inline(void *obj) {
   scr_mem_free(scr_cyc_hdr(obj));
 }
 _Static_assert(SCR_CYC_NURSERY == 0, "zeroed cycle headers start in the nursery");
-_Static_assert(sizeof(((ScrCycHdr *)0)->gen) == 2 && SCR_CYC_OLD == 2,
-               "LLVM backend's inline free compares an i16 generation against 2");
+_Static_assert(sizeof(((ScrCycHdr *)0)->gen) == 1 && SCR_CYC_OLD == 2,
+               "LLVM backend's inline free compares an i8 generation against 2");
 
 /* Dispose an object whose reference count already reached zero. The caller
  * removes its cycle candidate first. Nested disposals keep bounded stack
