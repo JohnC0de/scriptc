@@ -141,6 +141,7 @@ export class NarrowingStability {
       const present = this.lowerer.mapTypeOf(checker.getNonNullableType(declared));
       if (present === null || !typeEquals(present, narrowedIr)) return null;
     } else if (position === "context") {
+      if (!this.argumentSlotIsGeneric(node)) return null;
       const contextual = checker.getContextualType(node);
       if (contextual === undefined) return null;
       if (
@@ -164,6 +165,48 @@ export class NarrowingStability {
       }
     }
     return this.trusted(node) ? null : declared;
+  }
+
+  /** A read in a call or construction argument (directly or inside a literal
+   * argument) reaches the callee's own lowering with the declared type. User
+   * callees coerce any value of their parameter type, and so do the
+   * standard library's generic slots: a parameter typed by a type parameter
+   * (`push(...items: T[])`, `Map.set(key: K, value: V)`) and the console
+   * methods, which format any value. Other standard-library lowerings are
+   * specialized to the argument types programs pass and can refuse the
+   * declared union (`JSON.stringify` of a possibly-undefined value,
+   * `clearInterval` of a nullable handle). Those arguments keep the checker's
+   * narrowing, and maybeNarrow reads them through the checked extraction. */
+  private argumentSlotIsGeneric(node: ts.Expression): boolean {
+    const slot = enclosingArgument(node);
+    if (slot === null) return true;
+    const { call, argument } = slot;
+    const checker = this.lowerer.checker;
+    const signature = checker.getResolvedSignature(call);
+    const declaration = signature ? checker.signatureDeclaration(signature) : undefined;
+    if (!declaration || !this.lowerer.isStdlibFile(declaration.getSourceFile())) return true;
+    const callee = skipOuter(call.expression);
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      this.lowerer.isStdlibGlobal(skipOuter(callee.expression), "console")
+    )
+      return true;
+    const index = call.arguments?.indexOf(argument) ?? -1;
+    const params = declaration.parameters ?? [];
+    if (index < 0 || params.length === 0) return false;
+    const param = params[Math.min(index, params.length - 1)]!;
+    if (index >= params.length && param.dotDotDotToken === undefined) return false;
+    return param.type !== undefined && this.mentionsTypeParameter(param.type);
+  }
+
+  private mentionsTypeParameter(node: ts.Node): boolean {
+    if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
+      const symbol = this.lowerer.checker.getSymbolAtLocation(node.typeName);
+      if (symbol && symbol.flags & ts.SymbolFlags.TypeParameter) return true;
+    }
+    return (
+      ts.forEachChild(node, (child) => this.mentionsTypeParameter(child) || undefined) ?? false
+    );
   }
 
   /** The type of the accessed property as declared on the receiver's
@@ -865,6 +908,28 @@ function widePosition(node: ts.Expression): WidePosition | null {
   if (ts.isVariableDeclaration(parent) && parent.initializer === child && parent.type)
     return "context";
   return null;
+}
+
+/** The call or construction whose argument holds `node`, directly or as an
+ * element or property of literal arguments, with that argument. */
+function enclosingArgument(
+  node: ts.Expression,
+): { call: ts.CallExpression | ts.NewExpression; argument: ts.Expression } | null {
+  let child: ts.Node = node;
+  let parent = node.parent;
+  while (
+    ts.isParenthesizedExpression(parent) ||
+    ts.isArrayLiteralExpression(parent) ||
+    ts.isObjectLiteralExpression(parent) ||
+    ts.isShorthandPropertyAssignment(parent) ||
+    (ts.isPropertyAssignment(parent) && parent.initializer === child)
+  ) {
+    child = parent;
+    parent = parent.parent;
+  }
+  if (!(ts.isCallExpression(parent) || ts.isNewExpression(parent))) return null;
+  const argument = parent.arguments?.find((arg) => arg === child);
+  return argument ? { call: parent, argument } : null;
 }
 
 /** The array or object literal holding `parent` (an element's literal or a

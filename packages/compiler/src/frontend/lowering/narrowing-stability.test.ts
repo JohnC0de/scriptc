@@ -113,3 +113,43 @@ test("narrowed reads after code that can clear the field check it with Node's Ty
   expect(thrownMessages(module, "methodCall")).toContain(read);
   expect(thrownMessages(module, "loopBackEdge")).toContain(read);
 });
+
+test("standard-library arguments read as declared only where the lowering is generic", async () => {
+  // JSON.stringify and clearInterval lower only the narrowed argument types;
+  // console methods and type-parameter slots take the declared value.
+  const module = await lower(`
+interface Opts {
+  p?: { [k: string]: number };
+}
+function touch(): number {
+  return 1;
+}
+let handle: ReturnType<typeof setInterval> | null = null;
+const stop = (): void => {
+  handle = null;
+};
+function specialized(o: Opts): string {
+  o.p = { a: 1 };
+  touch();
+  return JSON.stringify(o.p);
+}
+function clearAfterCall(): void {
+  if (handle !== null) {
+    touch();
+    clearInterval(handle);
+  }
+}
+function formatted(o: Opts, out: (Opts["p"])[]): void {
+  o.p = { a: 2 };
+  touch();
+  console.log(o.p);
+  out.push(o.p);
+}
+handle = setInterval(() => {}, 1000);
+console.log(specialized({}));
+clearAfterCall();
+stop();
+formatted({}, []);
+`);
+  expect(thrownMessages(module, "formatted")).toEqual([]);
+});
