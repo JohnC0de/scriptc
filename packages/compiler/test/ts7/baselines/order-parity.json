@@ -15784,6 +15784,12 @@
     "<repo>/tests/corpus/4602-constructor-escape-order.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4598-os-available-parallelism.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-os-available-parallelism.ts"
+   ],
+   "diags": []
   }
  }
 }
