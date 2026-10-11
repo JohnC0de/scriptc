@@ -39,7 +39,7 @@ static void scr_union_gcfree(void *o) {
 }
 
 static ScrUnion *scr_union_alloc(uint32_t tag) {
-  static const ScrCycType cyc_type = { &scr_union_trace, &scr_union_gcfree };
+  static const ScrCycType cyc_type = { &scr_union_trace, &scr_union_gcfree, SCR_CYC_KIND_UNION };
   ScrUnion *u = scr_cyc_alloc_inline(sizeof(ScrUnion), &cyc_type);
   u->rc = 1;
   u->tag = tag;

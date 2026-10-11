@@ -1,5 +1,5 @@
 import { emitLlvmLayouts } from "./layouts.js";
-import { inlineAllocSupported } from "./alloc.js";
+import { FIRST_EMITTED_CYC_KIND, inlineAllocSupported } from "./alloc.js";
 import { llvmBytes as llBytes } from "../literals.js";
 import { InternalCompilerError } from "../../errors.js";
 /** Lower typed IR to LLVM, using the runtime's C ABI.
@@ -523,6 +523,9 @@ export class LlEmitter {
   readonly sizeType: "i32" | "i64";
   readonly ffiExtendNarrowIntegers: boolean;
   readonly cycleBufferedOffset: number;
+  /** Emitted ScrCycType descriptors so far (their collector statistics
+   * indices; see ShapeHost.nextCycKind). */
+  private cycKinds = 0;
   readonly wasi: boolean;
   /** The target lacks a rounding instruction at its baseline CPU (x86-64
    * before SSE4.1), so `llvm.trunc` would lower to a libm call: emit
@@ -973,6 +976,7 @@ export class LlEmitter {
       // paths address its thread-local state.
       threadLocalAlloc: mod.workers === true,
       rcHelpers: this.rcHelpers,
+      nextCycKind: () => FIRST_EMITTED_CYC_KIND + this.cycKinds++,
       unionsById: this.unionsById,
       declare: (decl) => this.declare(decl),
       needOom: () => this.needOom(),

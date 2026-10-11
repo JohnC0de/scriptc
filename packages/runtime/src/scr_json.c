@@ -787,7 +787,7 @@ static ScrDyn *scr_dyn_alloc(ScrDynKind kind) {
     return d;
   }
 #endif
-  static const ScrCycType cyc_type = { &scr_dyn_trace_v, &scr_dyn_gcfree };
+  static const ScrCycType cyc_type = { &scr_dyn_trace_v, &scr_dyn_gcfree, SCR_CYC_KIND_DYN };
   ScrDyn *fresh = scr_cyc_alloc_inline(sizeof *fresh, &cyc_type);
   if (!fresh) scr_json_oom();
   fresh->rc = 1;
@@ -9801,7 +9801,7 @@ static ScrDyn *scr_weak_collection_new(ScrDyn *seed, bool is_set) {
   ScrDynHandleTag tag = is_set ? SCR_DYNH_WEAK_SET : SCR_DYNH_WEAK_MAP;
   scr_weak_dispose_hook = &scr_weak_disposed;
   scr_dyn_handle_install(tag, is_set ? &set_ops : &map_ops);
-  static const ScrCycType cyc_type = { &scr_weak_map_trace, &scr_weak_map_gcfree };
+  static const ScrCycType cyc_type = { &scr_weak_map_trace, &scr_weak_map_gcfree, SCR_CYC_KIND_WEAK_MAP };
   ScrWeakMap *map = scr_cyc_alloc(sizeof *map, &cyc_type);
   if (!map) scr_json_oom();
   map->rc = 1;

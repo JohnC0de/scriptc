@@ -698,7 +698,7 @@ ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
                          ScrTraceFn elem_trace, size_t initial_cap) {
   ScrArr *a;
   if (elem_trace) {
-    static const ScrCycType cyc_type = { &scr_arr_trace_v, &scr_arr_gc_free };
+    static const ScrCycType cyc_type = { &scr_arr_trace_v, &scr_arr_gc_free, SCR_CYC_KIND_ARRAY };
     a = scr_cyc_alloc_inline(sizeof(ScrArr), &cyc_type);
   } else {
     a = scr_mem_alloc(sizeof(ScrArr));
