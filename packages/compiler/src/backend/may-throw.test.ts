@@ -437,6 +437,38 @@ test("stack checks cover recursive components and recursion through reentrant op
   expect(computeMayThrow(mod).fns.size).toBe(0);
 });
 
+test("stack-checked synchronous functions skip the worker entry poll", () => {
+  const asyncSelf: IrFunction = { ...fn("asyncSelf", [call("asyncSelf")], []), async: true };
+  const mod: IrModule = {
+    ...moduleWith(
+      fn("caller", [call("caller"), call("self"), call("left"), call("walker")], []),
+      fn("self", [call("self")], []),
+      fn("left", [call("right")], []),
+      fn("right", [call("left")], []),
+      fn("walker", [callClosure("leaf")], []),
+      fn("leaf", [exprStmt(value)], []),
+      asyncSelf,
+    ),
+    workers: true,
+  };
+  const answer = computeMayThrow(mod, { stackChecks: true });
+  expect([...answer.stackChecks!].sort()).toEqual(["asyncSelf", "caller", "left", "right", "self"]);
+  // Callers test after every call of a stack-checked function, and its
+  // overflow unwinds through those tests, so only the module entry, async
+  // bodies and unbounded functions without a stack check poll on entry.
+  expect([...answer.workerEntryPolls!].sort()).toEqual(["asyncSelf", "caller", "walker"]);
+  expect(answer.fns.has("self") && answer.fns.has("left") && answer.fns.has("right")).toBe(true);
+  // Without stack checks (WASI, Windows, libraries) every cycle keeps its poll.
+  expect([...computeMayThrow(mod).workerEntryPolls!].sort()).toEqual([
+    "asyncSelf",
+    "caller",
+    "left",
+    "right",
+    "self",
+    "walker",
+  ]);
+});
+
 test("class members are reachable from reentrant operations", () => {
   const mod: IrModule = {
     ...moduleWith(

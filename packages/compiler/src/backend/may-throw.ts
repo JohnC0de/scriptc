@@ -429,7 +429,7 @@ export function computeMayThrow(
     fns: may,
     ...(why !== null ? { why } : {}),
     indirect,
-    ...(terminations ? { workerEntryPolls: terminations.entry } : {}),
+    ...(terminations ? { workerEntryPolls: entryPolls(mod, terminations.entry, stackChecks) } : {}),
     ...(stackChecks ? { stackChecks } : {}),
   };
 }
@@ -510,6 +510,31 @@ function describeThrowingNode(rec: IrExpr | IrStmt): string {
     default:
       return detail.method !== undefined ? `${rec.kind} ${detail.method}` : rec.kind;
   }
+}
+
+/** The termination polls a worker program places on function entry. A
+ * stack-checked synchronous function needs none: it may throw (the stack
+ * guard seeds the fixpoint), so every caller tests the pending state after
+ * the call, and a descent that never returns ends at the stack guard, whose
+ * RangeError unwinds through those tests. An outstanding terminate request
+ * keeps the alert word nonzero, so the first test that runs afterwards (a
+ * post-call test, a loop poll or the unwinding) stops the thread; dropping
+ * the entry poll only delays the stop by bounded work, which Node's
+ * asynchronous terminate allows. The entry poll's slow path rejoins the
+ * body, so every polled function kept its arguments live across a call. */
+function entryPolls(
+  mod: IrModule,
+  entry: Set<string>,
+  stackChecks: Set<string> | null,
+): Set<string> {
+  if (stackChecks === null) return entry;
+  // Calling an async or generator function never tests the caller's pending
+  // state, and the module entry has no caller: those keep their polls.
+  const keep = new Set(
+    mod.functions.filter((fn) => fn.async || fn.generator !== undefined).map((fn) => fn.name),
+  );
+  keep.add(mod.entry);
+  return new Set([...entry].filter((name) => keep.has(name) || !stackChecks.has(name)));
 }
 
 /** Statement and expression kinds that cannot reenter scriptc code except
