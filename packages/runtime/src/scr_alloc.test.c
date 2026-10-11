@@ -121,20 +121,24 @@ static void vm_flags(const void *p, char *out, size_t cap) {
 }
 #endif
 
-/* A class slice carves contiguously from its start, across the point where
+/* A class slice carves contiguously from its start, across the points where
  * its limit is raised; on Linux the slices are huge-page aligned, the first
- * 8 MiB of a slice stay on small pages and the rest may use huge pages. */
+ * 8 MiB of a slice stay on small pages and the rest may use huge pages, and
+ * a helper thread faults in memory ahead of the limit. Every fresh block
+ * still reads as zero, wherever the limit steps and whoever faulted it. */
 static void check_slice_growth(void) {
-  enum { SZ = 496, AFTER = 8 << 20 };
+  enum { SZ = 496, AFTER = 8 << 20, PAST = 3 * (2 << 20) + (1 << 20) };
   unsigned char *first = scr_mem_alloc(SZ), *prev = first;
   assert(owned(first));
   uintptr_t start = scr_sa.base + ((uintptr_t)((SZ - 1) / SCR_SA_STEP) << scr_sa.shift);
   assert((uintptr_t)first == start); /* a class nothing else has touched */
-  size_t blocks = AFTER / SZ + 64;
+  size_t blocks = (AFTER + PAST) / SZ;
   for (size_t i = 1; i < blocks; i++) {
     unsigned char *p = scr_mem_alloc(SZ);
     assert(p == prev + SZ);
+    for (size_t k = 0; k < SZ; k += 16) assert(p[k] == 0);
     p[0] = (unsigned char)i; /* commit the pages */
+    p[SZ - 1] = (unsigned char)i;
     prev = p;
   }
 #ifdef __linux__

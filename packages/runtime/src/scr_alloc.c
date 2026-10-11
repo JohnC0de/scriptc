@@ -67,13 +67,223 @@ static void *scr_sa_map(size_t span) {
   return p;
 }
 
+/* Pre-faulting (Linux executables). First touch of a fresh slice page costs
+ * a fault and a page clear on the allocating thread. With pre-faulting the
+ * bump limits advance in steps, and each step asks a helper thread to fault
+ * in the memory just ahead of it (MADV_POPULATE_WRITE: the kernel commits
+ * zeroed pages as for a write, without storing anything, so it cannot race
+ * with the owner's carving). The owner still faults any page the helper has
+ * not reached; the fast paths are unchanged. Small-page prefixes advance in
+ * SCR_SA_PF_STEP chunks and fault one chunk ahead; huge-page ranges advance
+ * in half huge pages and fault the next huge page once the bump is in the
+ * second half of the current one, so a slice keeps at most about one step
+ * of untouched committed memory. The first chunk of a slice is not
+ * prefetched ahead: a class used for a handful of blocks commits nothing
+ * extra. SCR_SA_PREFAULT=0 turns it off. Library archives run on embedder
+ * threads and keep the plain policy. */
+#if defined(SCR_SA_THP) && !defined(SCR_LIB)
+#ifndef MADV_POPULATE_WRITE
+#define MADV_POPULATE_WRITE 23 /* Linux 5.14 */
+#endif
+#define SCR_SA_PREFAULT 1
+#define SCR_SA_PF_STEP ((size_t)256 << 10)
+#define SCR_SA_PF_HUGE_STEP (SCR_SA_HUGE_PAGE / 2)
+#include <errno.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+
+typedef struct {
+  char *lo, *hi;
+} ScrSaPfRange;
+#define SCR_SA_PF_RING 64u
+static pthread_mutex_t scr_sa_pf_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t scr_sa_pf_cond = PTHREAD_COND_INITIALIZER;
+static ScrSaPfRange scr_sa_pf_ring[SCR_SA_PF_RING];
+static unsigned scr_sa_pf_head, scr_sa_pf_tail; /* under the lock */
+static bool scr_sa_pf_started, scr_sa_pf_waiting;
+/* 0 = not decided yet, 1 = on, -1 = off (environment, no thread, or a
+ * kernel without MADV_POPULATE_WRITE). */
+static _Atomic(int) scr_sa_pf_state;
+
+static void scr_sa_pf_populate(char *lo, char *hi) {
+  if (madvise(lo, (size_t)(hi - lo), MADV_POPULATE_WRITE) != 0 && errno == EINVAL)
+    atomic_store_explicit(&scr_sa_pf_state, -1, memory_order_relaxed);
+}
+
+/* The system allocator's heap (glibc): blocks above SCR_SA_MAX come from
+ * malloc, whose main arena grows by brk. With a larger top pad
+ * (SCR_SA_PF_TOP_PAD) every extension runs that far ahead of use, and the
+ * helper faults in each new extension as soon as it sees the break move.
+ * It checks after every request and then polls while the program keeps
+ * allocating (SCR_SA_PF_POLL_NS, up to SCR_SA_PF_POLLS times without
+ * growth before it sleeps until the next request), so an idle program does
+ * not wake it. Only the helper reads the break; a stale read only delays a
+ * fault-in, and a shrunk break (malloc trimming its top) restarts the
+ * watermark there. The pad costs at most SCR_SA_PF_TOP_PAD of committed
+ * memory beyond what malloc would have; SCR_SA_PREFAULT_HEAP=0 keeps glibc's
+ * defaults and no polling. */
+#if defined(__GLIBC__)
+#include <malloc.h>
+#include <time.h>
+#include <unistd.h>
+#define SCR_SA_PF_HEAP 1
+#define SCR_SA_PF_TOP_PAD ((size_t)16 << 20)
+#define SCR_SA_PF_POLL_NS 1000000L
+#define SCR_SA_PF_POLLS 64u
+static int scr_sa_pf_heap_mode; /* 0 off, 1 on; decided before the helper starts */
+static uintptr_t scr_sa_pf_page; /* likewise */
+static char *scr_sa_pf_brk;      /* helper only */
+
+/* Faults in the heap's growth since the last check; true if it grew. */
+static bool scr_sa_pf_heap(void) {
+  char *cur = sbrk(0);
+  if (cur == (char *)-1) return false;
+  char *seen = scr_sa_pf_brk;
+  scr_sa_pf_brk = cur;
+  if (!seen || cur <= seen) return false;
+  scr_sa_pf_populate((char *)((uintptr_t)seen & ~(scr_sa_pf_page - 1)), cur);
+  return true;
+}
+#endif
+
+static void *scr_sa_pf_main(void *arg) {
+  (void)arg;
+#ifdef SCR_SA_PF_HEAP
+  unsigned idle = SCR_SA_PF_POLLS;
+#endif
+  pthread_mutex_lock(&scr_sa_pf_lock);
+  for (;;) {
+    while (scr_sa_pf_head == scr_sa_pf_tail) {
+      scr_sa_pf_waiting = true;
+#ifdef SCR_SA_PF_HEAP
+      if (scr_sa_pf_heap_mode && idle < SCR_SA_PF_POLLS) {
+        struct timespec t;
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        t.tv_nsec += SCR_SA_PF_POLL_NS;
+        if (t.tv_nsec >= 1000000000L) {
+          t.tv_sec++;
+          t.tv_nsec -= 1000000000L;
+        }
+        int rc = pthread_cond_timedwait(&scr_sa_pf_cond, &scr_sa_pf_lock, &t);
+        scr_sa_pf_waiting = false;
+        if (rc != 0 && scr_sa_pf_head == scr_sa_pf_tail) {
+          pthread_mutex_unlock(&scr_sa_pf_lock);
+          idle = scr_sa_pf_heap() ? 0 : idle + 1;
+          pthread_mutex_lock(&scr_sa_pf_lock);
+        }
+        continue;
+      }
+#endif
+      pthread_cond_wait(&scr_sa_pf_cond, &scr_sa_pf_lock);
+      scr_sa_pf_waiting = false;
+    }
+    ScrSaPfRange r = scr_sa_pf_ring[scr_sa_pf_tail++ % SCR_SA_PF_RING];
+    pthread_mutex_unlock(&scr_sa_pf_lock);
+    scr_sa_pf_populate(r.lo, r.hi);
+#ifdef SCR_SA_PF_HEAP
+    if (scr_sa_pf_heap_mode) {
+      (void)scr_sa_pf_heap();
+      idle = 0;
+    }
+#endif
+    pthread_mutex_lock(&scr_sa_pf_lock);
+  }
+  return NULL;
+}
+
+static bool scr_sa_pf_on(void) {
+  int s = atomic_load_explicit(&scr_sa_pf_state, memory_order_relaxed);
+  if (s == 0) {
+    const char *v = getenv("SCR_SA_PREFAULT");
+    s = v && v[0] == '0' ? -1 : 1;
+    atomic_store_explicit(&scr_sa_pf_state, s, memory_order_relaxed);
+  }
+  return s > 0;
+}
+
+/* Asks the helper to fault in [lo, hi) (page aligned). Dropped when the
+ * ring is full: the owner then faults those pages itself. */
+static void scr_sa_prefault(char *lo, char *hi) {
+  if (hi <= lo || !scr_sa_pf_on()) return;
+  pthread_mutex_lock(&scr_sa_pf_lock);
+  if (!scr_sa_pf_started) {
+    scr_sa_pf_started = true;
+#ifdef SCR_SA_PF_HEAP
+    /* Nobody waits on the condition yet: give it the monotonic clock for
+     * the helper's polls (no polls without it). */
+    const char *v = getenv("SCR_SA_PREFAULT_HEAP");
+    long page = sysconf(_SC_PAGESIZE);
+    pthread_condattr_t ca;
+    if (!(v && v[0] == '0') && page > 0 && pthread_condattr_init(&ca) == 0) {
+      if (pthread_condattr_setclock(&ca, CLOCK_MONOTONIC) == 0) {
+        pthread_cond_destroy(&scr_sa_pf_cond);
+        pthread_cond_init(&scr_sa_pf_cond, &ca);
+        scr_sa_pf_page = (uintptr_t)page;
+        scr_sa_pf_heap_mode = 1;
+        (void)mallopt(M_TOP_PAD, (int)SCR_SA_PF_TOP_PAD);
+      }
+      pthread_condattr_destroy(&ca);
+    }
+#endif
+    /* The helper takes no signals: they stay with the program's threads. */
+    pthread_attr_t attr;
+    pthread_t helper;
+    sigset_t all, old;
+    sigfillset(&all);
+    bool ok = pthread_attr_init(&attr) == 0;
+    if (ok) {
+      bool masked = pthread_sigmask(SIG_SETMASK, &all, &old) == 0;
+      ok = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0 &&
+           pthread_attr_setstacksize(&attr, (size_t)64 << 10) == 0 &&
+           pthread_create(&helper, &attr, scr_sa_pf_main, NULL) == 0;
+      if (masked) (void)pthread_sigmask(SIG_SETMASK, &old, NULL);
+      pthread_attr_destroy(&attr);
+    }
+    if (!ok) atomic_store_explicit(&scr_sa_pf_state, -1, memory_order_relaxed);
+  }
+  if (atomic_load_explicit(&scr_sa_pf_state, memory_order_relaxed) > 0 &&
+      scr_sa_pf_head - scr_sa_pf_tail < SCR_SA_PF_RING) {
+    scr_sa_pf_ring[scr_sa_pf_head++ % SCR_SA_PF_RING] = (ScrSaPfRange){lo, hi};
+    if (scr_sa_pf_waiting) pthread_cond_signal(&scr_sa_pf_cond);
+  }
+  pthread_mutex_unlock(&scr_sa_pf_lock);
+}
+#endif
+
 /* The next bump limit of a class slice [start, end) whose limit is lim
  * (< end): its small-page prefix ends at SCR_SA_HUGE_AFTER, where the rest
- * of the slice switches to huge pages. */
+ * of the slice switches to huge pages. With pre-faulting, limits advance in
+ * steps (see above). */
 static char *scr_sa_extend(char *start, char *lim, char *end) {
 #ifdef SCR_SA_THP
-  if ((size_t)(lim - start) < SCR_SA_HUGE_AFTER && (size_t)(end - start) > SCR_SA_HUGE_AFTER)
-    return start + SCR_SA_HUGE_AFTER;
+  char *sw = start + SCR_SA_HUGE_AFTER;
+  bool tiered = (size_t)(end - start) > SCR_SA_HUGE_AFTER;
+#ifdef SCR_SA_PREFAULT
+  if (scr_sa_pf_on()) {
+    if (!tiered) return end;
+    if (lim < sw) {
+      char *next = lim + SCR_SA_PF_STEP < sw ? lim + SCR_SA_PF_STEP : sw;
+      if (next == sw) {
+        /* The last small-page chunk: switch the rest now, so the first huge
+         * page can be faulted ahead like every later one. */
+        (void)madvise(sw, (size_t)(end - sw), MADV_HUGEPAGE);
+        scr_sa_prefault(sw, sw + SCR_SA_HUGE_PAGE < end ? sw + SCR_SA_HUGE_PAGE : end);
+      } else if (lim > start) {
+        /* The second chunk was not faulted ahead either. */
+        char *lo = lim == start + SCR_SA_PF_STEP ? lim : next;
+        scr_sa_prefault(lo, next + SCR_SA_PF_STEP < sw ? next + SCR_SA_PF_STEP : sw);
+      }
+      return next;
+    }
+    char *next = lim + SCR_SA_PF_HUGE_STEP < end ? lim + SCR_SA_PF_HUGE_STEP : end;
+    /* Entering the second half of a huge page: fault the next one. */
+    if (((uintptr_t)next & (SCR_SA_HUGE_PAGE - 1)) == 0 && next < end)
+      scr_sa_prefault(next, next + SCR_SA_HUGE_PAGE < end ? next + SCR_SA_HUGE_PAGE : end);
+    return next;
+  }
+#endif
+  if ((size_t)(lim - start) < SCR_SA_HUGE_AFTER && tiered) return sw;
   if (lim > start) (void)madvise(lim, (size_t)(end - lim), MADV_HUGEPAGE);
 #else
   (void)start;
