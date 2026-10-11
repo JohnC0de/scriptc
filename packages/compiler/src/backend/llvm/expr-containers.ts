@@ -31,7 +31,12 @@ import {
 } from "./map-number-lookup.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
 import { emitStringSliceRead } from "./string-slices.js";
-import { STRING_CHAR_CODE_AT_DECL, STRING_UTF16_LEN_DECL } from "./string-reads.js";
+import {
+  STRING_CHAR_CODE_AT_DECL,
+  STRING_CHAR_CODE_AT_INT_MARKER,
+  STRING_UTF16_LEN_DECL,
+} from "./string-reads.js";
+import { exactInteger, widenInteger } from "./integer-values.js";
 import { emitDenseArrayNumber, emitDenseArrayPush } from "./dense-array-access.js";
 import { emitUnionWiden } from "./expr-records.js";
 
@@ -293,6 +298,13 @@ export function emitStrIntrinsic(
     case "charCodeAt": {
       host.declare(STRING_CHAR_CODE_AT_DECL);
       const t = B.tmp();
+      const index = e.args[0] ? exactInteger(host, args[0]!, e.args[0]) : null;
+      if (index) {
+        host.declare(STRING_CHAR_CODE_AT_INT_MARKER);
+        const wide = widenInteger(host, index);
+        B.line(`${t} = call double @sc_str_char_code_at_int(ptr ${r.name}, i64 ${wide})`);
+        return { name: t, type: e.type };
+      }
       B.line(`${t} = call double @sc_str_char_code_at(ptr ${r.name}, double ${args[0]!.name})`);
       return { name: t, type: e.type };
     }

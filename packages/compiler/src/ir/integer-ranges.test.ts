@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { analyzeIntegerRanges } from "./integer-ranges.js";
-import { BOOL, F64, type IrExpr, type IrFunction, type IrStmt } from "./ir.js";
+import { BOOL, F64, STRING, type IrExpr, type IrFunction, type IrStmt } from "./ir.js";
 
 const loc = { file: "test.ts", start: 0, end: 0 };
 const num = (value: number): IrExpr => ({ loc, kind: "numLit", value, type: F64 });
@@ -418,4 +418,28 @@ test("whole-program slot facts seed parameters, field reads and call results", (
     call: (callee) => (callee === "bits" ? INT32 : null),
   });
   expect([seeded.get(field), seeded.get(result), seeded.get(param)]).toEqual([INT32, INT32, INT32]);
+});
+
+test("string lengths and found indices are int32, other string reads stay unknown", () => {
+  const text: IrExpr = { loc, kind: "strLit", value: "abc", type: STRING };
+  const read = (method: "length" | "indexOf" | "charCodeAt", args: IrExpr[] = []): IrExpr => ({
+    loc,
+    kind: "strIntrinsic",
+    method,
+    receiver: text,
+    args,
+    type: F64,
+  });
+  const length = read("length");
+  const found = read("indexOf", [{ loc, kind: "strLit", value: "b", type: STRING }]);
+  const code = read("charCodeAt", [num(0)]);
+  const next = bin("+", length, num(1));
+  const ranges = analyzeIntegerRanges(
+    fn([observe(length), observe(found), observe(code), observe(next)]),
+  );
+  expect(ranges.get(length)).toEqual({ min: 0, max: 2147483647 });
+  expect(ranges.get(found)).toEqual({ min: -1, max: 2147483647 });
+  // charCodeAt can be NaN.
+  expect(ranges.get(code)).toBeNull();
+  expect(ranges.get(next)).toEqual({ min: 1, max: 2147483648 });
 });
