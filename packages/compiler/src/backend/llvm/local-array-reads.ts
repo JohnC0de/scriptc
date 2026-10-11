@@ -115,10 +115,19 @@ function inlineArrayRead(
       nullable?.(value.type.unionId) !== true
     )
       return null;
-    return { type: value.type, element, presentTag, missingTag, array, index, nullableElement: true };
+    return {
+      type: value.type,
+      element,
+      presentTag,
+      missingTag,
+      array,
+      index,
+      nullableElement: true,
+    };
   }
   const element = array.type.elem;
-  if ((!isRefCounted(element) && !isScalarElement(element)) || element.kind === "union") return null;
+  if ((!isRefCounted(element) && !isScalarElement(element)) || element.kind === "union")
+    return null;
   const presentTag = arms.findIndex((arm) => typeEquals(arm, element));
   if (presentTag < 0 || then.kind !== "unionWrap" || then.tag !== presentTag) return null;
   return { type: value.type, element, presentTag, missingTag, array, index };
