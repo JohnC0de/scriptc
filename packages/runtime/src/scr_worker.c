@@ -11,6 +11,33 @@
 #include <pthread.h>
 #endif
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <unistd.h>
+
+/* Every worker's mailbox holds descriptors. Once a process passes 64 of
+ * them, the kernel grows its descriptor table, and while other threads share
+ * the table it first waits a full RCU grace period (synchronize_rcu in
+ * expand_fdtable): measured 11-25 ms on a 16-vCPU host, on the thread that
+ * starts the next worker. Growing the table at load, while the process still
+ * has one thread, never waits; the table never shrinks. 256 entries leave
+ * room for the most workers the allocator gives arenas to. */
+__attribute__((constructor)) static void scr_worker_reserve_fd_table(void) {
+  const int top = 255;
+  struct rlimit limit;
+  if (getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur <= (rlim_t)top)
+    return;
+  for (int fd = 0; fd <= 2; fd++) {
+    int copy = fcntl(fd, F_DUPFD_CLOEXEC, top);
+    if (copy >= 0) {
+      (void)close(copy);
+      return;
+    }
+  }
+}
+#endif
+
 struct ScrWorkerThread {
   atomic_size_t references;
   atomic_bool cancel;

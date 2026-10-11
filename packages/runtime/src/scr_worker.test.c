@@ -54,7 +54,32 @@ static int entry(uint32_t root_id) {
   return (int)root_id;
 }
 
+#if defined(__linux__)
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+
+/* Worker builds grow the descriptor table at load, while the process has one
+ * thread: growing it later, with threads sharing it, waits a full RCU grace
+ * period on the thread that opens the next worker's mailbox. */
+static void check_fd_table_reserved(void) {
+  struct rlimit limit;
+  if (getrlimit(RLIMIT_NOFILE, &limit) != 0 || (limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur <= 255)) return;
+  FILE *status = fopen("/proc/self/status", "r");
+  assert(status);
+  char line[256];
+  long size = -1;
+  while (fgets(line, sizeof line, status))
+    if (strncmp(line, "FDSize:", 7) == 0) size = strtol(line + 7, NULL, 10);
+  fclose(status);
+  assert(size >= 256);
+}
+#endif
+
 int main(void) {
+#if defined(__linux__)
+  check_fd_table_reserved();
+#endif
   scr_init();
   scr_lib_init(0, NULL);
   ScrMailbox *mailbox = scr_mailbox_new();
