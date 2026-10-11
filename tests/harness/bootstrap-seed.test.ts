@@ -75,7 +75,9 @@ test("CI restores each seed only into its matching instrumented bootstrap lane",
   expect([...checkFlavors].toSorted()).toEqual(seed.strategy.matrix.flavor);
   expect(seed.env.SCRIPTC_SAN).toBe(checks.env.SCRIPTC_SAN);
   const prepare = seed.steps.find((step) => step.run === "node scripts/bootstrap-seed.mjs")!;
-  const execute = checks.steps.find((step) => step.run === "node scripts/ci-native-bootstrap.mjs")!;
+  const execute = checks.steps.find((step) =>
+    step.run?.split("\n").includes("node scripts/ci-native-bootstrap.mjs"),
+  )!;
   expect(prepare.env?.SCRIPTC_BOOTSTRAP_SEED_DIRECTORY).toBe("${{ runner.temp }}/native-bootstrap");
   expect(execute.env?.SCRIPTC_BOOTSTRAP_SEED_DIRECTORY).toBe(
     prepare.env?.SCRIPTC_BOOTSTRAP_SEED_DIRECTORY,
