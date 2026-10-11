@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { writeTextPartsSync } from "./text-file.js";
 import type {
   AnalyzeOptions,
   AnalyzeResult,
@@ -320,7 +321,7 @@ export class NativeCompiler {
       const stem = basename(entry).replace(/\.(ts|mts|cts|js|mjs|cjs)$/, "");
       const llvmPath = join(options.outDir, `${stem}.ll`);
       if (outputKind === "ir") {
-        writeFileSync(stagedOutput, prepared.ir!);
+        writeTextPartsSync(stagedOutput, prepared.ir!);
         renameSync(stagedOutput, output);
         return { ok: true, artifact: { kind: "ir", path: output } };
       }
@@ -464,7 +465,7 @@ export class NativeCompiler {
       let irPath: string | undefined;
       if (options.emitIr) {
         irPath = join(options.outDir, `${stem}.ir.json`);
-        writeFileSync(irPath, prepared.ir!);
+        writeTextPartsSync(irPath, prepared.ir!);
       }
       renameSync(stagedOutput, output);
       if (target.platform === "darwin" && (optimization !== "dev" || options.strip))
@@ -614,7 +615,7 @@ export class NativeCompiler {
       let irPath: string | undefined;
       if (options.emitIr) {
         irPath = join(options.outDir, `${stem}.lib.ir.json`);
-        writeFileSync(irPath, prepared.ir!);
+        writeTextPartsSync(irPath, prepared.ir!);
       }
       let sidecarPath: string | undefined;
       if (prepared.sidecarJson !== null) {
