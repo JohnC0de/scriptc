@@ -70,7 +70,7 @@ static void scr_box_gcfree(void *o) {
 }
 
 ScrBox *scr_box_new(ScrBoxKind kind) {
-  static const ScrCycType cyc_type = { &scr_box_trace, &scr_box_gcfree };
+  static const ScrCycType cyc_type = { &scr_box_trace, &scr_box_gcfree, SCR_CYC_KIND_BOX };
   ScrBox *b = scr_cyc_alloc_inline(sizeof(ScrBox), &cyc_type);
   b->rc = 1;
   b->kind = kind;
@@ -186,7 +186,7 @@ static void scr_closure_gcfree(void *o) {
 }
 
 ScrClosure *scr_closure_new(void *fn, size_t ncaps) {
-  static const ScrCycType cyc_type = { &scr_closure_trace, &scr_closure_gcfree };
+  static const ScrCycType cyc_type = { &scr_closure_trace, &scr_closure_gcfree, SCR_CYC_KIND_CLOSURE };
   ScrClosure *c = scr_cyc_alloc_inline(sizeof(ScrClosure) + ncaps * sizeof(ScrBox *), &cyc_type);
   c->rc = 1;
   c->fn = fn;

@@ -100,7 +100,7 @@ for (const backend of ["llvm"] as const) {
           object_format: target.objectFormat,
           minimum_os: target.minimumOs,
         },
-        runtime_abi: { version: 11, marker: "scr_runtime_abi_v11" },
+        runtime_abi: { version: 12, marker: "scr_runtime_abi_v12" },
         compiler: { command: "fixture", identity: "fixture", target: target.llvmTriple },
         macros: { executable: [], excluded: [], sanitizer: "external-toolchain-required" },
         flavors: {

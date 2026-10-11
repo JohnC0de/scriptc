@@ -133,6 +133,7 @@ void scr_weak_dispose(void *object) {
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Every heap object's first member is `size_t rc`. */
 #define SCR_RC(obj) (*(size_t *)(obj))
@@ -188,6 +189,9 @@ typedef struct {
   size_t trigger;
   size_t scheduled_mature_age;
   size_t xg_freed;
+  struct ScrCycKind *kinds;
+  size_t kinds_cap;
+  unsigned bypass_tick;
 } ScrCycThread;
 static _Thread_local ScrCycThread scr_cyc_thread = {.gen_limit = SCR_CYC_OLD};
 #define scr_destroy_depth (scr_cyc_thread.destroy_depth)
@@ -211,6 +215,9 @@ static _Thread_local ScrCycThread scr_cyc_thread = {.gen_limit = SCR_CYC_OLD};
 #define scr_cyc_trigger (scr_cyc_thread.trigger)
 #define scr_cyc_scheduled_mature_age (scr_cyc_thread.scheduled_mature_age)
 #define scr_xg_freed (scr_cyc_thread.xg_freed)
+#define scr_cyc_kinds (scr_cyc_thread.kinds)
+#define scr_cyc_kinds_cap (scr_cyc_thread.kinds_cap)
+#define scr_cyc_bypass_tick (scr_cyc_thread.bypass_tick)
 #endif
 #ifndef SCR_WORKERS
 static SCR_TL unsigned scr_destroy_depth;
@@ -586,6 +593,108 @@ void scr_cyc_collect_scheduled(void) {
   scr_cyc_collect_due();
 }
 
+/* ── level bypass ─────────────────────────────────────────────────────── */
+
+/* A nursery pass costs about the same for every candidate it walks, and
+ * nearly every long-lived object is a candidate once, soon after it is
+ * built: the release of the constructing frame's reference leaves it held
+ * only by the structure it was stored into. So the nursery walks almost the
+ * whole long-lived heap once, then re-buffers it for the mature level, whose
+ * next pass walks it again. For most types neither walk finds anything: a
+ * compiler's symbols, symbol links and syntax nodes survive essentially
+ * always, and in tsc-ts they are half of what nursery passes walk. Garbage
+ * cycles in the younger levels come from a few types (inference contexts
+ * and their mappers, closures, some arrays).
+ *
+ * So each thread keeps, per collector type (ScrCycType.kind) and for the
+ * nursery and mature levels, how many of the type's candidates passes at
+ * that level walked and how many of its objects they freed. After every
+ * BYPASS_WINDOW walked candidates, the type bypasses that level for the
+ * next window if its objects were freed in fewer than one in BYPASS_RATIO
+ * of them. A release that buffers an object of a bypassed level promotes
+ * it past the level first, and so does a nursery pass that re-buffers a
+ * survivor into a level the type bypasses: the candidate waits in an older
+ * buffer, and passes of the bypassed level stop at it as they stop at any
+ * older object. One in BYPASS_SAMPLE such candidates stays put, so a
+ * bypassed type keeps being measured, and a type whose objects start dying
+ * at that level again is walked there again after one window.
+ *
+ * This changes only which generation an object is judged in. Any
+ * generation assignment is sound (a restricted pass treats edges from older
+ * objects as external), and a bypassing candidate is buffered like any
+ * other, so a dead cycle through it keeps a buffered member exactly as a
+ * survivor re-buffered into the next generation does. Full passes walk
+ * everything they did before, so the old level's bounds above are
+ * unchanged; garbage cycles made only of objects of a bypassing type wait
+ * for the next pass at an older level, by construction a type whose
+ * candidates almost never die at the bypassed one. Small programs never
+ * complete a window and are collected exactly as before. */
+#define SCR_CYC_BYPASS_WINDOW 8192 /* walked candidates per decision */
+#define SCR_CYC_BYPASS_RATIO 128   /* bypass when freed < walked / RATIO */
+#define SCR_CYC_BYPASS_SAMPLE 16   /* a bypassed type still walks 1 in SAMPLE */
+
+/* One level's statistics for a type. */
+typedef struct {
+  uint32_t walked; /* candidates walked by passes at this level, this window */
+  uint32_t freed;  /* objects freed by passes at this level, this window */
+  uint32_t bypass; /* the last window's decision */
+} ScrCycLevelStat;
+typedef struct ScrCycKind {
+  ScrCycLevelStat level[2]; /* SCR_CYC_NURSERY, SCR_CYC_MATURE */
+} ScrCycKind;
+
+#ifndef SCR_WORKERS
+static SCR_TL ScrCycKind *scr_cyc_kinds;
+static SCR_TL size_t scr_cyc_kinds_cap;
+static SCR_TL unsigned scr_cyc_bypass_tick;
+#endif
+
+/* The statistics of `kind` (nonzero), growing the table to cover it. */
+static SCR_CYC_COMPACT ScrCycKind *scr_cyc_kind_grow(uint32_t kind) {
+  size_t cap = scr_cyc_kinds_cap ? scr_cyc_kinds_cap : 256;
+  while (cap <= kind) cap *= 2;
+  ScrCycKind *kinds = realloc(scr_cyc_kinds, cap * sizeof *kinds);
+  if (!kinds) scr_cyc_oom();
+  memset(kinds + scr_cyc_kinds_cap, 0, (cap - scr_cyc_kinds_cap) * sizeof *kinds);
+  scr_cyc_kinds = kinds;
+  scr_cyc_kinds_cap = cap;
+  return &kinds[kind];
+}
+static inline ScrCycKind *scr_cyc_kind(uint32_t kind) {
+  return kind < scr_cyc_kinds_cap ? &scr_cyc_kinds[kind] : scr_cyc_kind_grow(kind);
+}
+
+/* Whether a candidate of this type at level `gen` (nursery or mature)
+ * skips that level's passes (see above). */
+static inline bool scr_cyc_bypassed(const ScrCycType *type, unsigned gen) {
+  uint32_t kind = type->kind;
+  return kind < scr_cyc_kinds_cap && scr_cyc_kinds[kind].level[gen].bypass
+         && ++scr_cyc_bypass_tick % SCR_CYC_BYPASS_SAMPLE != 0;
+}
+
+/* The generation a release buffers an object into: its own, or past the
+ * levels its type bypasses. */
+static inline unsigned scr_cyc_buffer_gen(const ScrCycType *type, unsigned gen) {
+  if (gen == SCR_CYC_NURSERY && scr_cyc_bypassed(type, SCR_CYC_NURSERY)) gen = SCR_CYC_MATURE;
+  if (gen == SCR_CYC_MATURE && scr_cyc_bypassed(type, SCR_CYC_MATURE)) gen = SCR_CYC_OLD;
+  return gen;
+}
+
+/* A pass at `gen` (nursery or mature) walks a candidate of `type`: count
+ * it, and decide the next window when this one is full. */
+static inline void scr_cyc_walked(const ScrCycType *type, unsigned gen) {
+  if (!type->kind) return;
+  ScrCycLevelStat *k = &scr_cyc_kind(type->kind)->level[gen];
+  if (++k->walked == SCR_CYC_BYPASS_WINDOW) {
+    k->bypass = k->freed * SCR_CYC_BYPASS_RATIO < SCR_CYC_BYPASS_WINDOW;
+    k->walked = k->freed = 0;
+  }
+}
+/* A pass at `gen` (nursery or mature) frees an object of `type`. */
+static inline void scr_cyc_freed(const ScrCycType *type, unsigned gen) {
+  if (type->kind) scr_cyc_kind(type->kind)->level[gen].freed++;
+}
+
 void scr_cyc_on_dead(void *obj) {
   ScrCycHdr *h = scr_cyc_hdr(obj);
   if (!h->buffered) return;
@@ -613,6 +722,7 @@ void scr_cyc_on_release(void *obj) {
   /* Releasing an existing candidate cannot advance the trigger. A pass
    * always re-arms after its teardowns, including any candidates they add. */
   if (h->buffered) return;
+  if (h->gen < SCR_CYC_OLD) h->gen = (uint8_t)scr_cyc_buffer_gen(h->type, h->gen);
   ScrVec *b = &scr_roots[h->gen];
   if (b->n == b->cap) scr_cyc_grow(b);
   h->buffered = 1;
@@ -784,6 +894,7 @@ static SCR_CYC_COMPACT size_t scr_cyc_settle(unsigned gen_limit) {
     ScrCycHdr *h = scr_cyc_hdr(obj);
     if (h->color != SCR_CYC_WHITE) continue;
     h->color = SCR_CYC_DOOMED;
+    if (gen_limit < SCR_CYC_OLD) scr_cyc_freed(h->type, gen_limit);
     scr_white.v[dead++] = obj;
   }
   scr_white.n = dead;
@@ -829,6 +940,10 @@ static SCR_CYC_COMPACT size_t scr_cyc_settle(unsigned gen_limit) {
       ScrCycHdr *h = scr_cyc_hdr(obj);
       if (h->color == SCR_CYC_DOOMED) continue; /* being freed below */
       if (!h->buffered) {
+        /* A survivor promoted into a level its type bypasses moves past
+         * it, as a release would buffer it. */
+        if (h->gen == SCR_CYC_MATURE && scr_cyc_bypassed(h->type, SCR_CYC_MATURE))
+          h->gen = SCR_CYC_OLD;
         h->buffered = 1;
         h->buf_index = (uint32_t)scr_roots[h->gen].n;
         scr_cyc_push(&scr_roots[h->gen], obj);
@@ -891,6 +1006,7 @@ static size_t scr_cyc_pass(unsigned gen_limit) {
       void *obj = scr_roots[g].v[i];
       ScrCycHdr *h = scr_cyc_hdr(obj);
       h->buffered = 0;
+      if (gen_limit < SCR_CYC_OLD) scr_cyc_walked(h->type, gen_limit);
       scr_cyc_push(&scr_cands, obj);
     }
     scr_roots[g].n = 0;
@@ -913,6 +1029,11 @@ static size_t scr_cyc_pass(unsigned gen_limit) {
 
   return scr_cyc_settle(gen_limit);
 }
+
+#ifdef SCR_CYC_TESTING
+/* Tests only: one pass at exactly `gen`, outside the schedule. */
+size_t scr_cyc_pass_at(unsigned gen) { return scr_cyc_pass(gen); }
+#endif
 
 void scr_collect_cycles(void) {
   /* The full pass, run to a fixpoint. A teardown's releases can drop the
@@ -937,4 +1058,7 @@ void scr_cyc_context_cleanup(void) {
     free(vectors[i]->v);
     *vectors[i] = (ScrVec){0};
   }
+  free(scr_cyc_kinds);
+  scr_cyc_kinds = NULL;
+  scr_cyc_kinds_cap = 0;
 }

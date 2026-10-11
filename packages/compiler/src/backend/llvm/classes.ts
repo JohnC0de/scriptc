@@ -599,6 +599,7 @@ export function emitClassShapes(
           cycType,
           `@${mangleClassTrace(cls.name)}`,
           `@${mangleClassGcFree(cls.name)}`,
+          host.nextCycKind?.() ?? 0,
         ),
         ``,
       );

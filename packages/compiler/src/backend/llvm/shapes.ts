@@ -63,6 +63,11 @@ export interface ShapeHost {
    * keeps every retain/release a runtime call: inline RC is a
    * size-for-speed optimization of the `speed` posture only. */
   readonly rcHelpers: Set<string> | null;
+  /** The next collector statistics index for an emitted ScrCycType
+   * descriptor (cycTypeDescriptor), counting from FIRST_EMITTED_CYC_KIND
+   * in emission order.
+   * Absent: every descriptor gets 0, which keeps no statistics. */
+  nextCycKind?(): number;
 }
 
 /** Every emitted function/helper carries #0 = { sanitize_address } — see
@@ -982,6 +987,7 @@ export function emitRecordShapes(
           cycType,
           `@${mangleRecordTrace(shape.id)}`,
           `@${mangleRecordGcFree(shape.id)}`,
+          host.nextCycKind?.() ?? 0,
         ),
         ``,
       );
