@@ -15808,6 +15808,12 @@
     "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts": {
+   "order": [
+    "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts"
+   ],
+   "diags": []
   }
  }
 }

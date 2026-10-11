@@ -233,7 +233,7 @@ static void scr_caught_gcfree(void *object) {
 }
 
 ScrCaught *scr_exc_take(void) {
-  static const ScrCycType cyc_type = { &scr_caught_trace_v, &scr_caught_gcfree };
+  static const ScrCycType cyc_type = { &scr_caught_trace_v, &scr_caught_gcfree, SCR_CYC_KIND_CAUGHT };
   ScrCaught *c = scr_cyc_alloc(sizeof *c, &cyc_type);
   c->rc = 1;
   c->kind = scr_exc_kind;

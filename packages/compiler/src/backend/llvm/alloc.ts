@@ -129,10 +129,18 @@ export interface CycHeader {
   type: string;
 }
 
-/** The definition of a shape's ScrCycType descriptor `{ trace, free_fn }`,
- * referenced by every header of that shape. */
-export function cycTypeDescriptor(name: string, trace: string, free: string): string {
-  return `${name} = internal constant { ptr, ptr } { ptr ${trace}, ptr ${free} }`;
+/** The first collector statistics index of an emitted ScrCycType
+ * descriptor; the runtime's own families use the ones below
+ * (SCR_CYC_KIND_EMITTED in scr_runtime.h). */
+export const FIRST_EMITTED_CYC_KIND = 32;
+
+/** The definition of a shape's ScrCycType descriptor `{ trace, free_fn,
+ * kind }`, referenced by every header of that shape. `kind` indexes the
+ * collector's per-type statistics (scr_runtime.h); emitted shapes number
+ * themselves from FIRST_EMITTED_CYC_KIND (ShapeHost.nextCycKind) and 0
+ * keeps none. */
+export function cycTypeDescriptor(name: string, trace: string, free: string, kind = 0): string {
+  return `${name} = internal constant { ptr, ptr, i32 } { ptr ${trace}, ptr ${free}, i32 ${kind} }`;
 }
 
 /**

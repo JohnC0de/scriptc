@@ -17,6 +17,7 @@ test("cycle traversal preserves counts, deep graphs, configured thresholds and g
     "-Wall",
     "-Wextra",
     "-fsanitize=address,undefined",
+    "-DSCR_CYC_TESTING",
     "-o",
     bin,
     join(testDir, "test_cycle.c"),
