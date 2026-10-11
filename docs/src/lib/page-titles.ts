@@ -8,6 +8,7 @@ export const PAGE_TITLES: Record<string, string> = {
   ffi: "Native FFI",
   "native-objects": "Native Program Objects",
   threads: "Sharing Data Between Workers",
+  contracts: "Contract Types",
   wasm: "WebAssembly Modules",
   platforms: "Platform Support",
   compatibility: "Node.js 24 Compatibility",

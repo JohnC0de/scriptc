@@ -418,8 +418,7 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
         for (const arg of e.args) expr(arg, facts);
         if (e.type.kind === "f64") {
           if (e.method === "length") range = { min: 0, max: STRING_LENGTH_LIMIT };
-          else if (e.method === "indexOf")
-            range = { min: -1, max: STRING_LENGTH_LIMIT };
+          else if (e.method === "indexOf") range = { min: -1, max: STRING_LENGTH_LIMIT };
         }
         break;
       }

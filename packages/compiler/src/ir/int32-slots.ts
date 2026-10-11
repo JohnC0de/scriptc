@@ -478,7 +478,6 @@ export function dynamicallyStoredFamilies(mod: IrModule, slots: Int32Slots): Set
         families.add(slots.family(cls.name, field.name)!);
   }
   return families;
-
 }
 
 /** How functions can be reached besides direct calls: as values (closures,

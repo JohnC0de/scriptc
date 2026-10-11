@@ -15834,6 +15834,54 @@
     "<repo>/tests/corpus/final-field-borrows.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4630-contract-int32.ts": {
+   "order": [
+    "<repo>/tests/corpus/4630-contract-int32.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4631-contract-nothrow.ts": {
+   "order": [
+    "<repo>/tests/corpus/4631-contract-nothrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4632-contract-immutable.ts": {
+   "order": [
+    "<repo>/tests/corpus/4632-contract-immutable.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-immutable.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-immutable.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-int32-escapes.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-int32-escapes.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-int32.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-int32.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-nothrow.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-nothrow.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-positions.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-positions.ts"
+   ],
+   "diags": []
   }
  }
 }

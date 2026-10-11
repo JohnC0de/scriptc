@@ -329,7 +329,8 @@ export function computeMayThrow(
           break;
       }
       if (explain) {
-        if (!threw && f.throws) f.seed = { kind: "seed", what: describeThrowingNode(rec), loc: rec.loc };
+        if (!threw && f.throws)
+          f.seed = { kind: "seed", what: describeThrowingNode(rec), loc: rec.loc };
         for (let i = callees; i < f.callees.length; i++)
           if (!f.calleeLocs!.has(f.callees[i]!)) f.calleeLocs!.set(f.callees[i]!, rec.loc);
         if (rec.kind === "newValue" && !f.calleeLocs!.has("\0classValue"))
@@ -433,6 +434,18 @@ export function computeMayThrow(
   };
 }
 
+/** Error constructors by runtime error kind (SCR_ERR_* in scr_runtime.h). */
+const ERROR_KIND_NAMES: readonly string[] = [
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "DOMException",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+];
+
 /** A short description of a node that seeds the may-throw fixpoint. */
 function describeThrowingNode(rec: IrExpr | IrStmt): string {
   const detail = rec as { method?: string; fn?: string; name?: string };
@@ -466,8 +479,23 @@ function describeThrowingNode(rec: IrExpr | IrStmt): string {
     case "yieldExpr":
     case "genResume":
       return "generator resumption";
-    case "libCall":
+    case "libCall": {
+      // Compiler-resolved Node throws: name the error and its message.
+      if (rec.fn === "error.nodeThrow" || rec.fn === "error.new") {
+        const nodeThrow = rec.fn === "error.nodeThrow";
+        const kind = rec.args[0];
+        const message = nodeThrow ? rec.args[2] : rec.args[0];
+        const name = nodeThrow
+          ? kind?.kind === "numLit"
+            ? (ERROR_KIND_NAMES[kind.value] ?? "Error")
+            : "Error"
+          : rec.type.kind === "object"
+            ? rec.type.className.replace(/^%/, "")
+            : "Error";
+        return message?.kind === "strLit" ? `throws ${name}: ${message.value}` : `throws ${name}`;
+      }
       return `library call ${detail.fn ?? ""}`.trimEnd();
+    }
     case "intrinsic":
       return `intrinsic ${detail.name ?? ""}`.trimEnd();
     case "arraySetLength":

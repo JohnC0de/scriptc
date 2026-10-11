@@ -128,6 +128,10 @@ scriptc checks programs against the `es2025` standard library and its own ambien
 
 A program that passes its project's TypeScript check may still use unsupported operations. A second preflight using the project's declarations distinguishes those sites from ordinary type errors and reports scriptc diagnostics with rewrite hints. Declared APIs without a compiler implementation, such as unsupported console members, produce `SC2020`.
 
+### Contract types
+
+[Contract types](/docs/contracts) are checked only where they are written as the annotation of a parameter, variable, class instance field or function result; aliases, interface members and nested type positions are reported. A surrounding `try`/`catch` does not discharge `NoThrow`. `Int32` refuses parameters of functions used as values and fields of classes whose instances reach dynamic code, and `Immutable` refuses values that reach dynamic code or that another reference can still change.
+
 ### three.js
 
 With `--npm-static=three`, native and WASI builds support published package imports and tested CPU workflows for math, bounds, procedural geometry, curves, shapes, extrusion, text geometry, scene graphs, cameras, lights, materials, textures, and render-target data. Mesh workflows include instancing, batching, morph targets, skeletal deformation, LOD, and sprites. Raycasting includes mesh intersections, sorted results, recursive traversal, layers, distance limits, camera rays, lines, and points.

@@ -22,4 +22,13 @@ function apply(f: (x: number) => number, x: number): NoThrow<number> {
   return f(x);
 }
 
+// The source type says `string`, but a caller passes a non-null asserted
+// element that can be missing; Node then throws inside the callee, so the
+// parameter is compiled as `string | undefined` and the read can throw.
+function width(text: string): NoThrow<number> {
+  return text.length;
+}
+
+const words = "a b".split(" ");
 console.log(sumDigits("123"), depth(3), apply((x) => x + 1, 1), apply((x) => parseDigit(String(x)), 2));
+console.log(width(words[0]!), width(words[1]!));

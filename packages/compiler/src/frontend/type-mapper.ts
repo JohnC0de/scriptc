@@ -4569,7 +4569,8 @@ function immutableSourceType(type: ts.Type, ctx: TypeMapperCtx): ts.Type | null 
       const ownerSymbol = checker.getSymbolAtLocation(owner.name);
       if (ownerSymbol) source = checker.getDeclaredTypeOfSymbol(ownerSymbol);
     }
-    if (source !== null && checker.getPropertiesOfType(source).length === props.length) return source;
+    if (source !== null && checker.getPropertiesOfType(source).length === props.length)
+      return source;
   }
   return null;
 }

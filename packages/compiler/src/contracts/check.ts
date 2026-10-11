@@ -102,9 +102,12 @@ class ContractChecker {
     this.positions = new SourceLocations(sources);
     for (const fn of mod.functions) {
       this.functions.set(fn.name, fn);
-      push(this.fnByLoc, contractLocKey(fn.loc), fn);
+      // Synthetic dynamic-class helpers (%dyn.*) carry the location of the
+      // code that first needed them, which is not their declaration.
+      if (!fn.name.startsWith("%dyn.")) push(this.fnByLoc, contractLocKey(fn.loc), fn);
       for (const local of fn.locals)
-        if (local.source) push(this.localsByLoc, contractLocKey(local.source.loc), { fn, localId: local.id });
+        if (local.source)
+          push(this.localsByLoc, contractLocKey(local.source.loc), { fn, localId: local.id });
     }
     for (const g of mod.globals ?? [])
       if (g.source) push(this.globalsByLoc, contractLocKey(g.source.loc), g.id);
@@ -147,6 +150,63 @@ class ContractChecker {
     if (fn?.sourceName !== undefined && fn.sourceName !== "<anonymous>") return fn.sourceName;
     if (fn !== undefined && /^%fn\d+$/.test(fnName)) return `the function at ${this.where(fn.loc)}`;
     return fnName.replace(/^%/, "");
+  }
+
+  /** A short TypeScript-like spelling of an IR type, for messages. */
+  typeText(t: IrType): string {
+    switch (t.kind) {
+      case "f64":
+        return "number";
+      case "bool":
+        return "boolean";
+      case "undefinedT":
+        return "undefined";
+      case "nullT":
+        return "null";
+      case "object":
+        return this.classes.get(t.className)?.jsName ?? t.className.replace(/^%(m\d+\.)?/, "");
+      case "union": {
+        const def = this.mod.unions?.find((u) => u.id === t.unionId);
+        return def ? def.arms.map((a) => this.typeText(a)).join(" | ") : "a union";
+      }
+      default:
+        return t.kind;
+    }
+  }
+
+  /** Why a throwing parameter access exists although the source type looks
+   * safe: the frontend compiles a parameter as `T | undefined` (or null)
+   * when a caller can pass a missing value, typically a non-null asserted
+   * element read `xs[i]!`, so the TypeError Node raises inside the callee
+   * happens there too. Names the parameter and the first such call. */
+  private widenedParams(fnName: string | undefined): string {
+    const fn = fnName === undefined ? undefined : this.functions.get(fnName);
+    if (fn === undefined) return "";
+    const nullable = (t: IrType): boolean =>
+      t.kind === "undefinedT" ||
+      t.kind === "nullT" ||
+      (t.kind === "union" &&
+        this.mod.unions
+          ?.find((u) => u.id === t.unionId)
+          ?.arms.some((a) => a.kind === "undefinedT" || a.kind === "nullT") === true);
+    const params = fn.params.filter((p) => nullable(p.type));
+    if (params.length === 0) return "";
+    const p = params[0]!;
+    const index = fn.params.indexOf(p);
+    let site: SrcLoc | null = null;
+    for (const caller of this.mod.functions) {
+      if (site !== null) break;
+      walk(caller.body, {
+        expr: (e) => {
+          if (site !== null || e.kind !== "call" || e.callee !== fn.name) return;
+          const arg = e.args[index];
+          if (arg !== undefined && nullable(arg.type)) site = arg.loc;
+        },
+      });
+    }
+    const name = p.name;
+    const because = site !== null ? `: the argument at ${this.where(site)} can be missing` : "";
+    return ` (parameter '${name}' is compiled as ${this.typeText(p.type)}${because})`;
   }
 
   /* ── binding annotations to IR ── */
@@ -217,7 +277,7 @@ class ContractChecker {
         const reason: MayThrowReason | undefined = mt.why?.get(current);
         if (reason === undefined) break;
         if (reason.kind === "seed") {
-          steps.push(`${reason.what} at ${this.where(reason.loc)}`);
+          steps.push(`${reason.what} at ${this.where(reason.loc)}${this.widenedParams(current)}`);
           current = undefined;
         } else if (reason.kind === "call") {
           steps.push(`calls '${this.displayName(reason.callee)}' at ${this.where(reason.loc)}`);
@@ -235,7 +295,7 @@ class ContractChecker {
         "SC7001",
         note.loc,
         `'${note.name}' is declared NoThrow but may throw: ${steps.join(" → ")}`,
-        "handle the error inside the function (try/catch around the throwing call), or remove NoThrow; a throw inside try/catch still counts in this version",
+        "remove the throwing operation from the path (or the recursion), or remove NoThrow; a surrounding try/catch does not discharge the contract in this version",
       );
     }
     this.record("noThrow", proven);
@@ -254,8 +314,14 @@ function int32Rewrite(text: string): string {
   const compound = /^([^=]+?)\s*(\*\*|>>>|<<|>>|[-+*/%&|^])=\s*(.+)$/.exec(text);
   if (compound) return `${compound[1]} = (${compound[1]} ${compound[2]} ${compound[3]}) | 0`;
   const assignment = /^([^=]+?)\s*=\s*([^=].*)$/.exec(text);
-  if (assignment) return `${assignment[1]} = (${assignment[2]}) | 0`;
-  return `(${text}) | 0`;
+  if (assignment) return `${assignment[1]} = ${orZero(assignment[2]!)}`;
+  return orZero(text);
+}
+
+/** `text | 0`, parenthesized unless `text` binds tighter than `|` for sure
+ * (a name, member chain, literal or call without nested parentheses). */
+function orZero(text: string): string {
+  return /^[\w$.]+(\([^()]*\))?$/.test(text) ? `${text} | 0` : `(${text}) | 0`;
 }
 
 function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
@@ -290,7 +356,12 @@ class Int32Contracts {
   }
 
   private refuse(note: ContractNote, why: string, hint: string): void {
-    this.c.report("SC7003", note.loc, `the Int32 contract on '${note.name}' cannot be checked: ${why}`, hint);
+    this.c.report(
+      "SC7003",
+      note.loc,
+      `the Int32 contract on '${note.name}' cannot be checked: ${why}`,
+      hint,
+    );
   }
 
   private bind(): boolean {
@@ -300,11 +371,19 @@ class Int32Contracts {
         if (note.marker !== "Int32") continue;
         for (const fn of c.functionsAt(key)) {
           if (fn.async === true || fn.generator !== undefined) {
-            this.refuse(note, "async functions and generators return promises or iterators", "annotate the awaited value where it is stored instead");
+            this.refuse(
+              note,
+              "async functions and generators return promises or iterators",
+              "annotate the awaited value where it is stored instead",
+            );
             continue;
           }
           if (fn.returnType.kind !== "f64") {
-            this.refuse(note, "the result is not a plain number", "write Int32 only on a number result");
+            this.refuse(
+              note,
+              "the result is not a plain number",
+              "write Int32 only on a number result",
+            );
             continue;
           }
           this.returns.set(fn.name, note);
@@ -317,7 +396,11 @@ class Int32Contracts {
           ? b.fn.locals.find((l) => l.id === b.id)?.type
           : c.mod.globals?.find((g) => g.id === b.id)?.type;
         if (type?.kind !== "f64") {
-          this.refuse(note, "the binding is not a plain number (optional and union types are not int32 slots)", "declare it as a required Int32");
+          this.refuse(
+            note,
+            "the binding is not a plain number (optional and union types are not int32 slots)",
+            "declare it as a required Int32",
+          );
           continue;
         }
         if (b.fn === null) {
@@ -325,7 +408,8 @@ class Int32Contracts {
           continue;
         }
         this.locals.set(`${b.fn.name}\0${b.id}`, note);
-        if (b.fn.params.some((p) => p.localId === b.id)) this.params.set(`${b.fn.name}\0${b.id}`, note);
+        if (b.fn.params.some((p) => p.localId === b.id))
+          this.params.set(`${b.fn.name}\0${b.id}`, note);
       }
     }
     for (const [key, note] of c.notes.fields) {
@@ -335,11 +419,19 @@ class Int32Contracts {
       for (const cls of c.classesAt(key.slice(0, cut))) {
         const def = cls.fields.find((f) => f.name === field);
         if (!def) {
-          this.refuse(note, `the compiled class has no field '${field}'`, "annotate an ordinary instance field");
+          this.refuse(
+            note,
+            `the compiled class has no field '${field}'`,
+            "annotate an ordinary instance field",
+          );
           continue;
         }
         if (def.type.kind !== "f64") {
-          this.refuse(note, "the field is not a plain number", "declare the field as a required Int32");
+          this.refuse(
+            note,
+            "the field is not a plain number",
+            "declare the field as a required Int32",
+          );
           continue;
         }
         const family = this.slots.family(cls.name, field);
@@ -353,7 +445,7 @@ class Int32Contracts {
 
   private propagateCaptures(): void {
     const c = this.c;
-    for (let changed = true; changed; ) {
+    for (let changed = true; changed;) {
       changed = false;
       for (const fn of c.mod.functions)
         walk(fn.body, {
@@ -389,12 +481,26 @@ class Int32Contracts {
       for (const [family, note] of this.fields) {
         const owner = family.slice(0, family.indexOf("\0"));
         let generic = false;
-        for (let cls = c.classes.get(owner); cls; cls = cls.base ? c.classes.get(cls.base) : undefined)
-          if (cls.runtime === true || cls.genericOf !== undefined || (cls.base && !c.classes.has(cls.base))) generic = true;
+        for (
+          let cls = c.classes.get(owner);
+          cls;
+          cls = cls.base ? c.classes.get(cls.base) : undefined
+        )
+          if (
+            cls.runtime === true ||
+            cls.genericOf !== undefined ||
+            (cls.base && !c.classes.has(cls.base))
+          )
+            generic = true;
         for (const cls of c.classes.values())
-          if (cls.genericOf !== undefined && (cls.genericOf === owner || cls.name === owner)) generic = true;
+          if (cls.genericOf !== undefined && (cls.genericOf === owner || cls.name === owner))
+            generic = true;
         if (generic)
-          this.refuse(note, "the class is generic or extends a runtime-provided class", "move the field to a non-generic class");
+          this.refuse(
+            note,
+            "the class is generic or extends a runtime-provided class",
+            "move the field to a non-generic class",
+          );
         else if (dynamic.has(family))
           this.refuse(
             note,
@@ -405,8 +511,7 @@ class Int32Contracts {
     }
     if (this.params.size > 0) {
       const children = new Map<string, string[]>();
-      for (const cls of c.classes.values())
-        if (cls.base) push(children, cls.base, cls.name);
+      for (const cls of c.classes.values()) if (cls.base) push(children, cls.base, cls.name);
       const subtree = (name: string): string[] => {
         const out: string[] = [];
         const stack = [name];
@@ -427,7 +532,11 @@ class Int32Contracts {
             "wrap it in a function that takes a number and passes `x | 0`",
           );
         else if (calls.runtimeVirtual(fnName))
-          this.refuse(note, "the runtime calls this method", "remove Int32 from runtime-dispatched methods");
+          this.refuse(
+            note,
+            "the runtime calls this method",
+            "remove Int32 from runtime-dispatched methods",
+          );
       }
     }
   }
@@ -445,7 +554,9 @@ class Int32Contracts {
       call: (callee) => (this.returns.has(callee) ? INT32_RANGE : null),
       boxed: (localId) => (this.locals.has(`${fnName}\0${localId}`) ? INT32_RANGE : null),
       locals: (localId) =>
-        this.locals.has(`${fnName}\0${localId}`) || this.locals.has(`\0${localId}`) ? INT32_RANGE : null,
+        this.locals.has(`${fnName}\0${localId}`) || this.locals.has(`\0${localId}`)
+          ? INT32_RANGE
+          : null,
     };
   }
 
@@ -495,18 +606,31 @@ class Int32Contracts {
           if (s.kind === "varDecl" || s.kind === "assign") {
             const note = localNote(s.localId);
             const value = s.kind === "varDecl" ? s.init : s.value;
-            if (note && value && !int32(value)) fail(note, value, value.loc, "the value stored into");
-          } else if (s.kind === "forOf" || (s.kind === "tryCatch" && s.catchLocalId !== undefined)) {
+            if (note && value && !int32(value))
+              fail(note, value, value.loc, "the value stored into");
+          } else if (
+            s.kind === "forOf" ||
+            (s.kind === "tryCatch" && s.catchLocalId !== undefined)
+          ) {
             const id = s.kind === "forOf" ? s.localId : s.catchLocalId!;
             const note = localNote(id);
-            if (note) fail(note, null, s.loc, s.kind === "forOf" ? "a for-of loop element stored into" : "a caught value stored into");
+            if (note)
+              fail(
+                note,
+                null,
+                s.loc,
+                s.kind === "forOf"
+                  ? "a for-of loop element stored into"
+                  : "a caught value stored into",
+              );
           } else if (s.kind === "fieldSet") {
             const family = this.slots.family(s.className, s.field);
             const note = family !== null ? this.fields.get(family) : undefined;
             if (note && !int32(s.value)) fail(note, s.value, s.value.loc, "the value stored into");
           } else if (s.kind === "return") {
             const note = this.returns.get(fn.name);
-            if (note && (!s.value || !int32(s.value))) fail(note, s.value, s.value?.loc ?? s.loc, "the value returned from");
+            if (note && (!s.value || !int32(s.value)))
+              fail(note, s.value, s.value?.loc ?? s.loc, "the value returned from");
           }
         },
         expr: (e) => {
@@ -549,19 +673,100 @@ class Int32Contracts {
 
 /** Read-only and searching array intrinsics: the receiver is not written,
  * and arguments are compared or copied out, never stored. */
-const ARR_READS = new Set(["length", "getNumber", "indexEq", "indexOf", "includes", "nextPresent", "join", "slice", "flatCopy", "flatOne", "toReversed", "toSpliced", "toSortedPrimitive", "concatSpread"]);
-const MAP_READS = new Set(["get", "has", "size", "iterCount", "iterLive", "iterKey", "iterValue", "iterEnter", "iterExit", "clone", "keySet", "valueSet"]);
-const SET_READS = new Set(["has", "size", "iterCount", "iterLive", "iterKey", "iterEnter", "iterExit", "clone"]);
+const ARR_READS = new Set([
+  "length",
+  "getNumber",
+  "indexEq",
+  "indexOf",
+  "includes",
+  "nextPresent",
+  "join",
+  "slice",
+  "flatCopy",
+  "flatOne",
+  "toReversed",
+  "toSpliced",
+  "toSortedPrimitive",
+  "concatSpread",
+]);
+const MAP_READS = new Set([
+  "get",
+  "has",
+  "size",
+  "iterCount",
+  "iterLive",
+  "iterKey",
+  "iterValue",
+  "iterEnter",
+  "iterExit",
+  "clone",
+  "keySet",
+  "valueSet",
+]);
+const SET_READS = new Set([
+  "has",
+  "size",
+  "iterCount",
+  "iterLive",
+  "iterKey",
+  "iterEnter",
+  "iterExit",
+  "clone",
+]);
 /** Element reads whose result can be part of the receiver's graph. */
 const MAP_ELEMENT_READS = new Set(["get", "iterKey", "iterValue"]);
 const SET_ELEMENT_READS = new Set(["iterKey"]);
 /** Copies: a fresh container holding the receiver's elements. */
-const ARR_COPIES = new Set(["slice", "flatCopy", "flatOne", "toReversed", "toSpliced", "concatSpread", "toSortedPrimitive"]);
+const ARR_COPIES = new Set([
+  "slice",
+  "flatCopy",
+  "flatOne",
+  "toReversed",
+  "toSpliced",
+  "concatSpread",
+  "toSortedPrimitive",
+]);
 const COLLECTION_COPIES = new Set(["clone", "keySet", "valueSet"]);
 /** Expression kinds whose result is the same value as their child. */
-const PASS_THROUGH = new Set<IrExpr["kind"]>(["upcast", "downcast", "unionWrap", "unionNarrow", "ternary", "logical", "nullish", "orDefault", "seqExpr", "chainRecv", "optChain", "assignExpr"]);
+const PASS_THROUGH = new Set<IrExpr["kind"]>([
+  "upcast",
+  "downcast",
+  "unionWrap",
+  "unionNarrow",
+  "ternary",
+  "logical",
+  "nullish",
+  "orDefault",
+  "seqExpr",
+  "chainRecv",
+  "optChain",
+  "assignExpr",
+]);
 /** Observations: the value is inspected, never stored or written. */
-const OBSERVE = new Set<IrExpr["kind"]>(["toBool", "strEq", "unionEq", "unionFuncEq", "unionIsTag", "unionDisc", "instanceOf", "instanceOfValue", "dynScalarEq", "fieldAbsent", "recordHas", "recordOvfHas", "arrayHas", "arrayState", "jsonStringify", "toString", "strConcat", "bin", "unary", "unionKeyGet", "recordKeyGet", "recordOvfKeys"]);
+const OBSERVE = new Set<IrExpr["kind"]>([
+  "toBool",
+  "strEq",
+  "unionEq",
+  "unionFuncEq",
+  "unionIsTag",
+  "unionDisc",
+  "instanceOf",
+  "instanceOfValue",
+  "dynScalarEq",
+  "fieldAbsent",
+  "recordHas",
+  "recordOvfHas",
+  "arrayHas",
+  "arrayState",
+  "jsonStringify",
+  "toString",
+  "strConcat",
+  "bin",
+  "unary",
+  "unionKeyGet",
+  "recordKeyGet",
+  "recordOvfKeys",
+]);
 /** Library calls that only read their arguments (console output). */
 const LIB_READS = /^(console\.|inspect\.|json\.stringify)/;
 
@@ -587,7 +792,12 @@ class ImmutableContracts {
   }
 
   private refuse(note: ContractNote, why: string, hint: string): void {
-    this.c.report("SC7005", note.loc, `the Immutable contract on '${note.name}' cannot be checked: ${why}`, hint);
+    this.c.report(
+      "SC7005",
+      note.loc,
+      `the Immutable contract on '${note.name}' cannot be checked: ${why}`,
+      hint,
+    );
   }
 
   run(): void {
@@ -622,7 +832,12 @@ class ImmutableContracts {
       const field = key.slice(cut + 1);
       for (const cls of c.classesAt(key.slice(0, cut))) {
         const family = this.slots.family(cls.name, field);
-        if (family === null) this.refuse(note, `the compiled class has no field '${field}'`, "annotate an ordinary instance field");
+        if (family === null)
+          this.refuse(
+            note,
+            `the compiled class has no field '${field}'`,
+            "annotate an ordinary instance field",
+          );
         else this.annotated.set(`f:${family}`, note);
       }
     }
@@ -640,7 +855,7 @@ class ImmutableContracts {
    * only it references. */
   private computeFreshFunctions(): void {
     const c = this.c;
-    for (let changed = true; changed; ) {
+    for (let changed = true; changed;) {
       changed = false;
       for (const fn of c.mod.functions) {
         if (this.freshFns.has(fn.name) || fn.async || fn.generator || fn.captures?.length) continue;
@@ -676,28 +891,41 @@ class ImmutableContracts {
   }
 
   private computeFreshLocals(fn: IrFunction): Set<string> {
-    const candidates = new Set(fn.locals.filter((l) => !l.boxed && isRefCounted(l.type)).map((l) => l.id));
+    const candidates = new Set(
+      fn.locals.filter((l) => !l.boxed && isRefCounted(l.type)).map((l) => l.id),
+    );
     for (const p of fn.params) candidates.delete(p.localId);
     const allowed = new Set<IrExpr>();
     walk(fn.body, {
       stmt: (s) => {
         if (s.kind === "return" && s.value?.kind === "varRef") allowed.add(s.value);
-        if ((s.kind === "fieldSet" || s.kind === "recordSet") && s.obj.kind === "varRef") allowed.add(s.obj);
-        if ((s.kind === "arraySet" || s.kind === "bytesSet") && s.arr.kind === "varRef") allowed.add(s.arr);
+        if ((s.kind === "fieldSet" || s.kind === "recordSet") && s.obj.kind === "varRef")
+          allowed.add(s.obj);
+        if ((s.kind === "arraySet" || s.kind === "bytesSet") && s.arr.kind === "varRef")
+          allowed.add(s.arr);
       },
       expr: (e) => {
-        if ((e.kind === "arrIntrinsic" || e.kind === "mapIntrinsic" || e.kind === "setIntrinsic") && e.receiver.kind === "varRef")
+        if (
+          (e.kind === "arrIntrinsic" || e.kind === "mapIntrinsic" || e.kind === "setIntrinsic") &&
+          e.receiver.kind === "varRef"
+        )
           allowed.add(e.receiver);
-        if ((e.kind === "arrayGet" || e.kind === "arrayHas") && e.arr.kind === "varRef") allowed.add(e.arr);
-        if ((e.kind === "fieldGet" || e.kind === "recordGet") && e.obj.kind === "varRef") allowed.add(e.obj);
+        if ((e.kind === "arrayGet" || e.kind === "arrayHas") && e.arr.kind === "varRef")
+          allowed.add(e.arr);
+        if ((e.kind === "fieldGet" || e.kind === "recordGet") && e.obj.kind === "varRef")
+          allowed.add(e.obj);
       },
     });
-    for (let changed = true; changed; ) {
+    for (let changed = true; changed;) {
       changed = false;
       walk(fn.body, {
         stmt: (s) => {
           const value = s.kind === "varDecl" ? s.init : s.kind === "assign" ? s.value : undefined;
-          if (value && candidates.has((s as { localId: string }).localId) && !this.fresh(value, candidates)) {
+          if (
+            value &&
+            candidates.has((s as { localId: string }).localId) &&
+            !this.fresh(value, candidates)
+          ) {
             candidates.delete((s as { localId: string }).localId);
             changed = true;
           }
@@ -708,7 +936,8 @@ class ImmutableContracts {
             candidates.delete(e.localId);
             changed = true;
           }
-          if ((e.kind === "assignExpr" || e.kind === "incDec") && candidates.delete(e.localId)) changed = true;
+          if ((e.kind === "assignExpr" || e.kind === "incDec") && candidates.delete(e.localId))
+            changed = true;
         },
       });
     }
@@ -717,7 +946,11 @@ class ImmutableContracts {
 
   /** A value nothing else references: a literal, a fresh construction or
    * factory result, a primitive, or a value that is already immutable. */
-  private fresh(e: IrExpr, freshLocals: ReadonlySet<string>, derived?: (e: IrExpr) => boolean): boolean {
+  private fresh(
+    e: IrExpr,
+    freshLocals: ReadonlySet<string>,
+    derived?: (e: IrExpr) => boolean,
+  ): boolean {
     if (!isRefCounted(e.type) || e.type.kind === "string") return true;
     if (derived?.(e)) return true;
     switch (e.kind) {
@@ -731,20 +964,30 @@ class ImmutableContracts {
       case "recordLit":
         return e.fields.every((f) => this.fresh(f.value, freshLocals, derived));
       case "mapNew":
-        return (e.seed ?? []).every((p) => this.fresh(p.key, freshLocals, derived) && this.fresh(p.value, freshLocals, derived));
+        return (e.seed ?? []).every(
+          (p) =>
+            this.fresh(p.key, freshLocals, derived) && this.fresh(p.value, freshLocals, derived),
+        );
       case "setNew":
         return e.seed === undefined || this.fresh(e.seed, freshLocals, derived);
       case "new":
-        return this.constructorKeepsThis(e.className) && e.args.every((a) => this.fresh(a, freshLocals, derived));
+        return (
+          this.constructorKeepsThis(e.className) &&
+          e.args.every((a) => this.fresh(a, freshLocals, derived))
+        );
       case "call":
-        return this.freshFns.has(e.callee) && e.args.every((a) => this.fresh(a, freshLocals, derived));
+        return (
+          this.freshFns.has(e.callee) && e.args.every((a) => this.fresh(a, freshLocals, derived))
+        );
       case "upcast":
       case "downcast":
       case "unionWrap":
       case "unionNarrow":
         return this.fresh(e.value, freshLocals, derived);
       case "ternary":
-        return this.fresh(e.then, freshLocals, derived) && this.fresh(e.else_, freshLocals, derived);
+        return (
+          this.fresh(e.then, freshLocals, derived) && this.fresh(e.else_, freshLocals, derived)
+        );
       default:
         return false;
     }
@@ -754,7 +997,11 @@ class ImmutableContracts {
    * fields: the new object is referenced from nowhere else. */
   private constructorKeepsThis(className: string): boolean {
     const c = this.c;
-    for (let cls = c.classes.get(className); cls; cls = cls.base ? c.classes.get(cls.base) : undefined) {
+    for (
+      let cls = c.classes.get(className);
+      cls;
+      cls = cls.base ? c.classes.get(cls.base) : undefined
+    ) {
       if (cls.runtime === true) return false;
       const ctor = c.functions.get(`%${cls.name}.constructor`);
       if (!ctor) continue;
@@ -767,7 +1014,12 @@ class ImmutableContracts {
         },
         expr: (e) => {
           if (e.kind === "fieldGet" && e.obj.kind === "varRef") allowed.add(e.obj);
-          if (e.kind === "call" && e.callee === `%${cls.base}.constructor` && e.args[0]?.kind === "varRef") allowed.add(e.args[0]);
+          if (
+            e.kind === "call" &&
+            e.callee === `%${cls.base}.constructor` &&
+            e.args[0]?.kind === "varRef"
+          )
+            allowed.add(e.args[0]);
         },
       });
       let ok = true;
@@ -822,7 +1074,8 @@ class ImmutableContracts {
         if (!report || !derived(target)) return;
         const shown = c.text(target.loc);
         const origin = this.originOf(fn, target);
-        const subject = origin === "" && shown !== "" && shown !== c.text(at) ? ` ('${shown}')` : "";
+        const subject =
+          origin === "" && shown !== "" && shown !== c.text(at) ? ` ('${shown}')` : "";
         c.report(
           "SC7004",
           at,
@@ -843,7 +1096,8 @@ class ImmutableContracts {
         const target = c.functions.get(callee);
         list.forEach((arg, i) => {
           const param = target?.params[i + offset];
-          if (!target || !param) return escape(arg, arg.loc, `a call to '${c.displayName(callee)}'`);
+          if (!target || !param)
+            return escape(arg, arg.loc, `a call to '${c.displayName(callee)}'`);
           store(
             `l:${callee}\0${param.localId}`,
             arg,
@@ -861,7 +1115,12 @@ class ImmutableContracts {
               store(this.localSlot(fn, s.localId), s.value);
               break;
             case "return":
-              if (s.value) store(`r:${fn.name}`, s.value, `returned from '${c.displayName(fn.name)}' at ${c.where(s.loc)}`);
+              if (s.value)
+                store(
+                  `r:${fn.name}`,
+                  s.value,
+                  `returned from '${c.displayName(fn.name)}' at ${c.where(s.loc)}`,
+                );
               break;
             case "fieldSet":
               mutate(s.obj, s.loc, `'${c.text(s.loc)}'`);
@@ -917,15 +1176,18 @@ class ImmutableContracts {
             case "fieldIncDec":
               return mutate(e.obj, e.loc, `'${c.text(e.loc)}'`);
             case "arrIntrinsic":
-              if (ARR_COPIES.has(e.method)) this.copyElements(e.receiver, e.type, derived(e.receiver), c.where(e.loc));
+              if (ARR_COPIES.has(e.method))
+                this.copyElements(e.receiver, e.type, derived(e.receiver), c.where(e.loc));
               if (!ARR_READS.has(e.method)) mutate(e.receiver, e.loc, `'${c.text(e.loc)}'`);
               for (const a of e.args) {
-                if (e.method === "indexOf" || e.method === "includes" || e.method === "indexEq") continue;
+                if (e.method === "indexOf" || e.method === "includes" || e.method === "indexEq")
+                  continue;
                 store(`e:${typeKey(e.receiver.type)}`, a);
               }
               return;
             case "mapIntrinsic":
-              if (COLLECTION_COPIES.has(e.method)) this.copyElements(e.receiver, e.type, derived(e.receiver), c.where(e.loc));
+              if (COLLECTION_COPIES.has(e.method))
+                this.copyElements(e.receiver, e.type, derived(e.receiver), c.where(e.loc));
               if (!MAP_READS.has(e.method)) mutate(e.receiver, e.loc, `'${c.text(e.loc)}'`);
               if (e.method === "set") {
                 if (e.args[0]) store(`mk:${typeKey(e.receiver.type)}`, e.args[0]);
@@ -933,9 +1195,11 @@ class ImmutableContracts {
               }
               return;
             case "setIntrinsic":
-              if (COLLECTION_COPIES.has(e.method)) this.copyElements(e.receiver, e.type, derived(e.receiver), c.where(e.loc));
+              if (COLLECTION_COPIES.has(e.method))
+                this.copyElements(e.receiver, e.type, derived(e.receiver), c.where(e.loc));
               if (!SET_READS.has(e.method)) mutate(e.receiver, e.loc, `'${c.text(e.loc)}'`);
-              if (e.method === "add" && e.args[0]) store(`se:${typeKey(e.receiver.type)}`, e.args[0]);
+              if (e.method === "add" && e.args[0])
+                store(`se:${typeKey(e.receiver.type)}`, e.args[0]);
               return;
             case "arrayLit":
               for (const x of e.elems) store(`e:${typeKey(e.type)}`, x);
@@ -965,7 +1229,8 @@ class ImmutableContracts {
               return;
             }
             case "libCall":
-              if (!LIB_READS.test(e.fn)) for (const a of e.args) escape(a, a.loc, `the library call ${e.fn}`);
+              if (!LIB_READS.test(e.fn))
+                for (const a of e.args) escape(a, a.loc, `the library call ${e.fn}`);
               return;
             case "callValue":
               for (const a of e.args) escape(a, a.loc, "a call through a function value");
@@ -991,7 +1256,12 @@ class ImmutableContracts {
 
   /** A copy of a container whose elements may be immutable: the copy's
    * element slots may hold them too (the copy itself is fresh). */
-  private copyElements(receiver: IrExpr, result: IrType, receiverDerived: boolean, where: string): void {
+  private copyElements(
+    receiver: IrExpr,
+    result: IrType,
+    receiverDerived: boolean,
+    where: string,
+  ): void {
     const at = `copied at ${where}`;
     const rk = typeKey(receiver.type);
     const sources = [`e:${rk}`, `mk:${rk}`, `mv:${rk}`, `se:${rk}`];
@@ -1009,7 +1279,8 @@ class ImmutableContracts {
     for (let steps = 0; steps < 16; steps++) {
       if (root.kind === "fieldGet" || root.kind === "recordGet") root = root.obj;
       else if (root.kind === "arrayGet") root = root.arr;
-      else if (PASS_THROUGH.has(root.kind) && "value" in root) root = (root as { value: IrExpr }).value;
+      else if (PASS_THROUGH.has(root.kind) && "value" in root)
+        root = (root as { value: IrExpr }).value;
       else if (root.kind === "varRef") {
         // Compiler temporaries (no source binding): follow their initializer.
         const id = root.localId;
@@ -1048,16 +1319,24 @@ class ImmutableContracts {
         return (slot !== null && this.mayHold.has(slot)) || derived(e.obj);
       }
       case "recordGet":
-        return this.mayHold.has(`s:${(e.obj.type as { shapeId?: string }).shapeId ?? ""}\0${e.field}`) || derived(e.obj);
+        return (
+          this.mayHold.has(`s:${(e.obj.type as { shapeId?: string }).shapeId ?? ""}\0${e.field}`) ||
+          derived(e.obj)
+        );
       case "arrayGet":
         return this.mayHold.has(`e:${typeKey(e.arr.type)}`) || derived(e.arr);
       case "mapIntrinsic":
         return (
           MAP_ELEMENT_READS.has(e.method) &&
-          (this.mayHold.has(`mv:${typeKey(e.receiver.type)}`) || this.mayHold.has(`mk:${typeKey(e.receiver.type)}`) || derived(e.receiver))
+          (this.mayHold.has(`mv:${typeKey(e.receiver.type)}`) ||
+            this.mayHold.has(`mk:${typeKey(e.receiver.type)}`) ||
+            derived(e.receiver))
         );
       case "setIntrinsic":
-        return SET_ELEMENT_READS.has(e.method) && (this.mayHold.has(`se:${typeKey(e.receiver.type)}`) || derived(e.receiver));
+        return (
+          SET_ELEMENT_READS.has(e.method) &&
+          (this.mayHold.has(`se:${typeKey(e.receiver.type)}`) || derived(e.receiver))
+        );
       case "call":
         return this.mayHold.has(`r:${e.callee}`);
       case "virtualCall":
@@ -1099,7 +1378,13 @@ class ImmutableContracts {
     if (c.mod.lib !== undefined || c.diagnostics.length > 0) return;
     const out: string[] = [];
     for (const g of c.mod.globals ?? []) {
-      if (g.mutable || g.tdz === true || g.initFlag !== undefined || !this.annotated.has(`g:${g.id}`)) continue;
+      if (
+        g.mutable ||
+        g.tdz === true ||
+        g.initFlag !== undefined ||
+        !this.annotated.has(`g:${g.id}`)
+      )
+        continue;
       if (!this.publishable(g.type, new Set())) continue;
       let writes = 0;
       let fresh = true;
@@ -1143,7 +1428,9 @@ class ImmutableContracts {
         if (seen.has(key)) return true;
         seen.add(key);
         const shape = c.mod.records?.find((r) => r.id === t.shapeId);
-        return !!shape && !shape.indexValue && shape.fields.every((f) => this.publishable(f.type, seen));
+        return (
+          !!shape && !shape.indexValue && shape.fields.every((f) => this.publishable(f.type, seen))
+        );
       }
       case "union": {
         const key = `u:${t.unionId}`;
@@ -1159,12 +1446,21 @@ class ImmutableContracts {
         // Subclasses can stand behind a base-typed reference.
         for (const cls of c.classes.values()) {
           let under = false;
-          for (let x: IrClassDef | undefined = cls; x; x = x.base ? c.classes.get(x.base) : undefined)
+          for (
+            let x: IrClassDef | undefined = cls;
+            x;
+            x = x.base ? c.classes.get(x.base) : undefined
+          )
             if (x.name === t.className) under = true;
           if (!under) continue;
-          for (let x: IrClassDef | undefined = cls; x; x = x.base ? c.classes.get(x.base) : undefined)
+          for (
+            let x: IrClassDef | undefined = cls;
+            x;
+            x = x.base ? c.classes.get(x.base) : undefined
+          )
             if (x.runtime === true || x.localCaptures !== undefined) return false;
-          if (!cls.fields.every((f) => f.name.startsWith("%") || this.publishable(f.type, seen))) return false;
+          if (!cls.fields.every((f) => f.name.startsWith("%") || this.publishable(f.type, seen)))
+            return false;
         }
         return true;
       }
