@@ -290,11 +290,26 @@ void scr_context_stop(int code);
 bool scr_context_stopping(void);
 bool scr_context_checkpoint(void);
 bool scr_context_quiet(void);
-/* The process-wide exception alert that emitted pending checks of worker
- * executables test inline (scr_exception.c): nonzero while some script
- * thread may have an exception pending in its active cell or must stop. */
+#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__CYGWIN__) && !defined(__wasi__)
+/* ELF worker executables (the LLVM emitter's executableTls targets): every
+ * script thread owns an exact pending word in the executable's static TLS
+ * block, which emitted pending checks load with one thread-pointer-relative
+ * access and no out-of-line slow path (scr_exception.c). */
+#define SCR_EXC_FLAG 1
+#define SCR_EXC_FLAG_PENDING 1u /* the active cell's kind is not NONE */
+#define SCR_EXC_FLAG_STOP 2u    /* the context must stop (never cleared) */
+extern SCR_TL _Atomic uint32_t scr_exc_flag;
+/* Requests the stop of the thread that owns `flag` (scr_worker.c holds the
+ * owner's word only while its script runs). */
+void scr_exc_flag_request_stop(_Atomic uint32_t *flag);
+#else
+/* The process-wide exception alert that emitted pending checks of other
+ * worker executables test inline (scr_exception.c): nonzero while some
+ * script thread may have an exception pending in its active cell or must
+ * stop. */
 extern _Atomic uint32_t scr_exc_alert;
 void scr_exc_alert_add(int delta); /* worker.terminate() references */
+#endif
 void scr_exc_alert_thread_exit(void);
 void scr_loop_context_shutdown(void);
 extern SCR_TL void (*scr_context_report_error)(void);

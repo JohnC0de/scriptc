@@ -3774,13 +3774,27 @@ export class LlEmitter {
    * return and stays eligible for tail-call and recursion elimination. */
   private emitUnwind(passThrough?: string): void {
     if (this.mod.workers && this.tryStack.length > 0) {
-      this.declare(`declare zeroext i1 @scr_context_stopping()`);
-      const stopped = this.B.tmp();
-      this.B.line(`${stopped} = call zeroext i1 @scr_context_stopping()`);
       const stop = this.B.newLabel("context.stop");
       const ordinary = this.B.newLabel("context.throw");
-      this.B.condBr(stopped, stop, ordinary);
-      this.B.startBlock(stop);
+      if (this.executableTls) {
+        // A set stop bit unwinds while the active cell may still be clear:
+        // install the termination sentinel before skipping the handlers.
+        const word = this.loadExcFlag();
+        const bit = this.B.tmp();
+        const stopped = this.B.tmp();
+        this.B.line(`${bit} = and i32 ${word}, 2`);
+        this.B.line(`${stopped} = icmp ne i32 ${bit}, 0`);
+        this.B.condBr(stopped, stop, ordinary);
+        this.B.startBlock(stop);
+        this.declare(`declare zeroext i1 @scr_context_checkpoint()`);
+        this.B.line(`call zeroext i1 @scr_context_checkpoint()`);
+      } else {
+        this.declare(`declare zeroext i1 @scr_context_stopping()`);
+        const stopped = this.B.tmp();
+        this.B.line(`${stopped} = call zeroext i1 @scr_context_stopping()`);
+        this.B.condBr(stopped, stop, ordinary);
+        this.B.startBlock(stop);
+      }
       const handlers = this.tryStack;
       this.tryStack = [];
       this.emitUnwind();
@@ -3834,6 +3848,18 @@ export class LlEmitter {
     this.B.br(cleanup.label);
   }
 
+  /** Loads the running thread's exact pending word (ELF worker
+   * executables, scr_exception.c): bit 0 mirrors the active cell, bit 1
+   * requests the context's stop. It lives in the executable's static TLS
+   * block, so the access is one thread-pointer-relative load. Monotonic: a
+   * loop must not hoist the load out and miss a cross-thread stop. */
+  private loadExcFlag(): string {
+    this.declare(`@scr_exc_flag = external thread_local(localexec) global i32, align 4`);
+    const word = this.B.tmp();
+    this.B.line(`${word} = load atomic i32, ptr @scr_exc_flag monotonic, align 4`);
+    return word;
+  }
+
   /** Instructions (two-space indented) that set the i1 `dest` to "an
    * exception is pending in the active context" — scr_exc_pending()'s
    * meaning — for the helper and adapter bodies that test it outside
@@ -3884,15 +3910,22 @@ export class LlEmitter {
       return;
     }
     // Executables test the active exception cell's kind inline (its first
-    // field). Worker programs test the process-wide alert word instead: it
-    // is nonzero while any script thread may have an exception pending in
-    // its active cell or has been asked to stop, so the common case is one
-    // ordinary global load (a thread-local access is a call on Darwin) and
-    // the out-of-line scr_exc_pending answers for this thread, observing
-    // cancellation and reinstalling the termination sentinel.
+    // field). ELF worker executables test the thread's exact pending word,
+    // which is also nonzero once the context must stop, and unwind directly:
+    // no site carries an out-of-line call, so LLVM's inliner sees the check
+    // as two instructions. Other worker programs test the process-wide
+    // alert word: it is nonzero while any script thread may have an
+    // exception pending in its active cell or has been asked to stop, so
+    // the common case is one ordinary global load (a thread-local access is
+    // a call on Darwin) and the out-of-line scr_exc_pending answers for this
+    // thread, observing cancellation and reinstalling the termination
+    // sentinel.
     this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
     let word: string;
-    if (this.mod.workers === true) {
+    const exact = this.mod.workers !== true || this.executableTls;
+    if (this.executableTls) {
+      word = this.loadExcFlag();
+    } else if (this.mod.workers === true) {
       // dso_local: executables link the runtime statically, so the word is
       // addressed directly instead of through the GOT.
       this.declare(`@scr_exc_alert = external dso_local global i32, align 64`);
@@ -3923,7 +3956,7 @@ export class LlEmitter {
     B.line(`${cold} = call i1 @llvm.expect.i1(i1 ${hit}, i1 false)`);
     const lu = B.newLabel("exc.u");
     const lk = B.newLabel("exc.k");
-    if (this.mod.workers === true) {
+    if (!exact) {
       this.declare(`declare zeroext i1 @scr_exc_pending()`);
       const slow = B.newLabel("exc.s");
       B.condBr(cold, slow, lk);

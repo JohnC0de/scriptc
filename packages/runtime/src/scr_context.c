@@ -122,9 +122,19 @@ void scr_context_stop_flag(const void *flag) {
   if (!scr_context_stopped) scr_context_signal = flag ? flag : &scr_context_unsignaled;
 }
 bool scr_context_stopping(void) { return scr_context_stopped; }
+/* Asked to stop: the owner's signal, or (ELF worker executables) the stop
+ * bit of the thread's exact pending word, which worker.terminate() sets
+ * directly so that emitted checks observe it. */
+static bool scr_context_signaled(void) {
+#ifdef SCR_EXC_FLAG
+  if (atomic_load_explicit(&scr_exc_flag, memory_order_acquire) & SCR_EXC_FLAG_STOP) return true;
+#endif
+  return atomic_load_explicit(scr_context_signal, memory_order_relaxed);
+}
+
 /* Neither stopping nor asked to stop. */
 bool scr_context_quiet(void) {
-  return !scr_context_stopped && !atomic_load_explicit(scr_context_signal, memory_order_relaxed);
+  return !scr_context_stopped && !scr_context_signaled();
 }
 
 void scr_context_stop(int code) {
@@ -137,8 +147,7 @@ void scr_context_stop(int code) {
 }
 
 bool scr_context_checkpoint(void) {
-  if (!scr_context_stopped && atomic_load_explicit(scr_context_signal, memory_order_relaxed))
-    scr_context_stop(1);
+  if (!scr_context_stopped && scr_context_signaled()) scr_context_stop(1);
   if (!scr_context_stopped) return false;
   /* Each fiber has its own exception cell. Reinstall the sentinel after a
    * context switch or a runtime continuation consumes its pending payload. */

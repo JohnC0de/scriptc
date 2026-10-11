@@ -1537,8 +1537,9 @@ static void scr_fiber_finish(ScrFiber *self) {
   }
   ScrPromise *p = self->promise;
 #ifdef SCR_WORKERS
-  if (scr_context_stopping()) {
-    scr_context_checkpoint();
+  /* Checkpoint, not just test: the body may have unwound for a stop
+   * request that its cell does not show yet. */
+  if (scr_context_checkpoint()) {
     scr_promise_reject_from_cell(p, &self->exc);
     p->rejection_observed = true;
     self->done = true;

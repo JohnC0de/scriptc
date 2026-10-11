@@ -545,10 +545,21 @@ test("synchronous bodies load the active exception cell once for all pending che
     /^(?:  %[^\n]* = alloca [^\n]*\n)*  %exc\.cell = load ptr, ptr @scr_exc_active/,
   );
   expect(work.match(/= load i32, ptr %exc\.cell\b/g)).toHaveLength(3);
-  // Worker executables test the process-wide alert word at each check
-  // instead, and never read their thread-local cell inline.
-  const workers = body(emitLlvmModule({ ...module, workers: true }), "sc_f_work");
+  // Darwin and Windows worker executables test the process-wide alert word
+  // at each check instead, and never read their thread-local cell inline.
+  const darwin = { targetTriple: "arm64-apple-macosx14.0.0" };
+  const workers = body(emitLlvmModule({ ...module, workers: true }, darwin), "sc_f_work");
   expect(workers).not.toContain("%exc.cell");
   expect(workers).not.toContain("@scr_exc_active");
   expect(workers.match(/= load atomic i32, ptr @scr_exc_alert monotonic/g)).toHaveLength(3);
+  expect(workers.match(/call zeroext i1 @scr_exc_pending\(\)/g)).toHaveLength(3);
+  // ELF worker executables test the thread's exact pending word and unwind
+  // directly: no check carries an out-of-line slow path.
+  const elf = { targetTriple: "x86_64-unknown-linux-gnu" };
+  const flagLlvm = emitLlvmModule({ ...module, workers: true }, elf);
+  expect(flagLlvm).toContain("@scr_exc_flag = external thread_local(localexec) global i32");
+  const flag = body(flagLlvm, "sc_f_work");
+  expect(flag).not.toContain("@scr_exc_alert");
+  expect(flag).not.toContain("@scr_exc_pending");
+  expect(flag.match(/= load atomic i32, ptr @scr_exc_flag monotonic/g)).toHaveLength(3);
 });
