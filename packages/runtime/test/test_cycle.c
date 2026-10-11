@@ -12,7 +12,15 @@ struct Node {
 };
 
 static size_t freed;
-static size_t traced; /* trace calls: the collector's walk, one per object visit */
+/* Trace calls: the collector's walk, one per object visit. Parallel passes
+ * (worker builds) trace on helper threads too. */
+static _Atomic size_t traced;
+
+#ifdef SCR_WORKERS
+/* Worker executables read the collector's settings from the script
+ * thread's environment; this test has one thread and the process's. */
+const char *scr_context_getenv(const char *name) { return getenv(name); }
+#endif
 
 static size_t configured_nursery_threshold(void) {
   const char *env = getenv("SCR_CYCLE_THRESHOLD");
@@ -661,6 +669,179 @@ static void check_deferred_white_restoration(void) {
   check(freed == before + DEPTH, "restored deferred nodes leaked");
 }
 
+/* ── random graphs: the walk's answer against the test's own ─────────────
+ * Every node is buffered once with consistent counts, so whatever passes
+ * run and in whatever order they visit nodes, after the explicit sweep
+ * exactly the nodes unreachable from the externally owned ones must be gone
+ * and every other node must hold its owners' count again (edges from freed
+ * nodes given up), black and unbuffered. Worker builds run these with every
+ * full pass forced parallel (SCR_CYCLE_PARALLEL_MIN=1), where hubs with
+ * thousands of children, long chains and edges shared by many nodes are
+ * what spreads work and races claims across helpers. */
+typedef struct RNode RNode;
+struct RNode {
+  size_t rc;
+  size_t id;
+  size_t nkids;
+  RNode *kids[];
+};
+
+static unsigned char *rnode_dead;
+static size_t rnode_freed;
+
+static void rnode_trace(void *obj, ScrTraceVisit visit, void *ctx) {
+  traced++;
+  RNode *n = obj;
+  for (size_t i = 0; i < n->nkids; i++) visit(n->kids[i], ctx);
+}
+
+static void rnode_free(void *obj) {
+  RNode *n = obj;
+  check(!rnode_dead[n->id], "a node was freed twice");
+  rnode_dead[n->id] = 1;
+  rnode_freed++;
+  scr_cyc_free(obj);
+}
+
+/* A plain release, as compiled code does it: buffer a survivor, destroy an
+ * object whose count reaches zero (children released through the bounded
+ * destruction queue). */
+static void rnode_release(RNode *n);
+static void rnode_destroy(void *obj) {
+  RNode *n = obj;
+  for (size_t k = 0; k < n->nkids; k++)
+    if (n->kids[k]) rnode_release(n->kids[k]);
+  rnode_free(n);
+}
+static void rnode_release(RNode *n) {
+  if (--n->rc) {
+    scr_cyc_on_release(n);
+    return;
+  }
+  scr_cyc_on_dead(n);
+  scr_rc_destroy(n, rnode_destroy);
+}
+
+static uint64_t rng_state;
+static uint64_t rng(void) {
+  rng_state ^= rng_state << 13;
+  rng_state ^= rng_state >> 7;
+  rng_state ^= rng_state << 17;
+  return rng_state;
+}
+
+enum { SHAPE_SPARSE, SHAPE_HUBS, SHAPE_CHAINS, SHAPE_COUNT };
+
+static void check_random_graph(int shape, size_t count, uint64_t seed) {
+  rng_state = seed * 0x9e3779b97f4a7c15ull + 1;
+  RNode **nodes = calloc(count, sizeof *nodes);
+  size_t *owners = calloc(count, sizeof *owners);
+  unsigned char *reach = calloc(count, 1);
+  size_t *stack = calloc(count, sizeof *stack);
+  size_t *expect = calloc(count, sizeof *expect);
+  rnode_dead = calloc(count, 1);
+  if (!nodes || !owners || !reach || !stack || !expect || !rnode_dead)
+    scr_trap("cycle test: out of memory\n");
+  rnode_freed = 0;
+
+  /* Allocate with every edge in place before any count is visible to the
+   * collector: allocation never runs a pass, releases do. */
+  for (size_t i = 0; i < count; i++) {
+    size_t kids;
+    switch (shape) {
+    case SHAPE_HUBS: kids = rng() % 64 == 0 ? 1000 + rng() % 4000 : rng() % 3; break;
+    case SHAPE_CHAINS: kids = 1 + (rng() % 16 == 0); break;
+    default: kids = rng() % 5; break;
+    }
+    nodes[i] = scr_cyc_alloc(sizeof(RNode) + kids * sizeof(RNode *), rnode_trace, rnode_free);
+    nodes[i]->id = i;
+    nodes[i]->nkids = kids;
+  }
+  for (size_t i = 0; i < count; i++) {
+    RNode *n = nodes[i];
+    for (size_t k = 0; k < n->nkids; k++) {
+      size_t target;
+      if (shape == SHAPE_CHAINS && k == 0) target = (i + 1) % count;  /* one long cycle */
+      else if (rng() % 8 == 0) target = rng() % 16;                   /* widely shared */
+      else target = rng() % count;
+      n->kids[k] = rng() % 16 == 0 ? NULL : nodes[target];
+      if (n->kids[k]) n->kids[k]->rc++;
+    }
+  }
+  /* External owners: a few percent of the nodes, some owned twice. In the
+   * chain shape the long cycle is cut open by one owner-less gap of edges
+   * dropped below, so most of it is garbage reachable only from itself. */
+  if (shape == SHAPE_CHAINS) {
+    for (size_t i = count / 2; i < count / 2 + count / 8; i++) {
+      RNode *n = nodes[i];
+      if (n->kids[0]) n->kids[0]->rc--;
+      n->kids[0] = NULL;
+    }
+  }
+  for (size_t i = 0; i < count; i++) {
+    if (rng() % 32 == 0) owners[i] = 1 + (rng() % 4 == 0);
+    nodes[i]->rc += owners[i];
+  }
+
+  /* The test's answer: reachability from owned nodes, and each reachable
+   * node's count from reachable parents plus its owners. */
+  size_t top = 0, live = 0;
+  for (size_t i = 0; i < count; i++)
+    if (owners[i]) { reach[i] = 1; stack[top++] = i; }
+  while (top) {
+    RNode *n = nodes[stack[--top]];
+    for (size_t k = 0; k < n->nkids; k++) {
+      if (!n->kids[k]) continue;
+      size_t id = n->kids[k]->id;
+      expect[id]++;
+      if (!reach[id]) { reach[id] = 1; stack[top++] = id; }
+    }
+  }
+  for (size_t i = 0; i < count; i++) {
+    expect[i] += owners[i];
+    live += reach[i];
+  }
+
+  /* Take and drop a temporary reference to every node still there: that
+   * buffers it, or destroys it when nothing else counts it. Passes the
+   * releases trigger may free garbage meanwhile. Then sweep. */
+  for (size_t i = 0; i < count; i++) {
+    if (rnode_dead[i]) continue;
+    nodes[i]->rc++;
+    rnode_release(nodes[i]);
+  }
+  scr_collect_cycles();
+
+  check(rnode_freed == count - live, "a random graph's garbage was not freed exactly");
+  for (size_t i = 0; i < count; i++) {
+    check(rnode_dead[i] == !reach[i], "a random graph's reachable set was misjudged");
+    if (!reach[i]) continue;
+    ScrCycHdr *h = scr_cyc_hdr(nodes[i]);
+    check(nodes[i]->rc == expect[i], "a survivor's count was not restored exactly");
+    check(h->color == SCR_CYC_BLACK && !h->buffered, "a survivor was left colored or buffered");
+  }
+
+  /* Drop the owners: now everything goes. */
+  for (size_t i = 0; i < count; i++)
+    for (size_t o = 0; o < owners[i]; o++) rnode_release(nodes[i]);
+  scr_collect_cycles();
+  check(rnode_freed == count, "a random graph was not freed whole once unowned");
+
+  free(nodes);
+  free(owners);
+  free(reach);
+  free(stack);
+  free(expect);
+  free(rnode_dead);
+  rnode_dead = NULL;
+}
+
+static void check_random_graphs(void) {
+  for (uint64_t seed = 1; seed <= 3; seed++)
+    for (int shape = 0; shape < SHAPE_COUNT; shape++)
+      check_random_graph(shape, 20000, seed);
+}
+
 int main(void) {
   check_old_garbage_reclaimed_while_growing();
   check_older_rings_into_old();
@@ -678,6 +859,7 @@ int main(void) {
   check_cross_generation_edges();
   check_deep_cross_generation_chain();
   check_teardown_rebuffers_and_immortals();
+  check_random_graphs();
   check_growth_schedule_follows_yield();
   check_growth_cap_bounds_floating_garbage();
   printf("cycle collection checks passed: threshold=%zu growth_cap=%zu\n",

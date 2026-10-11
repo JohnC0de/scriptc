@@ -872,10 +872,447 @@ static SCR_CYC_COMPACT size_t scr_cyc_settle(unsigned gen_limit) {
   return freed;
 }
 
+/* ── parallel trial deletion for large passes ─────────────────────────
+ * A full pass over a large heap walks every live object twice (markGray,
+ * then scan restoring the counts) and is bound by cache misses, so it
+ * parallelizes like any marking phase. The pass stays stop-the-world for its
+ * own thread: the owner blocks while helper threads run markRoots, markGray
+ * and scan with it, then settles (white filtering, promotion, re-buffering,
+ * teardown, re-arming) alone, so every free_fn, weak-reference disposal and
+ * FinalizationRegistry notification still runs on the owner thread, at the
+ * same point of the program as before.
+ *
+ * The result is the sequential algorithm's partition. MARK: each node is
+ * claimed once per phase by an atomic exchange of its color (read first, so
+ * already-claimed nodes, which are most targets, are not dirtied), and each
+ * internal edge is trial-deleted once by an atomic decrement; every grayed
+ * node lands on its claimer's gray list. SCAN starts only after every
+ * decrement (a phase barrier): a gray node whose count stayed positive is
+ * externally referenced, and it and everything gray it reaches are
+ * blackened, each node once (atomic exchange), restoring its edges once.
+ * WHITE: whatever is still gray is reachable only from garbage. That is the
+ * sequential scan's answer (white = gray and not reachable from a gray node
+ * with a positive count) without its provisional whitening, which under
+ * contention would whiten live subgraphs that a black wave then traces
+ * again. Only the order of teardowns within a pass can differ, and that
+ * order is unspecified. Parallel passes are full passes, which skip no
+ * generation, so survivors are promoted as they are blackened.
+ *
+ * Helpers touch only counts, colors, `buffered`, `gen` and the objects'
+ * fields, through trace functions, which are reads (scr_dyn_trace_v also
+ * records its per-entry edge decision, on the one worker that traces the
+ * object in that phase). Only the owner's heap is walked: script objects
+ * point into another thread's heap only through immortal (published)
+ * objects, which the filter skips, and other threads never touch this heap,
+ * so other script threads keep running.
+ *
+ * Helpers are taken only from idle CPUs: CPUs available to the process
+ * minus its threads that are running or runnable (counted once per large
+ * pass: /proc/self/task on Linux, the Mach thread list on Darwin), so a
+ * process whose script threads already occupy every core collects
+ * sequentially. One parallel pass runs at a time per process; another
+ * thread's large pass meanwhile walks sequentially. Helpers are created on
+ * first use and sleep between passes; small heaps never create any.
+ *
+ * Executables built with --optimization=speed on Linux and Darwin carry it
+ * (the runtime pack's speed flavor defines SCR_SPEED), worker executables or
+ * not; all of them link with -pthread already. It costs nothing at startup
+ * but 4-10 KiB of code, a tenth of a small program, so the default release
+ * runtime stays sequential. Library archives never carry it: an embedding
+ * host's threads are its own.
+ *
+ * SCR_CYCLE_PARALLEL caps the helpers (0 walks every pass sequentially; at
+ * most 15, and one less than the CPUs by default). SCR_CYCLE_PARALLEL_MIN
+ * sets the live cycle-headered object count from which a full pass may run
+ * in parallel (100000 by default). Both are read once per process. */
+#ifndef SCR_CYC_PARALLEL
+#if defined(SCR_SPEED) && !defined(SCR_LIB) && (defined(__linux__) || defined(__APPLE__))
+#define SCR_CYC_PARALLEL 1
+#else
+#define SCR_CYC_PARALLEL 0
+#endif
+#endif
+
+#if SCR_CYC_PARALLEL
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <string.h>
+#include <unistd.h>
+#ifdef __linux__
+#include <dirent.h>
+#include <fcntl.h>
+#include <sched.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
+#define SCR_PAR_MAX 16      /* workers, owner included */
+#define SCR_PAR_CHUNK 128   /* work items moved between workers at once */
+#define SCR_PAR_SEED 32     /* candidates claimed at once */
+#define SCR_PAR_MIN_LIVE 100000
+
+enum { SCR_PAR_MARK = 1, SCR_PAR_SCAN = 2, SCR_PAR_WHITE = 3 };
+
+typedef struct ScrParChunk {
+  struct ScrParChunk *next;
+  size_t n;
+  void *v[SCR_PAR_CHUNK];
+} ScrParChunk;
+
+/* One cache-line pair per worker: every push and pop writes `stack.n`. */
+typedef struct {
+  _Alignas(128) ScrVec stack; /* objects to trace in the current phase */
+  ScrVec gray;                /* every node this worker grayed */
+  ScrVec white;
+} ScrParWorker;
+
+/* Process-wide; everything but the busy flag is used only by the thread
+ * that holds it, its helpers, and (under `mu`/`pool_mu`) their handshakes. */
+static struct {
+  pthread_mutex_t mu;
+  pthread_cond_t start, done;
+  unsigned created, epoch, want, joined, running;
+  int phase;
+  pthread_mutex_t pool_mu;
+  pthread_cond_t pool_cv;
+  ScrParChunk *pool, *spare;
+  unsigned idle, nworkers;
+  bool finished;
+  bool configured;
+  unsigned cap, cpus;
+  size_t min_live;
+  void **cands;
+  size_t ncands;
+  atomic_size_t next;
+} scr_par = {
+  .mu = PTHREAD_MUTEX_INITIALIZER,
+  .start = PTHREAD_COND_INITIALIZER,
+  .done = PTHREAD_COND_INITIALIZER,
+  .pool_mu = PTHREAD_MUTEX_INITIALIZER,
+  .pool_cv = PTHREAD_COND_INITIALIZER,
+};
+/* Zero-initialized, so it costs no file size (the mutex initializers keep
+ * scr_par itself in initialized data on Darwin). */
+static ScrParWorker scr_par_w[SCR_PAR_MAX];
+static atomic_flag scr_par_busy = ATOMIC_FLAG_INIT;
+
+#define SCR_PAR_RC(obj) ((size_t *)(obj))
+/* Parallel passes are full passes: no generation is skipped, so the filter
+ * is NULL and immortal, and survivors can be promoted the moment they are
+ * blackened (nothing consults `gen` again before settle). */
+#define SCR_PAR_SKIP(child) \
+  ((child) == NULL || __atomic_load_n(SCR_PAR_RC(child), __ATOMIC_RELAXED) == SIZE_MAX)
+
+static inline void scr_par_push(ScrParWorker *w, void *item) {
+  if (w->stack.n == w->stack.cap) scr_cyc_grow(&w->stack);
+  w->stack.v[w->stack.n++] = item;
+}
+
+/* Hand the top of a long local stack to idle workers. */
+static void scr_par_share(ScrParWorker *w) {
+  if (w->stack.n < 2 * SCR_PAR_CHUNK || __atomic_load_n(&scr_par.idle, __ATOMIC_RELAXED) == 0) return;
+  pthread_mutex_lock(&scr_par.pool_mu);
+  ScrParChunk *c = scr_par.spare;
+  if (c) scr_par.spare = c->next;
+  else if (!(c = malloc(sizeof *c))) scr_cyc_oom();
+  c->n = SCR_PAR_CHUNK;
+  w->stack.n -= SCR_PAR_CHUNK;
+  memcpy(c->v, w->stack.v + w->stack.n, sizeof c->v);
+  c->next = scr_par.pool;
+  scr_par.pool = c;
+  pthread_cond_signal(&scr_par.pool_cv);
+  pthread_mutex_unlock(&scr_par.pool_mu);
+}
+
+/* Out of local work: take a shared chunk, or detect the end of the phase
+ * (every worker idle with nothing shared; candidates are seeded before a
+ * worker ever gets here). */
+static bool scr_par_take(ScrParWorker *w) {
+  pthread_mutex_lock(&scr_par.pool_mu);
+  __atomic_store_n(&scr_par.idle, scr_par.idle + 1, __ATOMIC_RELAXED);
+  for (;;) {
+    if (scr_par.pool) {
+      ScrParChunk *c = scr_par.pool;
+      scr_par.pool = c->next;
+      __atomic_store_n(&scr_par.idle, scr_par.idle - 1, __ATOMIC_RELAXED);
+      while (w->stack.cap < w->stack.n + c->n) scr_cyc_grow(&w->stack);
+      memcpy(w->stack.v + w->stack.n, c->v, c->n * sizeof(void *));
+      w->stack.n += c->n;
+      c->next = scr_par.spare;
+      scr_par.spare = c;
+      pthread_mutex_unlock(&scr_par.pool_mu);
+      return true;
+    }
+    if (scr_par.finished) break;
+    if (scr_par.idle == scr_par.nworkers) {
+      scr_par.finished = true;
+      pthread_cond_broadcast(&scr_par.pool_cv);
+      break;
+    }
+    pthread_cond_wait(&scr_par.pool_cv, &scr_par.pool_mu);
+  }
+  pthread_mutex_unlock(&scr_par.pool_mu);
+  return false;
+}
+
+static inline void scr_par_gray(ScrParWorker *w, void *obj) {
+  uint32_t *color = &scr_cyc_hdr(obj)->color;
+  if (__atomic_load_n(color, __ATOMIC_RELAXED) == SCR_CYC_GRAY) return;
+  if (__atomic_exchange_n(color, SCR_CYC_GRAY, __ATOMIC_RELAXED) != SCR_CYC_GRAY) {
+    scr_cyc_push(&w->gray, obj);
+    scr_par_push(w, obj);
+  }
+}
+static void scr_par_mg_visit(void *child, void *ctx) {
+  ScrParWorker *w = ctx;
+  if (SCR_PAR_SKIP(child)) return;
+  __atomic_fetch_sub(SCR_PAR_RC(child), 1, __ATOMIC_RELAXED);
+  scr_par_gray(w, child);
+}
+
+static inline void scr_par_black(ScrParWorker *w, void *obj) {
+  ScrCycHdr *h = scr_cyc_hdr(obj);
+  if (__atomic_exchange_n(&h->color, SCR_CYC_BLACK, __ATOMIC_RELAXED) == SCR_CYC_BLACK) return;
+  if (h->gen < SCR_CYC_OLD) h->gen++; /* promote now (see SCR_PAR_SKIP) */
+  scr_par_push(w, obj);
+}
+static void scr_par_sb_visit(void *child, void *ctx) {
+  ScrParWorker *w = ctx;
+  if (SCR_PAR_SKIP(child)) return;
+  __atomic_fetch_add(SCR_PAR_RC(child), 1, __ATOMIC_RELAXED);
+  if (__atomic_load_n(&scr_cyc_hdr(child)->color, __ATOMIC_RELAXED) != SCR_CYC_BLACK)
+    scr_par_black(w, child);
+}
+
+static void scr_par_drain(ScrParWorker *w, int phase) {
+  while (w->stack.n) {
+    void *obj = w->stack.v[--w->stack.n];
+    scr_cyc_hdr(obj)->trace(obj, phase == SCR_PAR_MARK ? scr_par_mg_visit : scr_par_sb_visit, w);
+    scr_par_share(w);
+  }
+}
+
+/* One worker's share of a phase (see the section comment). */
+static void scr_par_run(ScrParWorker *w, int phase) {
+  if (phase == SCR_PAR_WHITE) {
+    for (size_t i = 0; i < w->gray.n; i++) {
+      ScrCycHdr *h = scr_cyc_hdr(w->gray.v[i]);
+      if (h->color != SCR_CYC_GRAY) continue;
+      h->color = SCR_CYC_WHITE;
+      scr_cyc_push(&w->white, w->gray.v[i]);
+    }
+    w->gray.n = 0;
+    return;
+  }
+  if (phase == SCR_PAR_SCAN) {
+    /* Seeds: this worker's own gray nodes (the lists are balanced by
+     * construction); propagation work is shared through the pool. */
+    for (size_t i = 0; i < w->gray.n; i++) {
+      void *obj = w->gray.v[i];
+      if (__atomic_load_n(&scr_cyc_hdr(obj)->color, __ATOMIC_RELAXED) == SCR_CYC_GRAY
+          && __atomic_load_n(SCR_PAR_RC(obj), __ATOMIC_RELAXED) > 0)
+        scr_par_black(w, obj);
+      if (w->stack.n >= SCR_PAR_CHUNK) scr_par_drain(w, phase);
+    }
+  }
+  for (;;) {
+    scr_par_drain(w, phase);
+    if (phase == SCR_PAR_MARK) {
+      size_t i = atomic_fetch_add_explicit(&scr_par.next, SCR_PAR_SEED, memory_order_relaxed);
+      if (i < scr_par.ncands) {
+        size_t end = i + SCR_PAR_SEED < scr_par.ncands ? i + SCR_PAR_SEED : scr_par.ncands;
+        for (; i < end; i++) {
+          void *obj = scr_par.cands[i];
+          scr_cyc_hdr(obj)->buffered = 0; /* markRoots, spread over the workers */
+          scr_par_gray(w, obj);
+        }
+        continue;
+      }
+    }
+    if (!scr_par_take(w)) return;
+  }
+}
+
+static void *scr_par_helper(void *arg) {
+  (void)arg;
+  unsigned seen = 0;
+  pthread_mutex_lock(&scr_par.mu);
+  for (;;) {
+    while (scr_par.epoch == seen) pthread_cond_wait(&scr_par.start, &scr_par.mu);
+    seen = scr_par.epoch;
+    if (scr_par.joined >= scr_par.want) continue;
+    unsigned slot = 1 + scr_par.joined++;
+    int phase = scr_par.phase;
+    pthread_mutex_unlock(&scr_par.mu);
+    scr_par_run(&scr_par_w[slot], phase);
+    pthread_mutex_lock(&scr_par.mu);
+    if (--scr_par.running == 0) pthread_cond_signal(&scr_par.done);
+  }
+  return NULL;
+}
+
+static size_t scr_par_env(const char *name, size_t dflt) {
+  const char *v = scr_getenv(name);
+  return v && *v ? (size_t)strtoull(v, NULL, 10) : dflt;
+}
+
+static unsigned scr_par_cpus(void) {
+#if defined(__linux__) && defined(CPU_COUNT) /* CPU_COUNT needs _GNU_SOURCE */
+  cpu_set_t set;
+  if (sched_getaffinity(0, sizeof set, &set) == 0) return (unsigned)CPU_COUNT(&set);
+#endif
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  return n > 0 ? (unsigned)n : 1;
+}
+
+/* Threads of this process that are running or runnable right now, the
+ * caller included. */
+static unsigned scr_par_running(void) {
+  unsigned running = 0;
+#ifdef __linux__
+  DIR *d = opendir("/proc/self/task");
+  if (!d) return 1;
+  struct dirent *e;
+  char path[64], buf[512];
+  while ((e = readdir(d))) {
+    if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+    snprintf(path, sizeof path, "/proc/self/task/%s/stat", e->d_name);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) continue;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) continue;
+    buf[n] = 0;
+    char *p = strrchr(buf, ')'); /* the command name may contain anything */
+    if (p && p[1] == ' ' && p[2] == 'R') running++;
+  }
+  closedir(d);
+#elif defined(__APPLE__)
+  thread_act_array_t threads;
+  mach_msg_type_number_t n = 0;
+  if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS) return 1;
+  for (mach_msg_type_number_t i = 0; i < n; i++) {
+    thread_basic_info_data_t info;
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(threads[i], THREAD_BASIC_INFO, (thread_info_t)&info, &count) == KERN_SUCCESS
+        && info.run_state == TH_STATE_RUNNING && !(info.flags & TH_FLAGS_IDLE))
+      running++;
+    mach_port_deallocate(mach_task_self(), threads[i]);
+  }
+  vm_deallocate(mach_task_self(), (vm_address_t)threads, n * sizeof *threads);
+#endif
+  return running ? running : 1;
+}
+
+/* Helpers this pass may use: idle CPUs, up to the cap. Creates helper
+ * threads on first use. Called with the busy flag held. */
+static unsigned scr_par_helpers(void) {
+  if (scr_par.cap == 0) return 0;
+  unsigned running = scr_par_running();
+  unsigned idle = scr_par.cpus > running ? scr_par.cpus - running : 0;
+  unsigned want = idle < scr_par.cap ? idle : scr_par.cap;
+  if (scr_par.created >= want) return want;
+  /* Helpers never run script code: keep every signal on the threads that
+   * do. A new thread inherits its creator's mask. */
+  sigset_t all, old;
+  sigfillset(&all);
+  pthread_sigmask(SIG_BLOCK, &all, &old);
+  while (scr_par.created < want) {
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256 << 10);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&t, &attr, scr_par_helper, NULL);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) break;
+    scr_par.created++;
+  }
+  pthread_sigmask(SIG_SETMASK, &old, NULL);
+  return want < scr_par.created ? want : scr_par.created;
+}
+
+static void scr_par_phase(int phase, unsigned helpers) {
+  scr_par.pool = NULL;
+  scr_par.idle = 0;
+  scr_par.finished = false;
+  scr_par.nworkers = 1 + helpers;
+  atomic_store_explicit(&scr_par.next, 0, memory_order_relaxed);
+  pthread_mutex_lock(&scr_par.mu);
+  scr_par.phase = phase;
+  scr_par.want = helpers;
+  scr_par.joined = 0;
+  scr_par.running = helpers;
+  scr_par.epoch++;
+  pthread_cond_broadcast(&scr_par.start);
+  pthread_mutex_unlock(&scr_par.mu);
+  scr_par_run(&scr_par_w[0], phase);
+  pthread_mutex_lock(&scr_par.mu);
+  while (scr_par.running) pthread_cond_wait(&scr_par.done, &scr_par.mu);
+  pthread_mutex_unlock(&scr_par.mu);
+}
+
+static void scr_par_merge(ScrVec *into, ScrVec *from) {
+  while (into->cap < into->n + from->n) scr_cyc_grow(into);
+  if (from->n) memcpy(into->v + into->n, from->v, from->n * sizeof(void *));
+  into->n += from->n;
+  from->n = 0;
+}
+
+/* markRoots, markGray and scan of the pass in flight, in parallel, when it
+ * is large enough and CPUs are idle. False: nothing was done (the buffers
+ * are untouched), walk sequentially. */
+static bool scr_par_walk(unsigned gen_limit) {
+  if (gen_limit < SCR_CYC_OLD) return false;
+  if (atomic_flag_test_and_set(&scr_par_busy)) return false; /* another thread's pass has them */
+  if (!scr_par.configured) {
+    scr_par.configured = true;
+    scr_par.cpus = scr_par_cpus();
+    size_t cap = scr_par_env("SCR_CYCLE_PARALLEL", scr_par.cpus > 1 ? scr_par.cpus - 1 : 0);
+    scr_par.cap = cap > SCR_PAR_MAX - 1 ? SCR_PAR_MAX - 1 : (unsigned)cap;
+    scr_par.min_live = scr_par_env("SCR_CYCLE_PARALLEL_MIN", SCR_PAR_MIN_LIVE);
+  }
+  unsigned helpers = scr_cyc_live < scr_par.min_live ? 0 : scr_par_helpers();
+  if (helpers == 0) {
+    atomic_flag_clear(&scr_par_busy);
+    return false;
+  }
+  /* markRoots without the per-candidate header store: the buffers are
+   * copied wholesale and the workers clear `buffered` as they seed. */
+  scr_cands.n = 0;
+  for (unsigned g = 0; g <= gen_limit; g++) scr_par_merge(&scr_cands, &scr_roots[g]);
+  scr_par.cands = scr_cands.v;
+  scr_par.ncands = scr_cands.n;
+  scr_par_phase(SCR_PAR_MARK, helpers);
+  scr_par_phase(SCR_PAR_SCAN, helpers);
+  scr_par_phase(SCR_PAR_WHITE, helpers);
+  scr_white.n = 0;
+  for (unsigned i = 0; i <= helpers; i++) {
+    ScrParWorker *w = &scr_par_w[i];
+    scr_par_merge(&scr_white, &w->white);
+    /* A deep walk can leave a large stack behind; do not keep it. */
+    if (w->stack.cap > (1u << 16)) {
+      free(w->stack.v);
+      w->stack = (ScrVec){0};
+    }
+    if (w->gray.cap > (1u << 20)) {
+      free(w->gray.v);
+      w->gray = (ScrVec){0};
+    }
+  }
+  atomic_flag_clear(&scr_par_busy);
+  return true;
+}
+#endif
+
 static size_t scr_cyc_pass(unsigned gen_limit) {
   if (scr_collecting) return 0;
   scr_collecting = true;
   scr_gen_limit = gen_limit;
+#if SCR_CYC_PARALLEL
+  if (scr_par_walk(gen_limit)) return scr_cyc_settle(gen_limit);
+#endif
 
   /* markRoots: every buffered entry is a candidate (retains do not mark
    * candidates live; measured on the tsc-ts self-check, that filter dropped

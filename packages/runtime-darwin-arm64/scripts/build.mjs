@@ -141,12 +141,21 @@ async function build() {
     const flavors = {};
     // The executable `speed` flavor (--optimization=speed) exists only when
     // it differs from release: its static units are emitted through the host
-    // LLVM helper with import bitcode. Its SCR_DYNAMIC variants are the
-    // release objects themselves.
+    // LLVM helper with import bitcode, and SCR_SPEED selects runtime code that
+    // trades size for speed (parallel cycle-collector passes). Its
+    // SCR_DYNAMIC variants are the release objects themselves.
     const flavorPlan = [
       ...Object.entries(RUNTIME_PACK_MATRIX.flavors),
       ...("release" in RUNTIME_PACK_MATRIX.flavors && unitHelper !== null
-        ? [["speed", RUNTIME_PACK_MATRIX.flavors.release]]
+        ? [
+            [
+              "speed",
+              {
+                ...RUNTIME_PACK_MATRIX.flavors.release,
+                defines: [...(RUNTIME_PACK_MATRIX.flavors.release.defines ?? []), "SCR_SPEED"],
+              },
+            ],
+          ]
         : []),
     ];
     const releaseVariants = new Map();

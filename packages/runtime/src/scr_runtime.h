@@ -377,6 +377,11 @@ char **scr_worker_argv(void);
  * SCR_CYCLE_GROWTH_CAP lowers how far past its size the heap may grow
  * between passes at an older level that find nothing (16 times its size by
  * default; see scr_cycle.c).
+ * Executables built with --optimization=speed on Linux and Darwin run the
+ * marking phases of large full passes on helper threads taken from idle
+ * CPUs; the pass still stops its own thread, and teardown stays on it.
+ * SCR_CYCLE_PARALLEL caps the helpers (0 disables them),
+ * SCR_CYCLE_PARALLEL_MIN sets the live-object floor.
  * There is no concurrent or incremental collection.
  *
  * Contract for trace/teardown pairs (the compiler emits them for shapes,
