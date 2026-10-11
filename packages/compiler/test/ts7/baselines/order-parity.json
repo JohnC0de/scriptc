@@ -15742,6 +15742,12 @@
     "<repo>/tests/corpus/4596-tdz-nullable-forward-capture.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4598-map-set-clear-reuse.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-map-set-clear-reuse.ts"
+   ],
+   "diags": []
   }
  }
 }
