@@ -39,6 +39,7 @@ test("cycle traversal preserves counts, deep graphs, configured thresholds and g
     [undefined, "1", "threshold=256 growth_cap=1"],
     ["1", "1", "threshold=1 growth_cap=1"],
     [undefined, "3", "threshold=256 growth_cap=2"],
+    [undefined, "8", "threshold=256 growth_cap=8"],
     [undefined, "64", "threshold=256 growth_cap=16"],
   ] as const) {
     const env = { ...baseEnv };

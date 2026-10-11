@@ -1,4 +1,5 @@
 import { typedRefConstructor } from "./shapes.js";
+import { bindLiveArrayOps } from "./expr-stream-bridges.js";
 import { BYTES_ELEM_NUM, f64Lit } from "./common.js";
 import { emitUnionPeek, emitUnionTag } from "./union-repr.js";
 import { InternalCompilerError } from "../../errors.js";
@@ -41,6 +42,7 @@ import {
 } from "./shapes.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 import type { WalkerHost } from "./walkers.js";
+import type { LlStreamTypedRefAdapter } from "./expr-context.js";
 
 /** ScrDynKind values (scr_runtime.h). */
 /** ScrDynHandleTag numeric values (scr_runtime.h's enum order). */
@@ -83,7 +85,9 @@ export interface DynHost extends WalkerHost {
   virtualEntry?(implFn: string): string;
   /** The immortal ABSENT field-slot state of an undefined-armed union. */
   absentInstanceRef(unionId: string): string;
-  liveDynRefAdapter(t: IrType): { snapshot: string; commit: string };
+  /** The shared adapter record: live array capsules read its `arrayOps`, so a
+   * narrower return type would hand the native compiler a copy without it. */
+  liveDynRefAdapter(t: IrType): LlStreamTypedRefAdapter;
   liveDynUnionRefAdapter(t: IrType & { kind: "union" }): string;
   dynPromiseAdapter(t: IrType): string;
   isErrorClass(className: string): boolean;
@@ -212,6 +216,7 @@ export class LlDyn {
         B.line(
           `%result = call ptr ${typedRefConstructor(this.host, type)}(ptr %value, ptr ${rc.retain}, ptr ${rc.release}, ptr ${this.host.cstr(typeId)}, ${this.S} ${Buffer.byteLength(typeId, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
         );
+        for (const line of bindLiveArrayOps(this.host, adapter, "%result")) B.line(line);
       } else {
         B.line(`%result = call ptr @${this.toDynHelper(type)}(${ty} %value)`);
       }
@@ -3179,6 +3184,19 @@ export class LlDyn {
       const lNext = B.newLabel("kg.n");
       B.condBr(isTyped, lTyped, lNext);
       B.startBlock(lTyped);
+      // Live arrays answer `length` and own elements from the native array;
+      // rebuilding the snapshot per read would make index loops quadratic.
+      host.declare(`declare ptr @scr_dyn_typed_ref_key_get(ptr, ptr)`);
+      const fast = B.tmp();
+      const hit = B.tmp();
+      B.line(`${fast} = call ptr @scr_dyn_typed_ref_key_get(ptr %d, ptr %k)`);
+      B.line(`${hit} = icmp ne ptr ${fast}, null`);
+      const lFast = B.newLabel("kg.tr.fast");
+      const lView = B.newLabel("kg.tr.view");
+      B.condBr(hit, lFast, lView);
+      B.startBlock(lFast);
+      B.terminate(`ret ptr ${fast}`);
+      B.startBlock(lView);
       host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
       host.declare(`declare void @scr_dyn_release_v(ptr)`);
       const materialized = B.tmp();
