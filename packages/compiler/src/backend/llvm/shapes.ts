@@ -846,6 +846,29 @@ export function releaseFastPath(
  * tenured object) and call the runtime only to enqueue a new candidate.
  * Every emitted release of a headered object shares this sequence
  * (scr_runtime.h asserts the offset); it ends by branching to `done`. */
+/** One traced field of an emitted trace function: load the slot and visit
+ * it unless it is null. Every collector visitor ignores null children, and
+ * most traced slots of a typical heap are empty (optional links, unset
+ * caches), so testing here saves an indirect call per empty slot on every
+ * collector walk. The sequence ends in the new block `tv<i>.next`. */
+export function traceFieldVisitLines(
+  struct: string,
+  index: number,
+  i: number,
+  comment: string,
+): string[] {
+  return [
+    `  %f${i} = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 ${index}`,
+    `  %v${i} = load ptr, ptr %f${i}`,
+    `  %z${i} = icmp eq ptr %v${i}, null`,
+    `  br i1 %z${i}, label %tv${i}.next, label %tv${i}.visit`,
+    `tv${i}.visit:`,
+    `  call void %visit(ptr %v${i}, ptr %ctx) ; ${comment}`,
+    `  br label %tv${i}.next`,
+    `tv${i}.next:`,
+  ];
+}
+
 export function cycleRootLines(host: ShapeHost, done: string): string[] {
   const S = host.sizeType;
   host.declare(`declare void @scr_cyc_on_release(ptr)`);
@@ -1021,11 +1044,7 @@ export function emitRecordShapes(
         `entry:`,
       ];
       tracedMembers.forEach((m, i) => {
-        tr.push(
-          `  %f${i} = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 ${m.index}`,
-          `  %v${i} = load ptr, ptr %f${i}`,
-          `  call void %visit(ptr %v${i}, ptr %ctx) ; ${llvmCommentText(m.name)}`,
-        );
+        tr.push(...traceFieldVisitLines(struct, m.index, i, llvmCommentText(m.name)));
       });
       tr.push(`  ret void`, `}`, ``);
       defs.push(...tr);
