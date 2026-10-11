@@ -248,9 +248,9 @@ console.log(mix(1, 2), spin(5));
     };
     // A bounded helper neither polls on entry nor makes its callers poll.
     expect(body("sc_f_mix")).not.toContain("@scr_exc_alert");
-    // Recursion polls on entry: the inline test reads the process-wide
-    // alert word (no thread-local access), and only the slow path calls into
-    // the runtime.
+    // Recursion tests after its recursive calls (its stack check replaces
+    // the entry poll): the inline test reads the process-wide alert word (no
+    // thread-local access), and only the slow path calls into the runtime.
     expect(body("sc_f_spin")).toMatch(/load atomic i32, ptr @scr_exc_alert monotonic/);
     expect(body("sc_f_spin")).toContain("call zeroext i1 @scr_exc_pending()");
     expect(body("sc_f_spin")).not.toContain("@scr_exc_active");
