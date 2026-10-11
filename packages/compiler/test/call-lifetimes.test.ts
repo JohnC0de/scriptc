@@ -269,15 +269,22 @@ console.log(work());
   expect(facts.borrowed.get("relay")).toEqual(new Set([0, 1]));
   expect(facts.parameters.has("keep")).toBe(false);
   const llvm = emitLlvmModule(mod);
+  // An append only adds an edge, so `keep` preserves every heap edge, borrows
+  // every reference parameter and returns one of them: it is a borrowed-return
+  // function. Its body retains only the element stored into the array; the
+  // returned parameter goes back +0 (the caller still owns it) and the owned
+  // adapter retains it before releasing its parameters.
   const keep = body(llvm, "sc_bf_keep");
-  expect(keep.match(/@sc_retain_Item/g)).toHaveLength(2);
+  expect(keep.match(/@sc_retain_Item/g)).toHaveLength(1);
   expect(keep).not.toContain("@scr_arr_retain_v");
   expect(keep).not.toContain("@scr_arr_release");
   const relay = body(llvm, "sc_bf_relay");
-  expect(relay).toContain("@sc_bf_keep");
+  expect(relay).toMatch(/call ptr @sc_bf_keep\([^)]*\) ; borrowed result/);
   expect(relay).not.toContain("@sc_retain_Item");
   expect(relay).not.toContain("@scr_arr_retain_v");
   const owned = body(llvm, "sc_f_keep");
+  expect(owned.match(/@sc_retain_Item/g)).toHaveLength(1);
+  expect(owned.indexOf("@sc_retain_Item")).toBeLessThan(owned.indexOf("@sc_release_Item"));
   expect(owned).toContain("@sc_release_Item");
   expect(owned).toContain("@scr_arr_release");
 });
