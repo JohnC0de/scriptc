@@ -20,6 +20,9 @@
 #include <unistd.h>
 #ifndef _WIN32
 #include <sys/wait.h>
+
+/* Sparse entries live in the array's out-of-line storage. */
+static size_t arr_sparse_len(const ScrArr *a) { return a->ext ? a->ext->sparse_len : 0; }
 #endif
 
 static int checks = 0;
@@ -53,7 +56,7 @@ static void test_large_set_materialization(void) {
   for (size_t i = 0; i < count; i++) scr_map_set_f64_f64(set, (double)i, 0);
   scr_map_delete_f64(set, 1);
   ScrArr *values = scr_set_to_arr_f64(set);
-  check(values->len == count - 1 && values->cap >= values->len && values->sparse_len == 0,
+  check(values->len == count - 1 && values->cap >= values->len && arr_sparse_len(values) == 0,
     "large Set materializes into dense storage past the 2^20 cutoff");
   check(scr_arr_get_f64(values, 0) == 0 && scr_arr_get_f64(values, 1) == 2,
     "large Set materialization skips tombstones in order");

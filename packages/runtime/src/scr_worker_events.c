@@ -77,7 +77,8 @@ static void scr_worker_port_listeners(void *ptr, const ScrStr *name, bool presen
 }
 
 static ScrWorkerView *scr_worker_view_new(bool port) {
-  ScrWorkerView *view = scr_cyc_alloc(sizeof(*view), scr_worker_view_trace, scr_worker_view_gcfree);
+  static const ScrCycType cyc_type = { &scr_worker_view_trace, &scr_worker_view_gcfree, SCR_CYC_KIND_WORKER_VIEW };
+  ScrWorkerView *view = scr_cyc_alloc(sizeof(*view), &cyc_type);
   view->rc = 1;
   view->port = port;
   view->referenced = !port;

@@ -108,9 +108,11 @@ const SA_BUMP = 280;
 const SA_LIM = 536;
 const SA_STEP_SHIFT = 4; // 16-byte classes
 const SA_MAX = 512;
-/** sizeof(ScrCycHdr) on 64-bit targets; trace and free_fn are its first
- * two words, and every other header word starts zero. */
-const CYC_HDR = 32;
+/** sizeof(ScrCycHdr); on 64-bit targets the type descriptor is its first
+ * word, and every other header word starts zero. */
+const CYC_HDR = 16;
+/** ScrCycHdr.gen, an i8 at this header offset (scr_runtime.h asserts it). */
+const CYC_GEN = 9;
 
 function declareState(host: AllocHost): void {
   if (host.threadLocalAlloc !== true) host.declare(`@scr_sa = external global ${SA_TYPE}`);
@@ -121,10 +123,24 @@ function declareGlobal(host: AllocHost, decl: string): void {
   if (host.threadLocalAlloc !== true) host.declare(decl);
 }
 
-/** A collector header to install: the object's trace and teardown. */
+/** A collector header to install: the object type's constant ScrCycType
+ * descriptor (its trace and teardown; see cycTypeDescriptor). */
 export interface CycHeader {
-  trace: string;
-  free: string;
+  type: string;
+}
+
+/** The first collector statistics index of an emitted ScrCycType
+ * descriptor; the runtime's own families use the ones below
+ * (SCR_CYC_KIND_EMITTED in scr_runtime.h). */
+export const FIRST_EMITTED_CYC_KIND = 32;
+
+/** The definition of a shape's ScrCycType descriptor `{ trace, free_fn,
+ * kind }`, referenced by every header of that shape. `kind` indexes the
+ * collector's per-type statistics (scr_runtime.h); emitted shapes number
+ * themselves from FIRST_EMITTED_CYC_KIND (ShapeHost.nextCycKind) and 0
+ * keeps none. */
+export function cycTypeDescriptor(name: string, trace: string, free: string, kind = 0): string {
+  return `${name} = internal constant { ptr, ptr, i32 } { ptr ${trace}, ptr ${free}, i32 ${kind} }`;
 }
 
 /**
@@ -157,9 +173,9 @@ function allocLines(
   const S = host.sizeType;
   if (host.inlineAlloc !== true) {
     if (cyc) {
-      host.declare(`declare ptr @scr_cyc_alloc(${S}, ptr, ptr)`);
+      host.declare(`declare ptr @scr_cyc_alloc(${S}, ptr)`);
       return [
-        `  %o = call ptr @scr_cyc_alloc(${S} ${size}, ptr ${cyc.trace}, ptr ${cyc.free})`,
+        `  %o = call ptr @scr_cyc_alloc(${S} ${size}, ptr ${cyc.type})`,
         `  call void @scr_obj_alloc_note()`,
       ];
     }
@@ -178,8 +194,8 @@ function allocLines(
   }
   declareState(host);
   // Bytes of the block that the fast path itself stores after the clear:
-  // the header's trace/free_fn words, or the object's leading words.
-  const keep = cyc ? 16 : stored;
+  // the header's descriptor word, or the object's leading words.
+  const keep = cyc ? 8 : stored;
   const lines = [
     `  %sa.n = add i64 ${size}, ${cyc ? CYC_HDR : 0}`,
     `  %sa.small = icmp ule i64 %sa.n, ${SA_MAX}`,
@@ -223,21 +239,19 @@ function allocLines(
   ];
   host.declare(`declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)`);
   if (cyc) {
-    host.declare(`declare ptr @scr_cyc_alloc(${S}, ptr, ptr)`);
+    host.declare(`declare ptr @scr_cyc_alloc(${S}, ptr)`);
     declareGlobal(host, `@scr_cyc_live = external global i64`);
     lines.push(
       `sa.fast:`,
       `  %sa.blk = phi ptr [ %sa.b, %sa.pop ], [ %sa.p, %sa.carve ]`,
-      `  store ptr ${cyc.trace}, ptr %sa.blk ; ScrCycHdr.trace`,
-      `  %sa.ffp = getelementptr inbounds i8, ptr %sa.blk, i64 8`,
-      `  store ptr ${cyc.free}, ptr %sa.ffp ; ScrCycHdr.free_fn`,
+      `  store ptr ${cyc.type}, ptr %sa.blk ; ScrCycHdr.type`,
       `  %sa.live = load i64, ptr @scr_cyc_live`,
       `  %sa.live1 = add i64 %sa.live, 1`,
       `  store i64 %sa.live1, ptr @scr_cyc_live`,
       `  %sa.obj = getelementptr inbounds i8, ptr %sa.blk, i64 ${CYC_HDR}`,
       `  br label %sa.done`,
       `sa.slow:`,
-      `  %sa.s = call ptr @scr_cyc_alloc(i64 ${size}, ptr ${cyc.trace}, ptr ${cyc.free})`,
+      `  %sa.s = call ptr @scr_cyc_alloc(i64 ${size}, ptr ${cyc.type})`,
       `  call void @scr_obj_alloc_note()`,
       `  br label %sa.done`,
       `sa.done:`,
@@ -315,9 +329,9 @@ function freeLines(host: AllocHost, cyc: boolean): string[] {
       `  %sf.live1 = sub i64 %sf.live, 1`,
       `  store i64 %sf.live1, ptr @scr_cyc_live`,
       `  %sf.blk = getelementptr inbounds i8, ptr %o, i64 -${CYC_HDR}`,
-      `  %sf.genp = getelementptr inbounds i8, ptr %sf.blk, i64 22`,
-      `  %sf.gen = load i16, ptr %sf.genp`,
-      `  %sf.old = icmp eq i16 %sf.gen, 2`,
+      `  %sf.genp = getelementptr inbounds i8, ptr %sf.blk, i64 ${CYC_GEN}`,
+      `  %sf.gen = load i8, ptr %sf.genp`,
+      `  %sf.old = icmp eq i8 %sf.gen, 2`,
       `  br i1 %sf.old, label %sf.oldcount, label %sf.accounted`,
       `sf.oldcount:`,
       `  %sf.freed = load i64, ptr @scr_cyc_old_freed`,

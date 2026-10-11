@@ -1,5 +1,5 @@
 import { emitLlvmLayouts } from "./layouts.js";
-import { inlineAllocSupported } from "./alloc.js";
+import { FIRST_EMITTED_CYC_KIND, inlineAllocSupported } from "./alloc.js";
 import { llvmBytes as llBytes } from "../literals.js";
 import { InternalCompilerError } from "../../errors.js";
 /** Lower typed IR to LLVM, using the runtime's C ABI.
@@ -522,7 +522,10 @@ export class LlEmitter {
   private debugScope: string | null = null;
   readonly sizeType: "i32" | "i64";
   readonly ffiExtendNarrowIntegers: boolean;
-  readonly cycleColorOffset: number;
+  readonly cycleBufferedOffset: number;
+  /** Emitted ScrCycType descriptors so far (their collector statistics
+   * indices; see ShapeHost.nextCycKind). */
+  private cycKinds = 0;
   readonly wasi: boolean;
   /** The target lacks a rounding instruction at its baseline CPU (x86-64
    * before SSE4.1), so `llvm.trunc` would lower to a libm call: emit
@@ -863,10 +866,10 @@ export class LlEmitter {
     this.runtimeAbiMarker = options.runtimeAbiMarker === true;
     this.detachedExit = options.detachedExit === true;
     this.rcHelpers = options.inlineRc === true ? new Set() : null;
-    // ScrCycHdr.color stays 12 bytes behind a wasm32 object and 16 bytes
-    // behind a 64-bit object. The wasm32 header pads before color so its
-    // payload remains double-aligned without changing this ABI offset.
-    this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
+    // ScrCycHdr.buffered sits 6 bytes behind every object. The wasm32
+    // header pads before its descriptor so its payload remains
+    // double-aligned without changing this ABI offset.
+    this.cycleBufferedOffset = 6;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
     this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
@@ -898,7 +901,10 @@ export class LlEmitter {
     this.nullableFields = new NullableRefFields(mod.classes ?? [], this.boxedUnionsById);
     // Optional array reads also cover nullable unions: emitLocalArrayRead
     // then yields the (borrowed or owned) element pointer, not a stack box.
-    this.optionalArrayReads = new OptionalArrayReads(this.fnByName, this.unionsById);
+    // Arrays of such a union are read the same way.
+    this.optionalArrayReads = new OptionalArrayReads(this.fnByName, this.unionsById, (id) =>
+      this.nullableUnions.has(id),
+    );
     this.checkedNarrows = new CheckedNarrows(this.fnByName);
     this.referenceEffects = new ReferenceEffects(
       this.fnByName,
@@ -960,7 +966,7 @@ export class LlEmitter {
     this.tracedUnions = traced.unions;
     this.shapeHost = {
       sizeType: this.sizeType,
-      cycleColorOffset: this.cycleColorOffset,
+      cycleBufferedOffset: this.cycleBufferedOffset,
       tracedShapes: this.tracedShapes,
       tracedUnions: this.tracedUnions,
       nullableUnions: this.nullableUnions,
@@ -977,6 +983,7 @@ export class LlEmitter {
       // paths address its thread-local state.
       threadLocalAlloc: mod.workers === true,
       rcHelpers: this.rcHelpers,
+      nextCycKind: () => FIRST_EMITTED_CYC_KIND + this.cycKinds++,
       unionsById: this.unionsById,
       declare: (decl) => this.declare(decl),
       needOom: () => this.needOom(),
@@ -1877,10 +1884,13 @@ export class LlEmitter {
       `%ScrClosure = type { ${this.sizeType}, ptr, ${this.sizeType}, ptr, i32, i32, ptr }`,
       `%ScrFfiTable = type { ptr, ${this.sizeType}, ${this.sizeType}, ptr, i8, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ptr }`,
       `%ScrRegex = type { ${this.sizeType}, ptr, ptr, ptr, double, ptr, ptr }`,
-      // ScrArr mirrors scr_runtime.h field-for-field. Live dynamic stream
-      // commits swap its mutable dense, sparse, presence, and property
-      // storage while preserving the target object's identity.
-      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ${this.sizeType}, ptr }`,
+      // ScrArr mirrors scr_runtime.h field-for-field: { rc, len, cap, elem,
+      // elem_retain, elem_release, elem_trace, data, present, ext }, where
+      // ext points at the out-of-line sparse, property and metadata storage
+      // (NULL until first used). Live dynamic stream commits swap its dense,
+      // presence and out-of-line storage while preserving the target
+      // object's identity.
+      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr, ptr, ptr }`,
       // The ScrMap prefix { rc, key_kind, val_kind, val_retain, val_release,
       // val_trace, key_retain, key_release, key_trace } — the inline RC
       // fast paths test the two trace slots (shapes.ts).
@@ -2061,7 +2071,7 @@ export class LlEmitter {
       out.push(
         `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
         `@${inst.sym}_present = internal constant [${n} x i8] ${present}`,
-        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null, ${this.sizeType} 0, ${this.sizeType} 0, ptr null, ${this.sizeType} 0, ${this.sizeType} 0, ptr null }`,
+        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null }`,
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);
@@ -5133,12 +5143,14 @@ export class LlEmitter {
       this.callLifetimes,
       this.optionalArrayReads,
       this.loopArrayBorrows,
+      this.debug === null ? this.referenceEffects : undefined,
     );
     this.callArrayReads = findCallArrayReads(
       fn,
       this.optionalArrayReads,
       this.referenceEffects.functions,
       this.callLifetimes,
+      this.debug === null ? this.referenceEffects : undefined,
     );
     this.scalarStringSlices =
       this.debug === null ? findScalarStringSlices(fn, this.callLifetimes) : new Map();
