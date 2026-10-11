@@ -118,7 +118,36 @@ A contract anywhere else (a type alias, an interface member, an element or type 
 
 A `NoThrow` function must not contain a path to a throwing operation: a `throw`, a call to a function that may throw, a call through a function value that may hold such a function, an operation that throws in Node.js (such as reading a property of `undefined`), or recursion, whose stack guard can throw `RangeError`. scriptc already computes this for every function to omit exception checks; the contract turns the result into a guarantee and reports the first throwing path when it does not hold.
 
-In this version a surrounding `try`/`catch` does not discharge the contract, and `async` functions and generators cannot be `NoThrow`.
+A `try` statement discharges what its handlers take. A throwing call inside a `try` with a `catch`, or inside a `try` whose `finally` always ends with `return`, `break` or `continue` (which discards the pending exception), cannot leave the function:
+
+```ts:digits.ts
+import type { NoThrow } from "@scriptc/types";
+
+function parseDigit(ch: number): number {
+  if (ch < 48 || ch > 57) throw new RangeError("not a digit");
+  return ch - 48;
+}
+
+function digitOr(text: string, i: number, fallback: number): NoThrow<number> {
+  try {
+    return parseDigit(text.charCodeAt(i));
+  } catch {
+    return fallback;
+  }
+}
+
+console.log(digitOr("7", 0, -1), digitOr("x", 0, -1));
+```
+
+```console
+$ node digits.ts
+7 -1
+$ scriptc build digits.ts -o digits >/dev/null
+$ ./digits
+7 -1
+```
+
+The `catch` and `finally` bodies are checked like any other code: a rethrow, a throwing call in the `catch`, or a `try`/`finally` without `catch` whose `finally` can complete normally (and so re-raises the exception) still fails the contract. A recursive function cannot be `NoThrow`, because its stack guard throws on entry, outside any handler. In programs that use worker threads, `try` does not discharge the contract, since a termination request unwinds through `catch`. `async` functions and generators cannot be `NoThrow`.
 
 ## Int32
 
@@ -192,7 +221,7 @@ $ scriptc build reject.ts
      |                                            ^~~~~~~~~~~~~~~
   15 |   return parseDigit(text.charCodeAt(i));
 
-  hint: remove the throwing operation from the path (or the recursion), or remove NoThrow; a surrounding try/catch does not discharge the contract in this version
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow
 
 /tmp/app/reject.ts:19:10 - error SC7002: the value returned from 'middle' (Int32) is not provably an int32: '(start + end) / 2'
 

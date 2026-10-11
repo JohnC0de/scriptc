@@ -15878,6 +15878,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4641-nothrow-try-catch.ts": {
+   "order": [
+    "<repo>/tests/corpus/4641-nothrow-try-catch.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/contract-immutable.ts": {
    "order": [
     "<repo>/tests/diagnostics/contract-immutable.ts"
@@ -15893,6 +15899,12 @@
   "<repo>/tests/diagnostics/contract-int32.ts": {
    "order": [
     "<repo>/tests/diagnostics/contract-int32.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-nothrow-handlers.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-nothrow-handlers.ts"
    ],
    "diags": []
   },
