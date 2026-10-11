@@ -244,10 +244,12 @@ export function backendAnalysisCases(): BackendAnalysisCase[] {
     { id: "recursive", arms: [record("cycle"), { kind: "nullT" }] },
     { id: "acyclic", arms: [record("chain"), F64] },
   ];
+  // `outer` holds the cycle but nothing reaches back to it, so only the
+  // cycle's own component is traced (cycle-analysis.ts).
   cases.push({
     name: "shape and union fixed point",
     module: graph,
-    shapes: ["record:outer", "record:cycle"],
+    shapes: ["record:cycle"],
     unions: ["recursive"],
   });
   const hierarchy = module();
@@ -343,6 +345,7 @@ export function backendAnalysisCases(): BackendAnalysisCase[] {
   });
   // Constructor-only references are proven acyclic (cycle-analysis.ts), so
   // the cyclic branch closes through an array edge, which is always mutable.
+  // `outer` only holds that cycle, so it stays untraced like the leaf.
   const branch = module();
   branch.records = [
     { id: "leaf", fields: [{ name: "value", type: F64 }] },
@@ -358,7 +361,7 @@ export function backendAnalysisCases(): BackendAnalysisCase[] {
   cases.push({
     name: "removing a leaf preserves another cyclic branch",
     module: branch,
-    shapes: ["record:cycle", "record:outer"],
+    shapes: ["record:cycle"],
   });
 
   const tableId = "%g.table";
