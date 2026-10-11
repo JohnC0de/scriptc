@@ -659,6 +659,8 @@ static void check_deferred_white_restoration(void) {
  * of walked; dead cycles of that type are still found by older passes; and
  * once the type's objects die in nursery cycles again, it is walked again.
  * Window, ratio and sample mirror SCR_CYC_BYPASS_*. */
+/* Tests only (SCR_CYC_TESTING): one pass at exactly `gen`. */
+size_t scr_cyc_pass_at(unsigned gen);
 static size_t bypass_traced; /* trace calls on bypass-kind nodes */
 static size_t bypass_freed;  /* bypass-kind nodes freed */
 static void bypass_trace(void *obj, ScrTraceVisit visit, void *ctx) {
@@ -731,13 +733,18 @@ static void check_nursery_bypass(void) {
   check(bypass_freed - before == 2 * RINGS, "an older pass missed dead rings of a bypassed type");
 
   /* Now the type's objects die in nursery cycles. The sampled candidates
-   * keep measuring the yield, so after one window the type is walked again. */
+   * keep measuring the yield, so after one window the type is walked again.
+   * A nursery pass after each release walks every sampled candidate at its
+   * own level: the promoted rings pile up in older buffers, and an older
+   * pass the growth schedule runs there would otherwise sweep sampled
+   * candidates too and leave the nursery's window unfinished. */
   for (size_t r = 0; r < (size_t)WINDOW * SAMPLE; r++) {
     Node *a = make_bypass_node(), *b = make_bypass_node();
     a->next = b;
     b->next = a;
     a->rc++;
     release_live(a);
+    scr_cyc_pass_at(SCR_CYC_NURSERY);
   }
   scr_collect_cycles();
   walks = probe_bypass_walks(live + nlive, PROBE);
@@ -757,7 +764,6 @@ static void check_nursery_bypass(void) {
  * goes straight to the old generation, its dead cycles are found by full
  * passes, and once its objects die at the mature level again it is judged
  * there again. Passes run at exact levels through the test entry point. */
-size_t scr_cyc_pass_at(unsigned gen);
 static size_t mature_kind_freed;
 static void mature_kind_free(void *obj) {
   mature_kind_freed++;
