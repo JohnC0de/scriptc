@@ -15808,6 +15808,38 @@
     "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4598-live-array-ref-element-access.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-live-array-ref-element-access.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts": {
+   "order": [
+    "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/4621-edge-preserving-callees/compare.ts",
+    "<repo>/tests/corpus/4621-edge-preserving-callees/items.ts",
+    "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/exact-index-round-trip.ts": {
+   "order": [
+    "<repo>/tests/corpus/exact-index-round-trip.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/final-field-borrows.ts": {
+   "order": [
+    "<repo>/tests/corpus/final-field-borrows.ts"
+   ],
+   "diags": []
   }
  }
 }
