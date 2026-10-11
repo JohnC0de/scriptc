@@ -672,13 +672,21 @@ void scr_arr_trace_v(void *a0, ScrTraceVisit visit, void *ctx) {
   }
 }
 
+/* Frees the out-of-line storage; callers check for it first, since most
+ * arrays have none. */
+static void scr_arr_ext_free(ScrArr *a) {
+  ScrArrExt *x = a->ext;
+  scr_arr_sparse_free(x->sparse);
+  for (size_t i = 0; i < x->prop_len; i++) free(x->props[i].key);
+  free(x->props);
+  scr_mem_free(x);
+  a->ext = NULL;
+}
+
 static void scr_arr_gc_free(void *a0) {
   ScrArr *a = (ScrArr *)a0;
   scr_mem_free(a->data);
-  scr_arr_sparse_free(SCR_AX(a)->sparse);
-  for (size_t i = 0; i < SCR_AX(a)->prop_len; i++) free(SCR_AX(a)->props[i].key);
-  free(SCR_AX(a)->props);
-  scr_mem_free(a->ext);
+  if (a->ext) scr_arr_ext_free(a);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays--;
 #endif
@@ -715,8 +723,10 @@ ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
 
 static void scr_arr_destroy(void *object) {
   ScrArr *a = object;
-  scr_dyn_release(SCR_AX(a)->metadata);
-  if (a->ext) a->ext->metadata = NULL;
+  if (a->ext) {
+    scr_dyn_release(a->ext->metadata);
+    a->ext->metadata = NULL;
+  }
   if (scr_elem_is_ref(a->elem)) {
     for (size_t i = 0, end = a->len < a->cap ? a->len : a->cap; i < end; i++) {
       if (a->present[i] != SCR_ARR_HOLE) {
@@ -727,30 +737,29 @@ static void scr_arr_destroy(void *object) {
         if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
       }
     }
-    while (SCR_AX(a)->sparse_len > 0) {
-      size_t i = SCR_AX(a)->sparse_len - 1;
-      uint64_t old = SCR_AX(a)->sparse[i].slot;
-      uint8_t state = SCR_AX(a)->sparse[i].state;
-      a->ext->sparse_len = i;
-      if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
-    }
-    while (SCR_AX(a)->prop_len > 0) {
-      size_t i = SCR_AX(a)->prop_len - 1;
-      uint64_t old = SCR_AX(a)->props[i].slot;
-      uint8_t state = SCR_AX(a)->props[i].state;
-      free(SCR_AX(a)->props[i].key);
-      a->ext->prop_len = i;
-      if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
+    if (a->ext) {
+      while (a->ext->sparse_len > 0) {
+        size_t i = a->ext->sparse_len - 1;
+        uint64_t old = a->ext->sparse[i].slot;
+        uint8_t state = a->ext->sparse[i].state;
+        a->ext->sparse_len = i;
+        if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
+      }
+      while (a->ext->prop_len > 0) {
+        size_t i = a->ext->prop_len - 1;
+        uint64_t old = a->ext->props[i].slot;
+        uint8_t state = a->ext->props[i].state;
+        free(a->ext->props[i].key);
+        a->ext->prop_len = i;
+        if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
+      }
     }
   }
   if (a->elem_trace) {
     scr_arr_gc_free(a);
   } else {
     scr_mem_free(a->data);
-    scr_arr_sparse_free(SCR_AX(a)->sparse);
-    for (size_t i = 0; i < SCR_AX(a)->prop_len; i++) free(SCR_AX(a)->props[i].key);
-    free(SCR_AX(a)->props);
-    scr_mem_free(a->ext);
+    if (a->ext) scr_arr_ext_free(a);
 #ifdef SCR_RC_AUDIT
     scr_live_arrays--;
 #endif
@@ -832,13 +841,15 @@ void scr_arr_set_len(ScrArr *a, double length) {
           if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
         }
       }
-      size_t keep = scr_arr_sparse_lower_bound(SCR_AX(a)->sparse, SCR_AX(a)->sparse_len, next);
-      while (SCR_AX(a)->sparse_len > keep) {
-        size_t i = SCR_AX(a)->sparse_len - 1;
-        uint64_t old = SCR_AX(a)->sparse[i].slot;
-        uint8_t state = SCR_AX(a)->sparse[i].state;
-        a->ext->sparse_len = i;
-        if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
+      if (a->ext) {
+        size_t keep = scr_arr_sparse_lower_bound(a->ext->sparse, a->ext->sparse_len, next);
+        while (a->ext->sparse_len > keep) {
+          size_t i = a->ext->sparse_len - 1;
+          uint64_t old = a->ext->sparse[i].slot;
+          uint8_t state = a->ext->sparse[i].state;
+          a->ext->sparse_len = i;
+          if (state == SCR_ARR_VALUE) scr_elem_release(a, old);
+        }
       }
     } else {
       for (size_t i = dense_stop; i < dense_end; i++) {
