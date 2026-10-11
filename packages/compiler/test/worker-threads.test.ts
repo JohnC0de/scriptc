@@ -254,7 +254,7 @@ console.log(mix(1, 2), spin(5));
     expect(body("sc_f_spin")).toMatch(/load atomic i32, ptr @scr_exc_alert monotonic/);
     expect(body("sc_f_spin")).toContain("call zeroext i1 @scr_exc_pending()");
     expect(body("sc_f_spin")).not.toContain("@scr_exc_active");
-    expect(llvm).toMatch(/^@scr_exc_alert = external global i32, align 64$/m);
+    expect(llvm).toMatch(/^@scr_exc_alert = external dso_local global i32, align 64$/m);
   }
 });
 

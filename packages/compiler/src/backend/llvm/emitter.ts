@@ -3893,7 +3893,9 @@ export class LlEmitter {
     this.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
     let word: string;
     if (this.mod.workers === true) {
-      this.declare(`@scr_exc_alert = external global i32, align 64`);
+      // dso_local: executables link the runtime statically, so the word is
+      // addressed directly instead of through the GOT.
+      this.declare(`@scr_exc_alert = external dso_local global i32, align 64`);
       word = B.tmp();
       B.line(`${word} = load atomic i32, ptr @scr_exc_alert monotonic, align 64`);
     } else {
