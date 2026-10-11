@@ -15796,6 +15796,12 @@
     "<repo>/tests/corpus/4602-constructor-escape-order.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts": {
+   "order": [
+    "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts"
+   ],
+   "diags": []
   }
  }
 }
