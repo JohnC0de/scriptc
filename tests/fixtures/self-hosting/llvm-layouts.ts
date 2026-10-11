@@ -3,6 +3,7 @@ import { deserializeModule } from "../../../packages/compiler/src/ir/serialize.j
 import { computeTraced } from "../../../packages/compiler/src/backend/cycle-analysis.js";
 import { buildClassGraph, classFieldIndex, type ClassHost } from "../../../packages/compiler/src/backend/llvm/classes.js";
 import { emitLlvmLayouts } from "../../../packages/compiler/src/backend/llvm/layouts.js";
+import { FIRST_EMITTED_CYC_KIND } from "../../../packages/compiler/src/backend/llvm/alloc.js";
 import { LlvmDebugInfo } from "../../../packages/compiler/src/backend/llvm/debug-info.js";
 import { LlWalkers, type WalkerHost } from "../../../packages/compiler/src/backend/llvm/walkers.js";
 import { BlockBuilder } from "../../../packages/compiler/src/backend/llvm/blocks.js";
@@ -36,6 +37,7 @@ try {
   const units: { union: string; tag: number }[] = [];
   let needsOom = false;
   let needsBadTag = false;
+  let cycKinds = 0;
   const traced = computeTraced(mod);
   const nullableUnions = new NullableUnions(mod);
   const unionsById = new Map((mod.unions ?? []).map((union) => [union.id, union]));
@@ -50,7 +52,9 @@ try {
       return `@native_literal_${index}`;
     },
     sizeType: request.bits === 32 ? "i32" : "i64",
-    cycleColorOffset: request.bits === 32 ? 12 : 16,
+    cycleBufferedOffset: 6,
+    // Collector statistics indices, numbered as LlEmitter numbers them.
+    nextCycKind: () => FIRST_EMITTED_CYC_KIND + cycKinds++,
     tracedShapes: traced.shapes,
     tracedUnions: traced.unions,
     recordsById: new Map((mod.records ?? []).map((record) => [record.id, record])),

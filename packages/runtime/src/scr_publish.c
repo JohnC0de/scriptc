@@ -114,7 +114,7 @@ static void scr_pub_slot(ScrPub *ctx, uint64_t slot, ScrPubFn fn) {
 
 void scr_pub_arr(void *v, ScrPub *ctx, ScrPubFn elem) {
   ScrArr *a = v;
-  if (a->props || a->metadata) {
+  if (a->ext && (a->ext->props || a->ext->metadata)) {
     scr_pub_refuse(ctx, "Cannot publish an array with non-index properties");
     return;
   }
@@ -124,8 +124,9 @@ void scr_pub_arr(void *v, ScrPub *ctx, ScrPubFn elem) {
   size_t dense = a->len < a->cap ? a->len : a->cap;
   for (size_t i = 0; i < dense; i++)
     if (!a->present || a->present[i]) scr_pub_slot(ctx, a->data[i], fn);
-  for (size_t i = 0; i < a->sparse_len; i++)
-    if (a->sparse[i].state) scr_pub_slot(ctx, a->sparse[i].slot, fn);
+  if (a->ext)
+    for (size_t i = 0; i < a->ext->sparse_len; i++)
+      if (a->ext->sparse[i].state) scr_pub_slot(ctx, a->ext->sparse[i].slot, fn);
 }
 
 /* publish() of a scalar Node.js refuses (a Date): nothing to walk. */

@@ -1201,12 +1201,6 @@ export class LlDyn {
                   { index: 2, type: host.sizeType, name: "capacity" },
                   { index: 7, type: "ptr" as const, name: "data" },
                   { index: 8, type: "ptr" as const, name: "presence" },
-                  { index: 9, type: "ptr" as const, name: "sparse slots" },
-                  { index: 10, type: host.sizeType, name: "sparse length" },
-                  { index: 11, type: host.sizeType, name: "sparse capacity" },
-                  { index: 12, type: "ptr" as const, name: "numeric properties" },
-                  { index: 13, type: host.sizeType, name: "property length" },
-                  { index: 14, type: host.sizeType, name: "property capacity" },
                 ];
           members.forEach((member) => {
             const cachedPtr = B.tmp();
@@ -1227,6 +1221,12 @@ export class LlDyn {
             B.line(`store ${member.type} ${newValue}, ptr ${cachedPtr}`);
             B.line(`store ${member.type} ${oldValue}, ptr ${checkedPtr}`);
           });
+          if (t.kind !== "record") {
+            // Sparse slots and numeric properties live out of line; each
+            // array keeps its own match metadata.
+            host.declare("declare void @scr_arr_swap_indexed_ext(ptr, ptr)");
+            B.line(`call void @scr_arr_swap_indexed_ext(ptr ${cached}, ptr ${checked})`);
+          }
           B.line(`call void ${releaseSym(host, t)}(ptr ${checked})`);
           B.terminate(`ret ptr ${cached}`);
           B.startBlock(lCache);

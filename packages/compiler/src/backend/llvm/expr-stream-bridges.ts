@@ -178,13 +178,7 @@ export function streamTypedRefCommitAdapter(
       { name: "cap", index: 2, type: host.sizeType },
       { name: "data", index: 7, type: "ptr" },
       { name: "present", index: 8, type: "ptr" },
-      { name: "sparse", index: 9, type: "ptr" },
-      { name: "sparse_len", index: 10, type: host.sizeType },
-      { name: "sparse_cap", index: 11, type: host.sizeType },
-      { name: "props", index: 12, type: "ptr" },
-      { name: "prop_len", index: 13, type: host.sizeType },
-      { name: "prop_cap", index: 14, type: host.sizeType },
-      { name: "metadata", index: 15, type: "ptr" },
+      { name: "ext", index: 9, type: "ptr" },
     ];
     for (const member of storageMembers) {
       lines.push(
