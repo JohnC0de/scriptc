@@ -6,6 +6,31 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.2.9
+
+### Features
+
+- **`os.availableParallelism()` works in static programs.**
+- **`--detached-exit` frees the address space after `process.exit` off the critical path,** so large programs exit sooner.
+
+### Performance
+
+- **Cycle-capable objects are smaller.** A 16-byte collector header, typed rest spreads, leaf capture boxes, rarely used array storage moved out of line, and tracing only types that can actually lie on a cycle.
+- **The heap and cycle collector scale better.** Busy small-object slices use transparent huge pages, the collector's growth fraction widens further on large live heaps, and `Map`/`Set` `clear` and `delete` cost O(live) rather than O(peak).
+- **Indexed reads are cheaper.** Typed-array reads stay plain numbers where `undefined` acts like `NaN`, unproven indexes are checked with a signed round trip, lengths and in-range indexes convert to doubles without the unsigned sequence, nullable-union array elements are read inline, and counted loops that start from an unproven value run on integer counters.
+- **Worker programs pay less overhead.** Fewer termination polls, an exact per-thread pending word, a call-free macOS stack guard, and exiting worker threads return their free pages to the system.
+- **More receivers and fields stay native.** Optional-chain receivers are borrowed, `int32` fields survive `Error` subclasses that forward constructor arguments, and method calls stay native when only an unrelated callback field shares the name.
+- **Compiler-scale programs compile without hitting V8's string limit.** Serialized IR is streamed.
+
+### Fixes
+
+- **More values behave as in Node.js.** Missing array and typed-array reads stay `undefined` through number arguments, narrowed slots and lambda results, and `null` stays distinct from the temporal dead zone in forward-captured bindings.
+- **Union class fields work in more shapes.** Optional base-class receivers are narrowed before shared field access, and fields declared with different types across a union can be read and written.
+- **Workers share descriptor tables safely,** and live array references are accessed one element at a time.
+- **Native program objects use runtime ABI v10.** The collector header changed size, so external object consumers must link the matching v0.2.9 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
+
+<!-- release:end -->
+
 ## 0.2.8
 
 ### Features
@@ -27,8 +52,6 @@ All notable changes to scriptc will be documented in this file.
 - **Weak collections accept more keys.** Records and arrays reached through unions and empty object literals work as `WeakMap` and `WeakSet` keys.
 - **Debuggers stop only at user code.** Shared helpers no longer appear on user source lines, so a breakpoint on a line stops only at that line's code.
 - **Native program objects use runtime ABI v9.** External object consumers must link the matching v0.2.8 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
-
-<!-- release:end -->
 
 ## 0.2.7
 
