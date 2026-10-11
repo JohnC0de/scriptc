@@ -97,7 +97,7 @@ export function emitDynamicExpr(
         B.line(
           `${boxed} = call ptr ${typedRefConstructor(host.shapeHost, v.type)}(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
         );
-        for (const line of bindLiveArrayOps(host, adapter, boxed)) B.line(line);
+        for (const line of bindLiveArrayOps(host.shapeHost, adapter, boxed)) B.line(line);
         return host.own({ name: boxed, type: e.type });
       }
       if (v.type.kind === "func") {

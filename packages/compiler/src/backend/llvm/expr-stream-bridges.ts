@@ -17,7 +17,15 @@ import { mangleFunction, mangleGlobal, mangleRecordStruct } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import { classFieldIndex, classStructSym } from "./classes.js";
 import { llvmCommentText } from "./common.js";
-import { FN_ATTRS, elemAccess, llFieldType, releaseSym, traceArg, vAdapters } from "./shapes.js";
+import {
+  FN_ATTRS,
+  elemAccess,
+  llFieldType,
+  releaseSym,
+  traceArg,
+  vAdapters,
+  type ShapeHost,
+} from "./shapes.js";
 import type { LlvmEmitterContext, LlStreamTypedRefAdapter } from "./expr-context.js";
 import type { NullableRefField } from "./nullable-fields.js";
 import { emitUnionPeek, emitUnionTag } from "./union-repr.js";
@@ -567,7 +575,7 @@ export function liveDynUnionRefAdapter(
     B.line(
       `${boxed} = call ptr ${typedRefConstructor(host.shapeHost, arm)}(ptr ${payload}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${host.cstr(armKey)}, ${host.sizeType} ${Buffer.byteLength(armKey, "utf8")}, ptr @${adapter.snapshot}, ptr ${adapter.commit})`,
     );
-    for (const line of bindLiveArrayOps(host, adapter, boxed)) B.line(line);
+    for (const line of bindLiveArrayOps(host.shapeHost, adapter, boxed)) B.line(line);
     B.terminate(`ret ptr ${boxed}`);
   });
   valueArms.forEach(({ arm }, index) => {
@@ -649,7 +657,7 @@ export function streamTypedRefBoxValue(
   B.line(
     `${boxed} = call ptr ${typedRefConstructor(host.shapeHost, t)}(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${nested.snapshot}, ptr ${nested.commit})`,
   );
-  for (const line of bindLiveArrayOps(host, nested, boxed)) B.line(line);
+  for (const line of bindLiveArrayOps(host.shapeHost, nested, boxed)) B.line(line);
   return boxed;
 }
 
@@ -1130,7 +1138,7 @@ function liveArrayOps(
 
 /** Attach the element hooks right after a live array capsule is built. */
 export function bindLiveArrayOps(
-  host: { declare(line: string): void },
+  host: ShapeHost,
   adapter: LlStreamTypedRefAdapter,
   capsule: string,
 ): string[] {
@@ -1250,7 +1258,7 @@ export function streamFromArrayAdapter(
     B.line(
       `${boxed} = call ptr ${typedRefConstructor(host.shapeHost, elem)}(ptr ${value}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${keyPtr}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr @${snapshot}, ptr ${commit})`,
     );
-    if (live) for (const line of bindLiveArrayOps(host, live, boxed)) B.line(line);
+    if (live) for (const line of bindLiveArrayOps(host.shapeHost, live, boxed)) B.line(line);
   } else {
     boxed = B.tmp();
     B.line(`${boxed} = call ptr @${host.dyn.toDynHelper(elem)}(${valueTy} ${value})`);
