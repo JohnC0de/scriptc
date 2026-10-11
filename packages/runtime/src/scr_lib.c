@@ -1501,20 +1501,19 @@ ScrStr *scr_os_type(void) {
 }
 
 #ifdef __linux__
-/* Reads at most cap - 1 bytes of path into buf (NUL-terminated); false when
- * the file cannot be read. */
+/* libuv's uv__slurp: one read of at most cap - 1 bytes of path into buf
+ * (NUL-terminated); false when the file cannot be opened or read. A single
+ * read, like libuv, so a long /proc/self/cgroup is cut where Node cuts it. */
 static bool scr_os_slurp(const char *path, char *buf, size_t cap) {
   int fd = open(path, O_RDONLY | O_CLOEXEC);
   if (fd < 0) return false;
-  size_t len = 0;
-  while (len + 1 < cap) {
-    ssize_t n = read(fd, buf + len, cap - 1 - len);
-    if (n < 0 && errno == EINTR) continue;
-    if (n <= 0) break;
-    len += (size_t)n;
-  }
+  ssize_t n;
+  do
+    n = read(fd, buf, cap - 1);
+  while (n < 0 && errno == EINTR);
   close(fd);
-  buf[len] = '\0';
+  if (n < 0) return false;
+  buf[n] = '\0';
   return true;
 }
 
@@ -1584,6 +1583,9 @@ double scr_os_available_parallelism(void) {
 #endif
   if (rc < 0) rc = sysconf(_SC_NPROCESSORS_ONLN);
 #if defined(__linux__)
+  /* A quota below one CPU truncates to 0 and is ignored, not clamped to 1:
+   * libuv (1.51 through 1.52) applies only `quota > 0 && quota < rc`, so
+   * Node then answers the affinity count. */
   long long quota = 0;
   if (scr_os_cgroup_cpu_quota(&quota) && quota > 0 && quota < rc) rc = (long)quota;
 #endif
