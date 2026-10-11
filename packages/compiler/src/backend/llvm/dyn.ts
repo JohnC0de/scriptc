@@ -1673,7 +1673,7 @@ export class LlDyn {
           host.declare(`declare void @scr_arr_set_len(ptr, double)`);
           const index = B.tmp();
           const length = B.tmp();
-          B.line(`${index} = uitofp ${this.S} ${i} to double`);
+          B.line(`${index} = sitofp ${this.S} ${i} to double`);
           B.line(`${length} = fadd double ${index}, 1.0`);
           B.line(`call void @scr_arr_set_len(ptr ${a}, double ${length})`);
           B.br(doneLabel);
@@ -3427,7 +3427,7 @@ export class LlDyn {
         const n = this.lenOf(B, "%d");
         const nd = B.tmp();
         const r = B.tmp();
-        B.line(`${nd} = uitofp ${host.sizeType} ${n} to double`);
+        B.line(`${nd} = sitofp ${host.sizeType} ${n} to double`);
         B.line(`${r} = call ptr @scr_dyn_new_num(double ${nd})`);
         B.terminate(`ret ptr ${r}`);
         B.startBlock(lStr);
@@ -3466,7 +3466,7 @@ export class LlDyn {
         const n2 = B.tmp();
         B.line(`${n2} = call double @scr_str_utf16_len(ptr ${s})`);
         const idxD = B.tmp();
-        B.line(`${idxD} = uitofp ${host.sizeType} ${idx} to double`);
+        B.line(`${idxD} = sitofp ${host.sizeType} ${idx} to double`);
         const inR2 = B.tmp();
         B.line(`${inR2} = fcmp olt double ${idxD}, ${n2}`);
         const lHit2 = B.newLabel("kg.ash");
@@ -3617,7 +3617,7 @@ export class LlDyn {
       host.declare(`declare ptr @scr_dyn_jsval_iter_n(ptr, double)`);
       const count = B.tmp();
       const out = B.tmp();
-      B.line(`${count} = uitofp ${host.sizeType} %n to double`);
+      B.line(`${count} = sitofp ${host.sizeType} %n to double`);
       B.line(`${out} = call ptr @scr_dyn_jsval_iter_n(ptr %d, double ${count})`);
       B.terminate(`ret ptr ${out}`);
       B.startBlock(lNotJv);
@@ -3755,7 +3755,7 @@ export class LlDyn {
         const index = B.tmp();
         const bd = B.tmp();
         const r = B.tmp();
-        B.line(`${index} = uitofp ${host.sizeType} ${i} to double`);
+        B.line(`${index} = sitofp ${host.sizeType} ${i} to double`);
         B.line(`${bd} = call double @scr_bytes_get(ptr ${bts}, double ${index})`);
         B.line(`${r} = call ptr @scr_dyn_new_num(double ${bd})`);
         B.line(`store ptr ${r}, ptr ${itemSlot}`);
