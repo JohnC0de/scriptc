@@ -747,6 +747,9 @@ export class LlEmitter {
   /** Immutable module constants (contract types) whose graphs become
    * immortal once initialized: their reads need no reference counting. */
   readonly immortalGlobals: ReadonlySet<string>;
+  /** ProgramLifetime hierarchy roots (contract types): their instances are
+   * immortal from construction (classes.ts programLifetimeClass). */
+  readonly programLifetime: ReadonlySet<string>;
   private numericLocals = new Map<string, IrLocal>();
   private captureIds = new Set<string>();
   /** Active induction bindings retain their width independently of size_t. */
@@ -835,6 +838,7 @@ export class LlEmitter {
     this.initializerBindings = findInitializerBindings(mod);
     this.int32Slots = analyzeInt32Slots(mod);
     this.immortalGlobals = new Set(mod.contracts?.immortalGlobals ?? []);
+    this.programLifetime = new Set(mod.contracts?.programLifetime ?? []);
     this.finalFields = analyzeFinalFields(mod);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.ffiExtendNarrowIntegers =
@@ -1008,6 +1012,7 @@ export class LlEmitter {
       },
       pendingTestLines: (dest) => this.pendingTestLines(dest),
       virtualEntry: (implFn) => this.virtualEntry(implFn),
+      programLifetime: this.programLifetime,
     };
     this.walkers = new LlWalkers(this.shapeHost);
     this.dyn = new LlDyn(this.shapeHost);

@@ -15878,6 +15878,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4633-contract-program-lifetime.ts": {
+   "order": [
+    "<repo>/tests/corpus/4633-contract-program-lifetime.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/contract-immutable.ts": {
    "order": [
     "<repo>/tests/diagnostics/contract-immutable.ts"
@@ -15905,6 +15911,24 @@
   "<repo>/tests/diagnostics/contract-positions.ts": {
    "order": [
     "<repo>/tests/diagnostics/contract-positions.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-program-lifetime-positions.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-program-lifetime-positions.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-program-lifetime-publish.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-program-lifetime-publish.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/contract-program-lifetime.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/contract-program-lifetime.ts"
    ],
    "diags": []
   },

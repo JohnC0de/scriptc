@@ -305,6 +305,21 @@ export interface ClassHost extends ShapeHost {
    * entry point unless the slot's calling convention borrows; see
    * LlEmitter.virtualEntry). */
   virtualEntry?(implFn: string): string;
+  /** Roots of the hierarchies declared `implements ProgramLifetime`
+   * (IrContracts.programLifetime). Absent: none. */
+  readonly programLifetime?: ReadonlySet<string>;
+}
+
+/** Whether `meta`'s instances live until the process exits (a
+ * ProgramLifetime hierarchy, contracts/check.ts): `new` makes them immortal
+ * (rc == SIZE_MAX) without a collector header, nothing frees them, and the
+ * class's retain and release entry points are empty, so reference counting
+ * on any static type of the hierarchy folds away. Immortal objects are
+ * already part of every RC and collector contract (static literals and
+ * published graphs): dynamic retains and releases skip rc == SIZE_MAX, and
+ * the collector skips such children before reading a header. */
+export function programLifetimeClass(host: ClassHost, meta: LlClassMeta): boolean {
+  return host.programLifetime?.has(meta.root.def.name) === true && meta.root.def.runtime !== true;
 }
 
 /** The newFn initialization stores for fields whose type ADMITS undefined
@@ -432,6 +447,7 @@ export function emitClassShapes(
   for (const cls of emitted) {
     const meta = metaMap.get(cls.name)!;
     const struct = mangleClassStruct(cls.name);
+    const lifetime = programLifetimeClass(host, meta);
     const traced = host.tracedShapes.has(`object:${cls.name}`);
     const isEmitterRooted = emitterRooted(meta);
     const isStreamRooted = streamRooted(meta);
@@ -476,7 +492,7 @@ export function emitClassShapes(
 
     // retain: NULL-tolerant, immortal-skip — layout-generic (rc at 0), so
     // hierarchy members need no dispatch.
-    defs.push(...retainBody(host, mangleClassRetain(cls.name), `retain ${cls.name}`), ``);
+    defs.push(...retainBody(host, mangleClassRetain(cls.name), `retain ${cls.name}`, lifetime), ``);
 
     // The field-releasing teardown body shared by both release shapes
     // (the public one on standalone classes, the DIRECT one on hierarchy
@@ -515,6 +531,7 @@ export function emitClassShapes(
             dispatchName,
             traced,
             `release ${cls.name}`,
+            lifetime,
           ),
           ``,
         );
@@ -579,6 +596,7 @@ export function emitClassShapes(
           freeBody,
           `release ${cls.name}`,
           bounded,
+          lifetime,
         ),
         ``,
       );
@@ -603,10 +621,17 @@ export function emitClassShapes(
         ),
         ``,
       );
+    // A program-lifetime instance is immortal from construction: no
+    // collector header (nothing walks or frees it) and rc == SIZE_MAX.
     nw.push(
-      ...emitObjectAlloc(host, sizeOf, traced ? { type: cycType } : null, meta.hierarchy ? 16 : 8),
+      ...emitObjectAlloc(
+        host,
+        sizeOf,
+        traced && !lifetime ? { type: cycType } : null,
+        meta.hierarchy ? 16 : 8,
+      ),
     );
-    nw.push(`  store ${host.sizeType} 1, ptr %o`);
+    nw.push(`  store ${host.sizeType} ${lifetime ? -1 : 1}, ptr %o`);
     if (meta.hierarchy) {
       nw.push(
         `  %vtp = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 1`,

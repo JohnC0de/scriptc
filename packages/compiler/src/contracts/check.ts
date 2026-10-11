@@ -14,6 +14,9 @@
  *   Immutable slot, values stored into Immutable slots are fresh (nothing
  *   else references them), and such values never escape to code the IR
  *   cannot see. Module constants built from fresh literals become immortal.
+ * - ProgramLifetime (class marker): the class is a hierarchy root in an
+ *   executable whose instances cannot be published; its hierarchy is then
+ *   immortal from construction (classes.ts programLifetimeClass).
  *
  * Verified facts land on the IR as `contracts` (IrContracts). */
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
@@ -40,6 +43,7 @@ import {
 import { findInitializerBindings, withInitializerBindings } from "../ir/initializer-bindings.js";
 import { dynamicallyStoredFamilies, functionCallFacts, Int32Slots } from "../ir/int32-slots.js";
 import { computeMayThrow, type MayThrowReason } from "../backend/may-throw.js";
+import { computePublishedTypes } from "../backend/publication.js";
 import { SourceLocations } from "../backend/source-locations.js";
 import {
   contractLocKey,
@@ -228,6 +232,7 @@ class ContractChecker {
   }
 
   run(): ContractCheckResult {
+    this.checkProgramLifetime();
     this.checkNoThrow();
     const int32 = new Int32Contracts(this);
     int32.run();
@@ -243,6 +248,68 @@ class ContractChecker {
     if (list.length === 0) return;
     this.contracts[field] = list;
     this.recorded = true;
+  }
+
+  /* ── ProgramLifetime ── */
+
+  /** `class C implements ProgramLifetime`: a memory-only promise, so no
+   * program behavior depends on it except that instances are never freed.
+   * Checked: the class is the root of its hierarchy (every subclass, and so
+   * every value of any static type in the hierarchy, is then program-
+   * lifetime, which is what lets the backend elide reference counting on
+   * those static types); the build is an executable (library hosts own the
+   * lifetimes of the objects they receive); and no instance can be
+   * published to other threads (publication marks a graph immortal by its
+   * reference count and walks it by that mark, which program-lifetime
+   * objects already carry, so their fields would stay thread-local). Static
+   * code has no WeakRef or FinalizationRegistry; weak collections stay
+   * correct because an entry keyed by an object that is never freed is
+   * never observable as removed. */
+  private checkProgramLifetime(): void {
+    if (this.notes.classes.size === 0) return;
+    const roots: string[] = [];
+    const notes = new Map<string, ContractNote>();
+    for (const [key, note] of this.notes.classes)
+      for (const cls of this.classesAt(key)) {
+        if (cls.base !== undefined) {
+          const base = this.classes.get(cls.base);
+          const baseName = base?.jsName ?? cls.base.replace(/^%(m\d+\.)?/, "");
+          this.report(
+            "SC7007",
+            note.loc,
+            `'${note.name}' is declared ProgramLifetime but extends '${baseName}'`,
+            base === undefined || base.runtime === true
+              ? "ProgramLifetime applies to classes the program owns end to end; built-in bases (errors, emitters, streams) keep runtime state that is released with the object"
+              : `declare ProgramLifetime on the root class '${baseName}' instead; it applies to every subclass`,
+          );
+          continue;
+        }
+        if (this.mod.lib !== undefined) {
+          this.report(
+            "SC7007",
+            note.loc,
+            `'${note.name}' is declared ProgramLifetime in a library build`,
+            "a library's host decides when the objects it receives are released; ProgramLifetime is checked in executables only",
+          );
+          continue;
+        }
+        roots.push(cls.name);
+        notes.set(cls.name, note);
+      }
+    if (roots.length === 0) return;
+    const published = computePublishedTypes(this.mod);
+    if (published !== null)
+      for (const root of roots) {
+        if (!published.classGuarded(root)) continue;
+        const note = notes.get(root)!;
+        this.report(
+          "SC7007",
+          note.loc,
+          `'${note.name}' is declared ProgramLifetime, but its instances can be published to other threads`,
+          "publication is not supported for ProgramLifetime classes yet; remove ProgramLifetime or keep the instances out of the published graph",
+        );
+      }
+    this.record("programLifetime", roots);
   }
 
   /* ── NoThrow ── */

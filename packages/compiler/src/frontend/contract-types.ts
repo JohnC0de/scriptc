@@ -4,7 +4,8 @@
  * aliases by import provenance, like threads-import.ts recognizes the
  * @scriptc/threads exports. TypeScript drops alias identity from inferred
  * types, so only annotations the program WRITES count: parameter, return,
- * variable and class field types. The IR-side checks live in
+ * variable and class field types, and the ProgramLifetime class marker in
+ * a class declaration's implements clause. The IR-side checks live in
  * ir/contract-check.ts. */
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import type { SrcLoc } from "../ir/ir.js";
@@ -13,8 +14,8 @@ import * as ts from "./ts7/adapter.js";
 
 export const CONTRACT_TYPES_MODULE = "@scriptc/types";
 
-export type ContractMarker = "Int32" | "NoThrow" | "Immutable";
-const MARKERS: ReadonlySet<string> = new Set(["Int32", "NoThrow", "Immutable"]);
+export type ContractMarker = "Int32" | "NoThrow" | "Immutable" | "ProgramLifetime";
+const MARKERS: ReadonlySet<string> = new Set(["Int32", "NoThrow", "Immutable", "ProgramLifetime"]);
 
 /** One written contract: what it promises and where the annotation is. */
 export interface ContractNote {
@@ -36,6 +37,8 @@ export interface ContractAnnotations {
   bindings: Map<string, ContractNote>;
   /** Instance fields by `${class key}\0${field name}`. */
   fields: Map<string, ContractNote>;
+  /** Class markers (`implements ProgramLifetime`) by class key. */
+  classes: Map<string, ContractNote>;
   diagnostics: ScrDiagnostic[];
   /** Number of annotations found (for timing and tests). */
   count: number;
@@ -49,7 +52,13 @@ export function contractLocKey(loc: SrcLoc): string {
  * import binding of @scriptc/types (`import type { Int32 } from
  * "@scriptc/types"`, `import type * as sc from "@scriptc/types"`). */
 function markerOf(checker: ts.TypeChecker, ref: ts.TypeReferenceNode): ContractMarker | null {
-  const name = ref.typeName;
+  return markerOfName(checker, ref.typeName);
+}
+
+/** markerOf for a written name: `Marker`, `sc.Marker` as a type name
+ * (QualifiedName) or as a heritage expression (PropertyAccessExpression,
+ * `implements sc.ProgramLifetime`). */
+function markerOfName(checker: ts.TypeChecker, name: ts.Node): ContractMarker | null {
   let ident: ts.Identifier;
   let member: string;
   if (ts.isIdentifier(name)) {
@@ -60,6 +69,14 @@ function markerOf(checker: ts.TypeChecker, ref: ts.TypeReferenceNode): ContractM
     if (!MARKERS.has(name.right.text)) return null;
     ident = name.left;
     member = name.right.text;
+  } else if (
+    ts.isPropertyAccessExpression(name) &&
+    ts.isIdentifier(name.expression) &&
+    ts.isIdentifier(name.name)
+  ) {
+    if (!MARKERS.has(name.name.text)) return null;
+    ident = name.expression;
+    member = name.name.text;
   } else return null;
   const symbol = checker.getSymbolAtLocation(ident);
   const decl = symbol ? checker.declarationsOf(symbol)[0] : undefined;
@@ -106,15 +123,26 @@ export function collectContractAnnotations(
     functions: new Map(),
     bindings: new Map(),
     fields: new Map(),
+    classes: new Map(),
     diagnostics: [],
     count: 0,
   };
-  const kinds = new Set<ts.SyntaxKind>([ts.SyntaxKind.TypeReference]);
+  const kinds = new Set<ts.SyntaxKind>([
+    ts.SyntaxKind.TypeReference,
+    ts.SyntaxKind.ExpressionWithTypeArguments,
+  ]);
   for (const sf of files) {
     if (sf.isDeclarationFile || !sf.text.includes(CONTRACT_TYPES_MODULE)) continue;
     ts.walkPreorder(
       sf,
       (node) => {
+        if (ts.isExpressionWithTypeArguments(node)) {
+          const marker = markerOfName(checker, node.expression);
+          if (marker === null) return;
+          out.count++;
+          placeHeritage(out, node, marker);
+          return;
+        }
         if (!ts.isTypeReferenceNode(node)) return;
         const marker = markerOf(checker, node);
         if (marker === null) return;
@@ -133,7 +161,9 @@ function unsupported(out: ContractAnnotations, node: ts.Node, marker: ContractMa
       ? "NoThrow wraps a function's written return type"
       : marker === "Int32"
         ? "Int32 is checked on parameters, variables, class instance fields and function results"
-        : "Immutable is checked on parameters, variables, class instance fields and function results";
+        : marker === "ProgramLifetime"
+          ? "ProgramLifetime is checked in the implements clause of a class declaration"
+          : "Immutable is checked on parameters, variables, class instance fields and function results";
   out.diagnostics.push(
     contractDiag(
       "SC7006",
@@ -141,9 +171,36 @@ function unsupported(out: ContractAnnotations, node: ts.Node, marker: ContractMa
       `the ${marker} contract is not checked in this position (${where})`,
       marker === "NoThrow"
         ? "write it as the function's return type annotation: function f(): NoThrow<T>"
-        : `write ${marker} directly as the annotation of the declaration; type aliases, interface members and types nested in other types (arrays, unions, type arguments) are not followed`,
+        : marker === "ProgramLifetime"
+          ? "declare it on the class itself: class Node implements ProgramLifetime { ... }"
+          : `write ${marker} directly as the annotation of the declaration; type aliases, interface members and types nested in other types (arrays, unions, type arguments) are not followed`,
     ),
   );
+}
+
+/** A marker written in a heritage clause: only `class C implements
+ * ProgramLifetime` is a contract position. */
+function placeHeritage(
+  out: ContractAnnotations,
+  node: ts.ExpressionWithTypeArguments,
+  marker: ContractMarker,
+): void {
+  const clause = node.parent;
+  const cls = clause?.parent;
+  if (
+    marker !== "ProgramLifetime" ||
+    clause === undefined ||
+    !ts.isHeritageClause(clause) ||
+    clause.token !== ts.SyntaxKind.ImplementsKeyword ||
+    cls === undefined ||
+    !ts.isClassDeclaration(cls)
+  )
+    return unsupported(out, node, marker);
+  out.classes.set(contractLocKey(locOf(cls)), {
+    marker,
+    loc: locOf(node),
+    name: nameText(cls.name),
+  });
 }
 
 function place(
@@ -152,6 +209,7 @@ function place(
   ref: ts.TypeReferenceNode,
   marker: ContractMarker,
 ): void {
+  if (marker === "ProgramLifetime") return unsupported(out, ref, marker);
   let node: ts.Node = ref;
   let parent = ref.parent;
   // NoThrow<Int32> / NoThrow<Immutable<T>>: the inner marker is the result

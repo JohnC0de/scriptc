@@ -1,0 +1,8 @@
+contract-program-lifetime-publish.ts:7:23 - error SC7007: 'Tree' is declared ProgramLifetime, but its instances can be published to other threads
+
+  6 | 
+  7 | class Tree implements ProgramLifetime {
+    |                       ^~~~~~~~~~~~~~~
+  8 |   children: Tree[] = [];
+
+  hint: publication is not supported for ProgramLifetime classes yet; remove ProgramLifetime or keep the instances out of the published graph

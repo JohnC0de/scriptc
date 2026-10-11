@@ -28,6 +28,11 @@ Contract types are type aliases that mean nothing to TypeScript or Node.js but a
       <td>No code writes to the value, through any reference.</td>
       <td>A module constant built from literals becomes immortal data: never reference counted, never traced by the collector.</td>
     </tr>
+    <tr>
+      <td><code>ProgramLifetime</code></td>
+      <td>Instances of the class are kept until the program exits.</td>
+      <td>Instances are immortal from construction: no reference counting, no cycle collection, never freed.</td>
+    </tr>
   </tbody>
 </table>
 
@@ -110,6 +115,8 @@ scriptc recognizes a contract where it is written as the annotation of a declara
   <dd>Parameters, variables, class instance fields and function results whose type is a plain <code>number</code>.</dd>
   <dt><code>Immutable&lt;T&gt;</code></dt>
   <dd>Parameters, variables, class instance fields and function results.</dd>
+  <dt><code>ProgramLifetime</code></dt>
+  <dd>The <code>implements</code> clause of a class declaration: <code>class Node implements ProgramLifetime</code>.</dd>
 </dl>
 
 A contract anywhere else (a type alias, an interface member, an element or type argument such as `Int32[]`, a function type) would promise something scriptc does not check, so the build reports it with SC7006.
@@ -143,6 +150,34 @@ scriptc refuses an `Int32` slot whose writes it cannot all see (SC7003): a param
 - a value stored into an `Immutable` slot that another reference can still change.
 
 A value stored into an `Immutable` slot must be fresh: a literal, a `new` expression whose constructor keeps `this` to itself, or a function that returns what it builds. Values that reach dynamic code, or functions scriptc cannot see, are refused.
+
+## ProgramLifetime
+
+`ProgramLifetime` marks a class whose instances a program keeps until it exits, such as the nodes of a syntax tree, the symbols of a symbol table or interned types. scriptc then never reference counts, collects or frees instances of the class and of its subclasses: they are created immortal, every retain and release on them compiles to nothing, and the cycle collector neither walks them nor needs to trace the objects that point to them. Node.js behavior is unchanged; only memory use differs, because an instance the program drops is never reclaimed.
+
+```ts:tree.ts
+import type { ProgramLifetime } from "@scriptc/types";
+
+abstract class SyntaxNode implements ProgramLifetime {
+  parent: SyntaxNode | undefined = undefined;
+}
+
+class Identifier extends SyntaxNode {
+  readonly text: string;
+  constructor(text: string) {
+    super();
+    this.text = text;
+  }
+}
+```
+
+scriptc checks that the promise cannot change what the program computes (SC7007):
+
+- the class is the root of its hierarchy, so every value of any class type in the hierarchy is program-lifetime; built-in bases such as `Error`, `EventEmitter` and streams are refused because they hold runtime state that is released with the object;
+- the build is an executable: a library's host decides when the objects it receives are released;
+- no instance can be published to other threads with `@scriptc/threads`.
+
+Static code has no `WeakRef` or `FinalizationRegistry`, and a `WeakMap` or `WeakSet` entry whose key is never freed is never observable as removed, so nothing else can tell the difference.
 
 ## Diagnostics
 
@@ -237,6 +272,10 @@ $ scriptc build reject.ts
     <tr>
       <td>SC7006</td>
       <td>A contract is written where scriptc does not check it.</td>
+    </tr>
+    <tr>
+      <td>SC7007</td>
+      <td>A <code>ProgramLifetime</code> class is not the root of its hierarchy, is part of a library build, or can be published to other threads.</td>
     </tr>
   </tbody>
 </table>

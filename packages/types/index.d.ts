@@ -39,3 +39,14 @@ export type Immutable<T> = T extends (...args: never[]) => unknown
         : T extends object
           ? { readonly [K in keyof T]: Immutable<T[K]> }
           : T;
+
+/** Class marker: `class Node implements ProgramLifetime { ... }`. Instances
+ * of the class and of every subclass live until the process exits: scriptc
+ * never reference counts them, never walks them for cycles and never frees
+ * them. This changes memory use only; Node.js behavior is unchanged. Use it
+ * for objects a program keeps until it exits anyway (syntax trees, symbol
+ * tables, interned types): discarded instances are never reclaimed. scriptc
+ * accepts it only on the root class of a hierarchy, outside library builds,
+ * and refuses instances that are published to other threads or registered
+ * for finalization. */
+export interface ProgramLifetime {}

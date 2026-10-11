@@ -2,7 +2,14 @@ import { expect, test } from "vitest";
 import { F64, STRING, VOID, type IrModule } from "../../ir/ir.js";
 import { buildClassGraph, classMembershipIntervals, emitClassMembershipHelper } from "./classes.js";
 import { emitLlvmModule } from "./emitter.js";
-import { mangleClassReleaseDirect, mangleClassRelease, mangleRecordRelease } from "../mangle.js";
+import {
+  mangleClassNew,
+  mangleClassReleaseDirect,
+  mangleClassRelease,
+  mangleClassRetain,
+  mangleClassTrace,
+  mangleRecordRelease,
+} from "../mangle.js";
 
 const loc = { file: "class-membership.ts", start: 0, end: 1 };
 
@@ -77,6 +84,50 @@ test("releases split into an inlinable fast path and an out-of-line remainder", 
   const slow = body(`${mangleClassRelease("Node")}_slow`);
   expect(slow).toMatch(/noinline/);
   expect(slow).toContain("getelementptr inbounds %ScrVt, ptr %vt, i64 0, i32 2");
+});
+
+test("ProgramLifetime hierarchies are immortal from construction and take no reference counts", () => {
+  const kids = { kind: "array" as const, elem: { kind: "object" as const, className: "Node" } };
+  const owners = { kind: "array" as const, elem: { kind: "object" as const, className: "Owner" } };
+  const mod: IrModule = {
+    irVersion: 15,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
+    classes: [
+      { name: "Node", fields: [{ name: "kids", type: kids }], methods: [], loc },
+      { name: "Leaf", base: "Node", fields: [{ name: "kids", type: kids }], methods: [], loc },
+      // A mortal class on its own cycle (array edges are mutable) that also
+      // holds program-lifetime nodes.
+      {
+        name: "Owner",
+        fields: [
+          { name: "next", type: owners },
+          { name: "nodes", type: kids },
+        ],
+        methods: [],
+        loc,
+      },
+    ],
+    contracts: { programLifetime: ["Node"] },
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  const body = (name: string): string =>
+    new RegExp(`^define internal [a-z]+ @${name}\\([^]*?^}`, "m").exec(llvm)?.[0] ?? "";
+  for (const cls of ["Node", "Leaf"]) {
+    // Retain and release are empty, so every inlined call site folds away.
+    expect(body(mangleClassRetain(cls)), cls).toMatch(/entry:\n {2}ret ptr %o\n}/);
+    expect(body(mangleClassRelease(cls)), cls).toMatch(/entry:\n {2}ret void\n}/);
+    // new: no collector header (no descriptor, no scr_cyc_alloc), rc = SIZE_MAX.
+    const nw = body(mangleClassNew(cls));
+    expect(nw, cls).toContain("store i64 -1, ptr %o");
+    expect(nw, cls).not.toContain("scr_cyc_alloc");
+    expect(llvm, cls).not.toContain(`@${mangleClassTrace(cls)}.cyctype`);
+  }
+  // The mortal Owner keeps its header, counts and possible-root step.
+  expect(body(mangleClassNew("Owner"))).toContain("store i64 1, ptr %o");
+  expect(body(mangleClassNew("Owner"))).toContain("scr_cyc_alloc");
+  expect(body(mangleClassRelease("Owner"))).toContain("load i16, ptr %bufp");
 });
 
 function graph() {

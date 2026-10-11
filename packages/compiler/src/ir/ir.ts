@@ -1006,6 +1006,11 @@ export interface IrContracts {
    * makes their graphs immortal once initialized, and reads through them
    * need no reference counting. */
   immortalGlobals?: string[];
+  /** Root classes declared `implements ProgramLifetime`: instances of every
+   * class in their hierarchies are immortal from construction (rc ==
+   * SIZE_MAX, no collector header), their static reference counting is
+   * elided, and the cycle analysis treats them as leaves. */
+  programLifetime?: string[];
 }
 
 export type IrFfiValueParamClass =
