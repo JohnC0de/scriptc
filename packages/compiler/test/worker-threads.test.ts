@@ -179,7 +179,7 @@ settle().then((value) => console.log(value));
     // Worker runtimes keep one small-object allocator per script thread:
     // the inline paths address its state, live counts and dispose hook in
     // the runtime's one thread-local ScrThreadHot block.
-    expect(llvm).toMatch(/@scr_thread_hot = external thread_local(\(initialexec\))? global /);
+    expect(llvm).toMatch(/@scr_thread_hot = external thread_local(\(localexec\))? global /);
     expect(llvm).not.toMatch(/@scr_(sa|cyc_live|cyc_old_freed|weak_dispose_hook) = external/);
     expect(llvm).toContain("call ptr @llvm.threadlocal.address.p0(ptr @scr_thread_hot)");
     expect(llvm).toMatch(/getelementptr inbounds i8, ptr %[\w.]+\.tl\.hot, i64 808/);
@@ -328,14 +328,15 @@ test.each([
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (result.ok) {
     const llvm = await readFile(request.outPath, "utf8");
-    // Every thread-local of a worker executable lives in its own TLS block:
-    // ELF uses local-exec for the program's and initial-exec for the
-    // runtime's; Darwin's thread-local variables have one model.
+    // Every thread-local of a worker executable lives in its own TLS block
+    // (the runtime links statically): ELF uses local-exec for the program's
+    // and the runtime's; Darwin's thread-local variables have one model.
     const plain = /^@[-$._A-Za-z0-9]+ = (internal|external) thread_local global /m;
     if (models) {
       expect(llvm).not.toMatch(plain);
+      expect(llvm).not.toContain("initialexec");
       expect(llvm).toMatch(/^@[-$._A-Za-z0-9]+ = internal thread_local\(localexec\) global /m);
-      expect(llvm).toMatch(/^@[-$._A-Za-z0-9]+ = external thread_local\(initialexec\) global /m);
+      expect(llvm).toMatch(/^@[-$._A-Za-z0-9]+ = external thread_local\(localexec\) global /m);
     } else {
       expect(llvm).toMatch(plain);
       expect(llvm).not.toContain("thread_local(");

@@ -1444,11 +1444,13 @@ export class LlEmitter {
     const parts = this.emitModuleParts();
     if (!this.executableTls) return parts;
     // A worker executable's thread-locals all live in the executable's own
-    // TLS block (the program's internal ones, the runtime's external ones),
-    // so on ELF they can use the executable models: LLVM's default
-    // general-dynamic sequence (relaxed by the linker to `mov %fs:0` plus
-    // an add) becomes one %fs-relative access LLVM can fold into loads.
-    // Darwin's thread-local variables have a single model.
+    // TLS block: the program's internal ones, and the runtime's external
+    // ones, because the runtime is always linked statically into the
+    // executable. So on ELF they can all use the local-exec model: LLVM's
+    // default general-dynamic sequence (relaxed by the linker to `mov %fs:0`
+    // plus an add), and even initial-exec (relaxed to `mov $offset` plus an
+    // indexed access), become one %fs-relative operand LLVM can fold into
+    // loads and compares. Darwin's thread-local variables have one model.
     return parts.map((part) =>
       part
         .replace(
@@ -1457,7 +1459,7 @@ export class LlEmitter {
         )
         .replace(
           /^(@[-$._A-Za-z0-9]+ = external )thread_local global /gm,
-          "$1thread_local(initialexec) global ",
+          "$1thread_local(localexec) global ",
         ),
     );
   }
