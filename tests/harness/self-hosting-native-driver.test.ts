@@ -24,6 +24,7 @@ import {
   nativeBootstrapPlan,
   runNativeBootstrapChecks,
 } from "../../scripts/ci-native-bootstrap.mjs";
+import { withoutFirstLine } from "./large-artifacts.js";
 import { bootstrapStep } from "./self-hosting-timing.js";
 
 const root = join(import.meta.dirname, "../..");
@@ -435,17 +436,20 @@ test(
             import assert from 'node:assert/strict';
             import { readFileSync } from 'node:fs';
             import { isDeepStrictEqual } from 'node:util';
-            import { deserializeModule, validateModule } from ${JSON.stringify(pathToFileURL(join(root, "packages/compiler/src/index.ts")).href)};
+            import { deserializeModuleBytes, validateModule } from ${JSON.stringify(pathToFileURL(join(root, "packages/compiler/src/index.ts")).href)};
+            import { occurrences, withoutRange } from ${JSON.stringify(pathToFileURL(join(root, "tests/harness/large-artifacts.ts")).href)};
+            // Both artifacts are compared as bytes and per-function documents:
+            // either can exceed V8's maximum string length.
             if (${ir}) {
-              const expected = deserializeModule(readFileSync(process.argv[1], 'utf8'));
-              const actual = deserializeModule(readFileSync(process.argv[2], 'utf8'));
+              const expected = deserializeModuleBytes(readFileSync(process.argv[1]));
+              const actual = deserializeModuleBytes(readFileSync(process.argv[2]));
               assert.ok(actual.functions.length > 1000);
               assert.deepEqual(validateModule(actual), []);
               assert.ok(isDeepStrictEqual(actual, expected), 'native self-lowering must match the Node seed');
             }
             if (${llvm}) {
-              const seedLlvm = readFileSync(process.argv[3], 'utf8');
-              let nativeLlvm = readFileSync(process.argv[4], 'utf8');
+              const seedLlvm = readFileSync(process.argv[3]);
+              let nativeLlvm = readFileSync(process.argv[4]);
               if (${sanitize}) {
                 // The Node sanitizer builds runtime sources directly; the native
                 // executable path also emits the runtime ABI check. Pin that
@@ -453,12 +457,13 @@ test(
                 const declaration = 'declare void @' + ${JSON.stringify(RUNTIME_ABI_MARKER)} + '()\\n';
                 const call = '  call void @' + ${JSON.stringify(RUNTIME_ABI_MARKER)} + '()\\n';
                 for (const line of [declaration, call]) {
-                  assert.equal(seedLlvm.split(line).length, 1);
-                  assert.equal(nativeLlvm.split(line).length, 2);
-                  nativeLlvm = nativeLlvm.replace(line, '');
+                  assert.equal(occurrences(seedLlvm, line).length, 0);
+                  const found = occurrences(nativeLlvm, line);
+                  assert.equal(found.length, 1);
+                  nativeLlvm = withoutRange(nativeLlvm, found[0], Buffer.byteLength(line));
                 }
               }
-              assert.ok(seedLlvm === nativeLlvm, 'native LLVM emission must match the Node seed');
+              assert.ok(seedLlvm.equals(nativeLlvm), 'native LLVM emission must match the Node seed');
             }
           `,
                 seedIr,
@@ -506,12 +511,18 @@ test(
           );
           // Executable output adds a runtime ABI check; textual LLVM emission
           // omits it. Compare all other output without changing either mode.
-          const withoutAbiCheck = (path: string): string =>
-            readFileSync(path, "utf8")
-              .replace(/^declare void @scr_runtime_abi_v\d+\(\)\n/m, "")
-              .replace(/^  call void @scr_runtime_abi_v\d+\(\)\n/m, "");
+          const withoutAbiCheck = (path: string): Buffer =>
+            withoutFirstLine(
+              withoutFirstLine(
+                readFileSync(path),
+                "declare void @scr_runtime_abi_v",
+                /^declare void @scr_runtime_abi_v\d+\(\)\n$/,
+              ),
+              "  call void @scr_runtime_abi_v",
+              /^  call void @scr_runtime_abi_v\d+\(\)\n$/,
+            );
           expect(
-            withoutAbiCheck(seedLlvm) === withoutAbiCheck(rebuiltLlvm),
+            withoutAbiCheck(seedLlvm).equals(withoutAbiCheck(rebuiltLlvm)),
             "native compiler generations must emit identical LLVM",
           ).toBe(true);
         };

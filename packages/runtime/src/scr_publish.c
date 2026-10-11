@@ -282,6 +282,7 @@ void scr_publish(void *root, ScrPubFn fn) {
 #ifdef SCR_RC_AUDIT
       scr_pub_audit_forget(ctx.log[i].kind);
 #endif
+      scr_lsan_immortal(ctx.log[i].obj);
     }
     if (trace) {
       uint64_t t2 = scr_hrtime_ns();

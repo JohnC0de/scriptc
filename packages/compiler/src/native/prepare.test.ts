@@ -6,6 +6,7 @@ import { nativeCodegenTarget } from "../backend/targets.js";
 import { runFrontend, type FrontendFactory } from "../frontend/pipeline.js";
 import { loadProgram } from "../frontend/program-node.js";
 import { ts7Executable } from "../frontend/ts7/rpc-api.js";
+import { deserializeModule } from "../ir/serialize.js";
 import { NativeCache } from "./cache.js";
 import { prepareNativeExecutable } from "./prepare.js";
 import type { NativeToolchain } from "./toolchain.js";
@@ -55,7 +56,8 @@ function fixture() {
     loads++;
     return runFrontend(path, loadProgram, npmStatic, externalTypes);
   };
-  const prepare = () => prepareNativeExecutable(entry, options, null, toolchain, frontend, cache);
+  const prepare = (extra: { emitIr?: boolean } = {}) =>
+    prepareNativeExecutable(entry, { ...options, ...extra }, null, toolchain, frontend, cache);
   return { root, entry, dependency, cache, options, prepare, loads: () => loads };
 }
 
@@ -87,4 +89,25 @@ test("structurally invalid cached features cause a rebuild even with a valid dig
   f.cache.write("frontend", key, JSON.stringify(payload));
   expect(f.prepare().ok).toBe(true);
   expect(f.loads()).toBe(2);
+});
+
+test("serialized IR travels as bounded parts through the frontend cache", () => {
+  const f = fixture();
+  const first = f.prepare({ emitIr: true });
+  expect(first.ok, JSON.stringify(first)).toBe(true);
+  if (!first.ok) return;
+  expect(Array.isArray(first.ir)).toBe(true);
+  const mod = deserializeModule(first.ir!.join(""));
+  expect(mod.functions.length).toBeGreaterThan(0);
+  const warm = f.prepare({ emitIr: true });
+  expect(f.loads()).toBe(1);
+  expect(warm).toEqual(first);
+  const family = join(f.cache.root, "frontend");
+  const key = readdirSync(family).find((name) => /^[0-9a-f]{64}$/.test(name))!;
+  const payload = JSON.parse(readFileSync(join(family, key), "utf8"));
+  expect(payload.schema).toBe("scriptc.native-frontend.v3");
+  expect(payload.input.llvm).toBe("");
+  expect(payload.input.ir).toBeNull();
+  expect(payload.llvm).toBe(first.llvm);
+  expect(payload.ir).toEqual(first.ir);
 });
