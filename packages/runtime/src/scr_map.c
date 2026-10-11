@@ -1248,9 +1248,14 @@ ScrMap *scr_map_clone(const ScrMap *source, bool keys_only) {
   out->entries = malloc(count * sizeof(ScrMapEntry));
   if (!out->entries) scr_map_oom();
   out->ecap = count;
+  size_t top = 0;
   for (size_t i = 0; i < source->nentries; i++) {
     const ScrMapEntry *entry = &source->entries[i];
     if (!entry->hash) continue;
+    if (source->ndense) {
+      size_t k = (size_t)scr_map_slot_to_f64(entry->key);
+      if (k > top) top = k;
+    }
     ScrMapEntry *copy = &out->entries[out->nentries++];
     *copy = *entry;
     if (out->key_kind == SCR_MAP_KEY_STR) scr_str_retain(scr_map_slot_to_ptr(copy->key));
@@ -1259,9 +1264,10 @@ ScrMap *scr_map_clone(const ScrMap *source, bool keys_only) {
     else if (out->val_kind == SCR_MAP_VAL_REF) out->val_retain(scr_map_slot_to_ptr(copy->val));
   }
   out->nlive = count;
-  if (source->ndense) {
-    /* Same keys, so the same table size; entry indices are compacted. */
-    scr_map_dense_alloc(out, source->ndense);
+  /* Size the copy's direct index for its own keys, not for the source's
+   * peak; keys that are sparse for their count hash instead. */
+  if (source->ndense && top / 2 < scr_map_dense_limit(count)) {
+    scr_map_dense_alloc(out, scr_map_dense_size(top));
     scr_map_fill_dense(out);
     return out;
   }

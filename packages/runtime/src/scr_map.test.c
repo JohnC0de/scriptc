@@ -372,6 +372,22 @@ static void delete_shrinks(void) {
   assert(scr_map_size(map) == 20 && map->ndense && map->ndense <= 64);
   for (size_t i = 0; i < 40; i++) assert(scr_map_has_f64(map, (double)i) == (i < 20));
   scr_map_release(map);
+
+  /* A copy indexes its own keys, not the source's peak (here a quarter of
+   * the entries survive, too many to compact the source yet). */
+  map = scr_map_new(SCR_MAP_KEY_F64, SCR_MAP_VAL_F64, NULL, NULL, NULL);
+  for (size_t i = 0; i < 4096; i++) scr_map_set_f64_f64(map, (double)i, (double)i);
+  for (size_t i = 1024; i < 4096; i++) assert(scr_map_delete_f64(map, (double)i));
+  assert(map->ndense == 4096 && scr_map_iter_count(map) == 4096);
+  ScrMap *copy = scr_map_clone(map, false);
+  assert(copy->ndense == 1024 && scr_map_size(copy) == 1024);
+  double out;
+  for (size_t i = 0; i < 1100; i++) {
+    assert(scr_map_get_f64_f64(copy, (double)i, &out) == (i < 1024));
+    if (i < 1024) assert(out == (double)i);
+  }
+  scr_map_release(copy);
+  scr_map_release(map);
 }
 
 /* Grow-and-drain cycles against the ordered model: the map repeatedly
