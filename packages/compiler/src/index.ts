@@ -762,6 +762,7 @@ async function prepareExecutableInput(
       runtimeAbiMarker: useRuntimePack,
       objectAudit: opts.sanitize === true,
       ...(opts.optimization === "speed" ? { inlineRc: true } : {}),
+      ...(opts.detachedExit === true ? { detachedExit: true } : {}),
     });
   } catch (err) {
     if (!(err instanceof LlvmUnsupportedError)) throw err;
@@ -838,6 +839,19 @@ async function compileTracked(
       ok: false,
       diagnostics: [
         nativeCodegenDiag("SC3002", "--strip is only supported for executable output", entryPath),
+      ],
+      sourceTexts: new Map(),
+    };
+  }
+  if (opts.detachedExit === true && outputKind !== "exe") {
+    return {
+      ok: false,
+      diagnostics: [
+        nativeCodegenDiag(
+          "SC3002",
+          "--detached-exit is only supported for executable output",
+          entryPath,
+        ),
       ],
       sourceTexts: new Map(),
     };
@@ -1017,6 +1031,7 @@ async function compileTracked(
       ...optimizationField(opts.optimization),
       ...(opts.strip ? { strip: true as const } : {}),
       ...(opts.windowsSubsystem === "gui" ? { windowsSubsystem: "gui" as const } : {}),
+      ...(opts.detachedExit === true ? { detachedExit: true as const } : {}),
       npmStatic: opts.npmStatic ?? null,
       ffiProfile:
         opts.ffiProfilePath === undefined || ffiProfileBytes === null

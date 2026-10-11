@@ -110,6 +110,8 @@ export interface EarlyExecutableCacheOptions {
   strip?: true;
   /** Omitted for the default Windows console subsystem. */
   windowsSubsystem?: "gui";
+  /** Omitted unless --detached-exit is set. */
+  detachedExit?: true;
   npmStatic: readonly string[] | "auto" | null;
   /** Raw manifest identity: path and bytes. Native archives remain under the
    * stricter native cache's independent dependency validation. */
@@ -220,6 +222,7 @@ function cacheKey(options: EarlyExecutableCacheOptions): string {
     ...optimizationKeyParts(options.optimization),
     ...(options.strip ? ["strip"] : []),
     ...(options.windowsSubsystem === "gui" ? ["windows-subsystem-gui"] : []),
+    ...(options.detachedExit ? ["detached-exit"] : []),
     options.npmStatic === null
       ? "<npm-static-off>"
       : options.npmStatic === "auto"
@@ -258,6 +261,7 @@ function routeKey(options: Omit<EarlyExecutableRouteOptions, "nativeEnvironment"
   for (const part of optimizationKeyParts(options.optimization)) hash.update(`${part}\0`);
   if (options.strip) hash.update("strip\0");
   if (options.windowsSubsystem === "gui") hash.update("windows-subsystem-gui\0");
+  if (options.detachedExit) hash.update("detached-exit\0");
   hash
     .update(
       options.npmStatic === null

@@ -123,6 +123,11 @@ static ScrStr *scr_fs_win_utf8(const WCHAR *text, size_t length) {
 #elif defined(__linux__)
 #include <netpacket/packet.h>
 #endif
+#if defined(__linux__)
+#include <sched.h> /* sched_getaffinity, CPU_COUNT (os.availableParallelism) */
+#elif defined(__APPLE__)
+#include <sys/sysctl.h> /* sysctlbyname (os.availableParallelism) */
+#endif
 
 #define scr_sys_mkdir(p, m) mkdir((p), (m))
 
@@ -1376,6 +1381,13 @@ ScrStr *scr_os_type(void) {
   return scr_str_new("Windows_NT", 10);
 }
 
+double scr_os_available_parallelism(void) {
+  /* uv_available_parallelism on Windows: GetSystemInfo's processor count. */
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  return info.dwNumberOfProcessors < 1 ? 1 : (double)info.dwNumberOfProcessors;
+}
+
 double scr_os_totalmem(void) {
   MEMORYSTATUSEX ms;
   memset(&ms, 0, sizeof ms);
@@ -1413,6 +1425,8 @@ ScrStr *scr_os_user_homedir(void) { return scr_os_homedir(); }
 ScrStr *scr_os_release(void) { return scr_str_new("", 0); }
 ScrStr *scr_os_type(void) { return scr_str_new("WASI", 4); }
 double scr_os_totalmem(void) { return 0; }
+/* One thread of execution, as the dynamic island's os answers. */
+double scr_os_available_parallelism(void) { return 1; }
 /* The guest temp namespace is stable across hosts. `scriptc run` preopens
  * the host's /tmp at this path; other WASI hosts can provide the same
  * capability without leaking a host-specific TMPDIR into the module. */
@@ -1484,6 +1498,98 @@ ScrStr *scr_os_type(void) {
     scr_trap("scriptc: os.type() failed\n");
   }
   return scr_str_new(u.sysname, strlen(u.sysname));
+}
+
+#ifdef __linux__
+/* libuv's uv__slurp: one read of at most cap - 1 bytes of path into buf
+ * (NUL-terminated); false when the file cannot be opened or read. A single
+ * read, like libuv, so a long /proc/self/cgroup is cut where Node cuts it. */
+static bool scr_os_slurp(const char *path, char *buf, size_t cap) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  ssize_t n;
+  do
+    n = read(fd, buf, cap - 1);
+  while (n < 0 && errno == EINTR);
+  close(fd);
+  if (n < 0) return false;
+  buf[n] = '\0';
+  return true;
+}
+
+/* libuv's uv__get_constrained_cpu (1.51): the CPU quota of the process's
+ * cgroup in whole CPUs. For cgroup v2 it walks cpu.max from the process's
+ * cgroup up to the root; like libuv, the last level with a numeric limit
+ * (the outermost) decides. Returns false when there is no answer. */
+static bool scr_os_cgroup_cpu_quota(long long *quota) {
+  char cgroup[1024];
+  if (!scr_os_slurp("/proc/self/cgroup", cgroup, sizeof cgroup)) return false;
+  if (strncmp(cgroup, "0::/", 4) == 0) {
+    static const char mount[] = "/sys/fs/cgroup";
+    const char *trimmed = cgroup + 4;
+    int size = (int)strcspn(trimmed, "\n");
+    char path[256], file[256], buf[1024], value[16];
+    snprintf(path, sizeof path, "%s/%.*s/cgroup.controllers", mount, size, trimmed);
+    if (!scr_os_slurp(path, buf, sizeof buf)) return false;
+    snprintf(path, sizeof path, "%s/%.*s", mount, size, trimmed);
+    while (strncmp(path, mount, sizeof mount - 1) == 0) {
+      long long limit, period;
+      snprintf(file, sizeof file, "%s/cpu.max", path);
+      if (scr_os_slurp(file, value, sizeof value) && strncmp(value, "max", 3) != 0 &&
+          sscanf(value, "%lld %lld", &limit, &period) == 2 && period != 0)
+        *quota = limit / period;
+      char *slash = strrchr(path, '/');
+      if (slash == NULL || strcmp(path, mount) == 0) break;
+      *slash = '\0';
+    }
+    return true;
+  }
+  char *cpu = strstr(cgroup, ":cpu,");
+  if (cpu == NULL) return false;
+  cpu += sizeof ":cpu," - 1;
+  int size = (int)strcspn(cpu, "\n");
+  char path[256], buf[64];
+  long long per_period, period;
+  snprintf(path, sizeof path, "/sys/fs/cgroup/%.*s/cpu.cfs_quota_us", size, cpu);
+  if (!scr_os_slurp(path, buf, sizeof buf) || sscanf(buf, "%lld", &per_period) != 1) return false;
+  snprintf(path, sizeof path, "/sys/fs/cgroup/%.*s/cpu.cfs_period_us", size, cpu);
+  if (!scr_os_slurp(path, buf, sizeof buf) || sscanf(buf, "%lld", &period) != 1 || period == 0)
+    return false;
+  *quota = per_period / period;
+  return true;
+}
+#endif
+
+double scr_os_available_parallelism(void) {
+  /* uv_available_parallelism (libuv 1.51, Node's os.availableParallelism):
+   * the CPUs this process may run on (Linux: its affinity mask, then any
+   * smaller cgroup CPU quota; Darwin: hw.activecpu, hw.logicalcpu, hw.ncpu),
+   * else the online processors; at least 1. */
+  long rc = -1;
+#if defined(__linux__)
+  cpu_set_t set;
+  memset(&set, 0, sizeof set);
+  if (sched_getaffinity(0, sizeof set, &set) == 0) rc = CPU_COUNT(&set);
+#elif defined(__APPLE__)
+  static const char *const mib[] = {"hw.activecpu", "hw.logicalcpu", "hw.ncpu"};
+  for (size_t i = 0; i < sizeof mib / sizeof mib[0]; i++) {
+    int nprocs = 0;
+    size_t len = sizeof nprocs;
+    if (sysctlbyname(mib[i], &nprocs, &len, NULL, 0) == 0 && len == sizeof nprocs && nprocs > 0) {
+      rc = nprocs;
+      break;
+    }
+  }
+#endif
+  if (rc < 0) rc = sysconf(_SC_NPROCESSORS_ONLN);
+#if defined(__linux__)
+  /* A quota below one CPU truncates to 0 and is ignored, not clamped to 1:
+   * libuv (1.51 through 1.52) applies only `quota > 0 && quota < rc`, so
+   * Node then answers the affinity count. */
+  long long quota = 0;
+  if (scr_os_cgroup_cpu_quota(&quota) && quota > 0 && quota < rc) rc = (long)quota;
+#endif
+  return rc < 1 ? 1 : (double)rc;
 }
 
 double scr_os_totalmem(void) {
@@ -1806,6 +1912,56 @@ double scr_process_exit_code_or_zero(void) {
   return (double)scr_exit_code_hint_get();
 }
 
+#if defined(__linux__)
+#include <sched.h>
+#include <signal.h>
+#include <sys/syscall.h>
+#ifndef SYS_close_range
+#define SYS_close_range 436 /* the generic syscall table: x86_64 and aarch64 */
+#endif
+
+/* Detached teardown (`scriptc build --detached-exit`): the kernel frees an
+ * exiting process's memory on its critical path, 30-40 ms per GB of 4 KiB
+ * pages, before its parent sees it exit. A helper process that shares the
+ * address space (CLONE_VM) and holds no descriptor but the read end of a
+ * pipe keeps the memory alive past the exit, then exits itself and frees it
+ * off the parent's critical path (the latency mold's --fork hides). The
+ * kernel releases an exiting process's memory (exit_mm) before its files
+ * (exit_files), so EOF on the pipe means the helper holds the last
+ * reference. The helper keeps the executable mapped and the memory charged
+ * to the cgroup until then, so a program opts in at build time: the program
+ * object then defines scr_detached_exit = 1, overriding this weak default. */
+__attribute__((weak)) const unsigned char scr_detached_exit = 0;
+static char scr_teardown_stack[16384] __attribute__((aligned(64)));
+
+static int scr_teardown_main(void *arg) {
+  int fd = (int)(intptr_t)arg;
+  /* Raw syscalls only: the helper runs on the exiting thread's TLS. */
+  if (fd > 0) (void)syscall(SYS_close_range, 0u, (unsigned)fd - 1u, 0u);
+  (void)syscall(SYS_close_range, (unsigned)fd + 1u, ~0u, 0u);
+  char c;
+  while (syscall(SYS_read, fd, &c, 1) != 0) {
+  }
+  syscall(SYS_exit, 0);
+  return 0;
+}
+
+static void scr_detach_teardown(void) {
+  if (!scr_detached_exit) return;
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) != 0) return;
+  sigset_t all, old;
+  sigfillset(&all);
+  pthread_sigmask(SIG_SETMASK, &all, &old);
+  pid_t pid = clone(scr_teardown_main, scr_teardown_stack + sizeof scr_teardown_stack, CLONE_VM | SIGCHLD,
+                    (void *)(intptr_t)fds[0]);
+  pthread_sigmask(SIG_SETMASK, &old, NULL);
+  (void)close(fds[0]);
+  if (pid < 0) (void)close(fds[1]);
+  /* fds[1] stays open until the process's files are released. */
+}
+#endif
+
 void scr_process_exit(double code) {
   /* Node runs 'exit' listeners on explicit process.exit() too — they run
    * HERE, synchronously, before the teardown-free exit below. The hook is
@@ -1823,6 +1979,9 @@ void scr_process_exit(double code) {
    * Node), and the RC audit is meaningless mid-program (live values are
    * expected). scr_init's flush-at-exit is also skipped — flush here. */
   fflush(stdout);
+#if defined(__linux__)
+  scr_detach_teardown();
+#endif
   _Exit((int)code);
 }
 
