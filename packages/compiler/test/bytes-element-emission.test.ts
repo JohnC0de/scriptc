@@ -314,7 +314,7 @@ test("canonical byte loops keep their induction variable and indices integral", 
 
   expect(ll).toContain("alloca i64 ; integer induction index");
   expect(ll).toContain("icmp ult i64");
-  expect(ll).not.toContain("fptosi double");
+  expect(ll).not.toContain("bytes.index.valid");
 });
 
 test("a body mutation keeps the byte loop on the general f64 path", () => {
