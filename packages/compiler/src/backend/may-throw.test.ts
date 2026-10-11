@@ -494,3 +494,37 @@ test("throw-only, storage and primitive library operations stay bounded in worke
   // Only a library call that can reach a dynamic value's conversion polls.
   expect([...computeMayThrow(mod).workerEntryPolls!].sort()).toEqual(["dynamic"]);
 });
+
+test("explain names the first throwing operation and each call edge", () => {
+  const message: IrExpr = {
+    kind: "strLit",
+    value: "Cannot read properties of undefined (reading 'length')",
+    type: STRING,
+    loc,
+  };
+  const code: IrExpr = { kind: "strLit", value: "", type: STRING, loc };
+  const typeError: IrExpr = { kind: "numLit", value: 1, type: F64, loc };
+  const nodeThrow: IrExpr = {
+    kind: "libCall",
+    fn: "error.nodeThrow",
+    args: [typeError, code, message],
+    type: VOID,
+    loc,
+  };
+  const callLoc = { file: "tdz.ts", start: 5, end: 9 };
+  const mod = moduleWith(
+    fn("thrower", [exprStmt(nodeThrow)], []),
+    fn("caller", [exprStmt({ kind: "call", callee: "thrower", args: [], type: VOID, loc: callLoc })], []),
+    fn("quiet", [exprStmt(value)], []),
+  );
+  const result = computeMayThrow(mod, { explain: true });
+  expect([...result.fns].sort()).toEqual(["caller", "thrower"]);
+  expect(result.why?.get("thrower")).toEqual({
+    kind: "seed",
+    what: "throws TypeError: Cannot read properties of undefined (reading 'length')",
+    loc,
+  });
+  expect(result.why?.get("caller")).toEqual({ kind: "call", callee: "thrower", loc: callLoc });
+  // Without the option the analysis records nothing extra.
+  expect(computeMayThrow(mod).why).toBeUndefined();
+});
