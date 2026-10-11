@@ -77,16 +77,17 @@ static void *scr_sa_map(size_t span) {
  * SCR_SA_PF_STEP chunks and fault one chunk ahead; huge-page ranges advance
  * in half huge pages and fault the next huge page once the bump is in the
  * second half of the current one, so a slice keeps at most about one step
- * of untouched committed memory. The first chunk of a slice is not
- * prefetched ahead: a class used for a handful of blocks commits nothing
- * extra. SCR_SA_PREFAULT=0 turns it off. Library archives run on embedder
- * threads and keep the plain policy. */
+ * of untouched committed memory. Nothing is faulted ahead before a slice
+ * reaches SCR_SA_PF_START: a lightly used class commits nothing extra.
+ * SCR_SA_PREFAULT=0 turns it off. Library archives run on embedder threads
+ * and keep the plain policy. */
 #if defined(SCR_SA_THP) && !defined(SCR_LIB)
 #ifndef MADV_POPULATE_WRITE
 #define MADV_POPULATE_WRITE 23 /* Linux 5.14 */
 #endif
 #define SCR_SA_PREFAULT 1
 #define SCR_SA_PF_STEP ((size_t)256 << 10)
+#define SCR_SA_PF_START ((size_t)1 << 20)
 #define SCR_SA_PF_HUGE_STEP (SCR_SA_HUGE_PAGE / 2)
 #include <errno.h>
 #include <pthread.h>
@@ -112,28 +113,33 @@ static void scr_sa_pf_populate(char *lo, char *hi) {
 }
 
 /* The system allocator's heap (glibc): blocks above SCR_SA_MAX come from
- * malloc, whose main arena grows by brk. With a larger top pad
- * (SCR_SA_PF_TOP_PAD) every extension runs that far ahead of use, and the
- * helper faults in each new extension as soon as it sees the break move.
- * It checks after every request and then polls while the program keeps
- * allocating (SCR_SA_PF_POLL_NS, up to SCR_SA_PF_POLLS times without
- * growth before it sleeps until the next request), so an idle program does
- * not wake it. Only the helper reads the break; a stale read only delays a
- * fault-in, and a shrunk break (malloc trimming its top) restarts the
- * watermark there. The pad costs at most SCR_SA_PF_TOP_PAD of committed
- * memory beyond what malloc would have; SCR_SA_PREFAULT_HEAP=0 keeps glibc's
- * defaults and no polling. */
+ * malloc, whose main arena grows by brk. Once the heap has grown by
+ * SCR_SA_PF_HEAP_MIN since the helper first looked, the helper gives malloc
+ * a larger top pad (SCR_SA_PF_TOP_PAD), so every extension runs that far
+ * ahead of use, and faults in each new extension as soon as it sees the
+ * break move. Smaller heaps keep glibc's defaults (a top pad also fixes
+ * glibc's otherwise dynamic mmap threshold), so a small program commits
+ * nothing extra. The helper checks after every request and then polls while
+ * the program keeps allocating (SCR_SA_PF_POLL_NS, up to SCR_SA_PF_POLLS
+ * times without growth before it sleeps until the next request), so an idle
+ * program does not wake it. Only the helper reads the break; a stale read
+ * only delays a fault-in, and a shrunk break (malloc trimming its top)
+ * restarts the watermarks there. Past the threshold the pad costs at most
+ * SCR_SA_PF_TOP_PAD of committed memory beyond what malloc would have;
+ * SCR_SA_PREFAULT_HEAP=0 keeps glibc's defaults and no polling. */
 #if defined(__GLIBC__)
 #include <malloc.h>
 #include <time.h>
 #include <unistd.h>
 #define SCR_SA_PF_HEAP 1
+#define SCR_SA_PF_HEAP_MIN ((size_t)32 << 20)
 #define SCR_SA_PF_TOP_PAD ((size_t)16 << 20)
 #define SCR_SA_PF_POLL_NS 1000000L
 #define SCR_SA_PF_POLLS 64u
-static int scr_sa_pf_heap_mode; /* 0 off, 1 on; decided before the helper starts */
+static int scr_sa_pf_heap_mode;  /* 0 off, 1 on; decided before the helper starts */
 static uintptr_t scr_sa_pf_page; /* likewise */
-static char *scr_sa_pf_brk;      /* helper only */
+static char *scr_sa_pf_brk0, *scr_sa_pf_brk; /* helper only: first and last break seen */
+static bool scr_sa_pf_heap_big;              /* helper only: past SCR_SA_PF_HEAP_MIN */
 
 /* Faults in the heap's growth since the last check; true if it grew. */
 static bool scr_sa_pf_heap(void) {
@@ -141,7 +147,13 @@ static bool scr_sa_pf_heap(void) {
   if (cur == (char *)-1) return false;
   char *seen = scr_sa_pf_brk;
   scr_sa_pf_brk = cur;
+  if (!seen || cur < scr_sa_pf_brk0) scr_sa_pf_brk0 = cur;
   if (!seen || cur <= seen) return false;
+  if (!scr_sa_pf_heap_big) {
+    if ((size_t)(cur - scr_sa_pf_brk0) < SCR_SA_PF_HEAP_MIN) return true;
+    scr_sa_pf_heap_big = true;
+    (void)mallopt(M_TOP_PAD, (int)SCR_SA_PF_TOP_PAD);
+  }
   scr_sa_pf_populate((char *)((uintptr_t)seen & ~(scr_sa_pf_page - 1)), cur);
   return true;
 }
@@ -221,7 +233,6 @@ static void scr_sa_prefault(char *lo, char *hi) {
         pthread_cond_init(&scr_sa_pf_cond, &ca);
         scr_sa_pf_page = (uintptr_t)page;
         scr_sa_pf_heap_mode = 1;
-        (void)mallopt(M_TOP_PAD, (int)SCR_SA_PF_TOP_PAD);
       }
       pthread_condattr_destroy(&ca);
     }
@@ -269,10 +280,8 @@ static char *scr_sa_extend(char *start, char *lim, char *end) {
          * page can be faulted ahead like every later one. */
         (void)madvise(sw, (size_t)(end - sw), MADV_HUGEPAGE);
         scr_sa_prefault(sw, sw + SCR_SA_HUGE_PAGE < end ? sw + SCR_SA_HUGE_PAGE : end);
-      } else if (lim > start) {
-        /* The second chunk was not faulted ahead either. */
-        char *lo = lim == start + SCR_SA_PF_STEP ? lim : next;
-        scr_sa_prefault(lo, next + SCR_SA_PF_STEP < sw ? next + SCR_SA_PF_STEP : sw);
+      } else if ((size_t)(next - start) >= SCR_SA_PF_START) {
+        scr_sa_prefault(next, next + SCR_SA_PF_STEP < sw ? next + SCR_SA_PF_STEP : sw);
       }
       return next;
     }
