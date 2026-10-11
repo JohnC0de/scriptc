@@ -3154,6 +3154,10 @@ bool scr_process_kill_named(double pid, const ScrStr *signal);
 /* fflush stdout, then _Exit((int)code): no atexit handlers run — the RC
  * audit is deliberately skipped (exiting mid-program leaves live values). */
 void scr_process_exit(double code);
+/* Nonzero hands the address-space teardown after scr_process_exit to a
+ * helper process (Linux, `--detached-exit`). scr_lib.c defines a weak 0;
+ * the program object of such an executable defines it as 1. */
+extern const unsigned char scr_detached_exit;
 void scr_process_set_exit_code(double code);
 double scr_process_exit_code_or_zero(void);
 /* process._exiting: true once the exit sequence began (process.exit or
@@ -4085,6 +4089,7 @@ ScrStr *scr_os_tmpdir(void);
 ScrStr *scr_os_release(void); /* uname(2) release — +1 fresh */
 ScrStr *scr_os_type(void);    /* uname(2) sysname — +1 fresh */
 double scr_os_totalmem(void); /* total physical memory, bytes */
+double scr_os_available_parallelism(void); /* uv_available_parallelism: CPUs this process may use, >= 1 */
 /* os.userInfo()'s field trio (pw_name / pw_shell / pw_dir — the passwd
  * home, not the $HOME cascade). +1 fresh; abort on lookup failure. */
 ScrStr *scr_os_user_name(void);

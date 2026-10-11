@@ -126,6 +126,7 @@ async function tryFastPath(): Promise<number | null> {
     backend: "llvm",
     ...(optimization === "dev" || optimization === "speed" ? { optimization } : {}),
     ...(values.strip ? { strip: true as const } : {}),
+    ...(values["detached-exit"] ? { detachedExit: true as const } : {}),
     npmStatic,
     ffiProfile: ffiPath === null ? null : { path: ffiPath, bytes: ffiBytes! },
     target: `${process.env["SCRIPTC_TARGET"] ?? "native"}:${buildPlatform}:${process.arch}:${
@@ -183,6 +184,7 @@ async function coverageFastPath(
     (failOn !== undefined && failOn !== "blockers" && failOn !== "divergences") ||
     values.emit !== undefined ||
     values.strip ||
+    values["detached-exit"] ||
     values.lib ||
     values.profile !== undefined ||
     values.ffi !== undefined ||
