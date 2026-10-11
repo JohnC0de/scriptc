@@ -108,6 +108,9 @@ Verifies and reads the installed precompiled runtime objects and vendor archives
   <dt><code>--windows-subsystem &lt;console|gui&gt;</code></dt>
   <dd>Select the subsystem of a Windows executable. <code>console</code> is the default; <code>gui</code> prevents Windows from opening a console window for the app. Valid only for executable builds targeting Windows.</dd>
 
+  <dt><code>--detached-exit</code></dt>
+  <dd>On Linux, when the program calls <code>process.exit()</code>, hand the release of its memory to a helper process so the parent sees the exit sooner. The kernel otherwise frees the whole address space before the exit is reported, which takes tens of milliseconds per gigabyte. Opt in only where the trade-offs are acceptable: for up to about 100 ms after the exit, the helper keeps the executable mapped (overwriting the binary in place fails with "text file busy"), its memory stays charged to the cgroup, and the teardown CPU time no longer appears in the parent's resource usage. Valid only for executable builds; it has no effect on other platforms.</dd>
+
   <dt><code>--npm-static &lt;pkg[,pkg…]|auto&gt;</code></dt>
   <dd>EXPERIMENTAL. Compile the named npm packages' shipped JS statically as program modules instead of embedding them for the engine (repeatable; <code>auto</code> opts in every eligible direct import). A package the preflight refuses falls back to the island with a coverage-report note. See <a href="/dependencies">npm Dependencies</a> for maturity notes.</dd>
 

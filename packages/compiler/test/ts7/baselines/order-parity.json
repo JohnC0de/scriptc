@@ -11409,12 +11409,6 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/typed-array-nan-coded-reads.ts": {
-   "order": [
-    "<repo>/tests/corpus/typed-array-nan-coded-reads.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/typed-array-unknown.ts": {
    "order": [
     "<repo>/tests/corpus/typed-array-unknown.ts"
@@ -15743,35 +15737,27 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/4598-live-array-ref-element-access.ts": {
-   "order": [
-    "<repo>/tests/corpus/4598-live-array-ref-element-access.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
-   "order": [
-    "<repo>/tests/corpus/native-worker-arena-reuse.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/4596-tdz-nullable-forward-capture.ts": {
    "order": [
     "<repo>/tests/corpus/4596-tdz-nullable-forward-capture.ts"
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts": {
+  "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts": {
    "order": [
-    "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts"
+    "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts"
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts": {
+  "<repo>/tests/corpus/native-worker-exception-state.ts": {
    "order": [
-    "<repo>/tests/corpus/4621-edge-preserving-callees/compare.ts",
-    "<repo>/tests/corpus/4621-edge-preserving-callees/items.ts",
-    "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts"
+    "<repo>/tests/corpus/native-worker-exception-state.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-exception-state.ts"
    ],
    "diags": []
   },
@@ -15805,6 +15791,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/typed-array-nan-coded-reads.ts": {
+   "order": [
+    "<repo>/tests/corpus/typed-array-nan-coded-reads.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/typed-array-present-reads.ts": {
    "order": [
     "<repo>/tests/corpus/typed-array-present-reads.ts"
@@ -15823,6 +15815,26 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4598-live-array-ref-element-access.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-live-array-ref-element-access.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts": {
+   "order": [
+    "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/4621-edge-preserving-callees/compare.ts",
+    "<repo>/tests/corpus/4621-edge-preserving-callees/items.ts",
+    "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/exact-index-round-trip.ts": {
    "order": [
     "<repo>/tests/corpus/exact-index-round-trip.ts"
@@ -15832,6 +15844,19 @@
   "<repo>/tests/corpus/final-field-borrows.ts": {
    "order": [
     "<repo>/tests/corpus/final-field-borrows.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4598-os-available-parallelism.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-os-available-parallelism.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/constant-module-globals/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/constant-module-globals/consts.ts",
+    "<repo>/tests/corpus/constant-module-globals/main.ts"
    ],
    "diags": []
   }
