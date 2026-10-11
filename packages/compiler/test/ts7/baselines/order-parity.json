@@ -11409,6 +11409,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/typed-array-nan-coded-reads.ts": {
+   "order": [
+    "<repo>/tests/corpus/typed-array-nan-coded-reads.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/typed-array-unknown.ts": {
    "order": [
     "<repo>/tests/corpus/typed-array-unknown.ts"
@@ -15755,6 +15761,26 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts": {
+   "order": [
+    "<repo>/tests/corpus/4620-optional-chain-borrowed-receivers.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/4621-edge-preserving-callees/compare.ts",
+    "<repo>/tests/corpus/4621-edge-preserving-callees/items.ts",
+    "<repo>/tests/corpus/4621-edge-preserving-callees/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-arena-reuse.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/4598-map-set-clear-reuse.ts": {
    "order": [
     "<repo>/tests/corpus/4598-map-set-clear-reuse.ts"
@@ -15776,12 +15802,6 @@
   "<repo>/tests/corpus/missing-read-number-conversions.ts": {
    "order": [
     "<repo>/tests/corpus/missing-read-number-conversions.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/typed-array-nan-coded-reads.ts": {
-   "order": [
-    "<repo>/tests/corpus/typed-array-nan-coded-reads.ts"
    ],
    "diags": []
   },
