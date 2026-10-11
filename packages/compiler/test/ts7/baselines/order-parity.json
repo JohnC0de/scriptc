@@ -15834,6 +15834,12 @@
     "<repo>/tests/corpus/final-field-borrows.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/string-char-code-integer-loops.ts": {
+   "order": [
+    "<repo>/tests/corpus/string-char-code-integer-loops.ts"
+   ],
+   "diags": []
   }
  }
 }
