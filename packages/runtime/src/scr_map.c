@@ -745,14 +745,16 @@ double scr_map_size(const ScrMap *m) { return (double)m->nlive; }
  * the index tables:
  *  - the direct index is zero exactly at the absent keys (deletes clear
  *    their slots), so only the live entries' slots are reset;
- *  - the bucket table is reset only when entries pointed into it, and only
- *    while it is proportional to them;
+ *  - the bucket table is reset only while it is proportional to the
+ *    entries that pointed into it;
  *  - storage far larger than the entries just removed is freed, returning
  *    the map to its initial empty state the way V8 reallocates a cleared
  *    table. Regrowth is amortized against the insertions that need it.
- * Clearing an empty map does no work beyond, once, freeing such storage. */
+ * A map without entries has empty tables already: clearing it does no
+ * work and keeps its storage for the next fill. */
 void scr_map_clear(ScrMap *m) {
   size_t walked = m->nentries;
+  if (walked == 0) return;
   uint32_t *dense = m->ndense ? m->dense : NULL;
   for (size_t e = 0; e < walked; e++) {
     if (!m->entries[e].hash) continue;
@@ -785,7 +787,7 @@ void scr_map_clear(ScrMap *m) {
       free(m->buckets);
       m->buckets = NULL;
       m->nbuckets = 0;
-    } else if (walked) {
+    } else {
       bool compact = scr_map_compact_buckets(m->nbuckets);
       memset(m->buckets, compact ? 0 : 0xff,
              m->nbuckets * (compact ? sizeof(uint32_t) : sizeof(size_t)));
@@ -817,7 +819,8 @@ static bool scr_map_delete_found(ScrMap *m, size_t e) {
   /* Each such compaction follows deletes of three quarters of the entries,
    * so it is amortized constant per delete. It runs before the releases:
    * they may drop the last reference to this map. */
-  if (m->iter_depth == 0 && m->nentries >= SCR_MAP_SHRINK_MIN && m->nlive < m->nentries / 4) {
+  if (__builtin_expect(m->iter_depth == 0 && m->nentries >= SCR_MAP_SHRINK_MIN &&
+                       m->nlive < m->nentries / 4, 0)) {
     scr_map_compact(m, true);
   }
   scr_map_release_key(m, key);
