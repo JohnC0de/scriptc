@@ -363,13 +363,42 @@ export function lowerExpr(lowerer: Lowerer, expr: ts.Expression): IrExpr {
   }
   lowerExprDepth++;
   try {
-    const lowered = lowerExprInner(lowerer, expr);
+    let lowered = lowerExprInner(lowerer, expr);
+    const nanCoded = lowerer.nanCodedReads;
+    if (nanCoded) {
+      if (lowered.type.kind === "f64" && nanCoded.reboxes(expr))
+        lowered = reboxNanCoded(lowerer, lowered, locOf(expr));
+      else if (lowered.type.kind === "union" && nanCoded.convertsSource(expr))
+        lowered = lowerOptionalNumber(lowerer, lowered, locOf(expr));
+    }
     if (lowered.type.kind === "void" && (lowerer.typeOf(expr).flags & ts.TypeFlags.Never) !== 0)
       lowerer.neverValued.add(lowered);
     return lowered;
   } finally {
     lowerExprDepth--;
   }
+}
+
+/** `number | undefined` from a NaN-coded double whose slot never holds a
+ * genuine NaN (nan-coded-reads.ts): NaN is exactly undefined. */
+function reboxNanCoded(lowerer: Lowerer, value: IrExpr, loc: SrcLoc): IrExpr {
+  const optional = lowerer.withUndefinedArm(F64);
+  const stmts: IrStmt[] = [];
+  let stable = value;
+  if (value.kind !== "varRef") {
+    const tmp = lowerer.declareHiddenLocal("%nanCoded", F64);
+    stmts.push({ kind: "varDecl", localId: tmp.id, init: value, loc });
+    stable = varRef(tmp.id, F64, loc);
+  }
+  const result: IrExpr = {
+    kind: "ternary",
+    cond: { kind: "libCall", fn: "num.isNaN", args: [stable], type: BOOL, loc },
+    then: lowerer.wrappedUndefined(optional, loc)!,
+    else_: lowerer.coerceToExpected(stable, optional),
+    type: optional,
+    loc,
+  };
+  return stmts.length === 0 ? result : { kind: "seqExpr", stmts, result, type: optional, loc };
 }
 
 function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
@@ -2576,6 +2605,10 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
         lowerer.isRuntimeOptionalField(handled.shapeId, handled.field)
       )
         return handled;
+      // A class field assigned a missing read: the checker narrows this
+      // read to the assigned value's bare type, but the stored undefined
+      // arm is real (`obj.n = bytes[i]; obj.n` is undefined in Node).
+      if (runtimeOptionalClassField(lowerer, handled, expr)) return handled;
       return lowerer.maybeNarrow(handled, expr);
     }
     // `globalThis.<name>` that no lowering above claimed
@@ -6548,6 +6581,33 @@ export function lowerOptionalNumber(
     : { kind: "seqExpr", stmts: prefix, result: value, type: F64, loc };
 }
 
+/** A number argument of a builtin that converts it with ToNumber (Math
+ * functions, String.fromCharCode, the global isNaN/isFinite, DataView
+ * offsets and values). ToNumber(undefined) is NaN, so a missing value — an
+ * out-of-range read, a local or field holding one, or a hole — converts to
+ * NaN instead of trusting the checker's number type. */
+export function lowerToNumberArgument(lowerer: Lowerer, node: ts.Expression): IrExpr {
+  let inner = node;
+  while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+  const loc = locOf(inner);
+  const isOptionalNumber = (value: IrExpr): boolean =>
+    value.type.kind === "union" &&
+    lowerer.armTag(value.type.unionId, UNDEFINED_T) >= 0 &&
+    lowerer.stripUndefinedArm(value.type).kind === "f64";
+  const optional = ts.isIdentifier(inner)
+    ? runtimeOptionalStorageOperand(lowerer, inner)
+    : ts.isElementAccessExpression(inner)
+      ? lowerAbsenceProbe(lowerer, inner)
+      : null;
+  if (optional && isOptionalNumber(optional))
+    return lowerOptionalNumber(lowerer, optional, loc, inner);
+  // A conditional builds each branch for the destination.
+  if (ts.isConditionalExpression(inner)) return lowerer.lowerExprExpecting(node, F64);
+  const value = lowerer.lowerExpr(node);
+  if (isOptionalNumber(value)) return lowerOptionalNumber(lowerer, value, loc, inner);
+  return lowerer.coerceInto(node, value, F64);
+}
+
 /** `a[i]` reads. Only f64 indices into array receivers are modeled; JS
  * string-key element access (`a["length"]`) and string indexing (`s[0]`
  * typechecks against the lib's index signature; use .charAt) stay out. */
@@ -6858,7 +6918,12 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
     // `t[i]!` asserts presence: the numeric element read (NaN when
     // invalid). Every other read answers undefined for an invalid index,
     // like Node.
-    if (ts.isNonNullExpression(expr.parent) && expr.parent.expression === expr) {
+    // A read whose every consumer treats undefined like NaN (see
+    // nan-coded-reads.ts) is the same plain numeric read.
+    if (
+      (ts.isNonNullExpression(expr.parent) && expr.parent.expression === expr) ||
+      lowerer.nanCodedReads?.isNumericRead(expr) === true
+    ) {
       return {
         kind: "bytesIntrinsic",
         method: "get",
@@ -7649,6 +7714,24 @@ export function runtimeOptionalStorageOperand(
   )
     return null;
   return optional.value;
+}
+
+/** A `T | undefined` class field read that the checker narrowed to `T`
+ * where the field was assigned a value that may be missing (an unchecked
+ * indexed read). TypeScript's assignment narrowing is not a runtime fact
+ * there, so the read keeps the stored union instead of extracting `T`. */
+function runtimeOptionalClassField(
+  lowerer: Lowerer,
+  value: IrExpr,
+  node: ts.PropertyAccessExpression,
+): boolean {
+  if (value.kind !== "fieldGet" || value.type.kind !== "union") return false;
+  if (lowerer.armTag(value.type.unionId, UNDEFINED_T) < 0) return false;
+  if ((lowerer.unions.get(value.type.unionId)?.arms.length ?? 0) !== 2) return false;
+  const symbol = lowerer.checker.getSymbolAtLocation(node.name);
+  if (!symbol || !lowerer.runtimeOptionalAssignedSymbols.has(symbol)) return false;
+  const narrowed = lowerer.mapTypeOf(lowerer.typeOf(node));
+  return narrowed !== null && typeEquals(narrowed, lowerer.stripUndefinedArm(value.type));
 }
 
 /** A presence-test operand: an absence-aware element or field read, an
@@ -9760,12 +9843,76 @@ export function lowerCompoundValueToTarget(
   lowerer.unsupported("SC1043", expr);
 }
 
+/** Equality of two NaN-coded values (nan-coded-reads.ts), each of which may
+ * stand for undefined and never holds a genuine NaN: Node's undefined equals
+ * undefined, so two NaNs compare equal here. Operands evaluate once, in
+ * order. */
+function lowerNanCodedEquality(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr | null {
+  const loc = locOf(expr);
+  const left = lowerer.lowerExpr(expr.left);
+  const right = lowerer.lowerExpr(expr.right);
+  if (left.type.kind !== "f64" || right.type.kind !== "f64") {
+    throw new InternalCompilerError("NaN-coded equality operand is not a plain number");
+  }
+  const stmts: IrStmt[] = [];
+  const stable = (value: IrExpr, name: string): IrExpr => {
+    if (value.kind === "varRef" || value.kind === "numLit") return value;
+    const tmp = lowerer.declareHiddenLocal(name, F64);
+    stmts.push({ kind: "varDecl", localId: tmp.id, init: value, loc });
+    return varRef(tmp.id, F64, loc);
+  };
+  const a = stable(left, "%eqLeft");
+  const b = stable(right, "%eqRight");
+  const isNaN = (value: IrExpr): IrExpr => ({
+    kind: "libCall",
+    fn: "num.isNaN",
+    args: [value],
+    type: BOOL,
+    loc,
+  });
+  const bothUndefined: IrExpr = {
+    kind: "logical",
+    op: "&&",
+    left: isNaN(a),
+    right: isNaN(b),
+    type: BOOL,
+    loc,
+  };
+  const op = expr.operatorToken.kind;
+  const negated =
+    op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+    op === ts.SyntaxKind.ExclamationEqualsToken;
+  const result: IrExpr = negated
+    ? {
+        kind: "logical",
+        op: "&&",
+        left: { kind: "bin", op: "!==", left: a, right: b, type: BOOL, loc },
+        right: { kind: "unary", op: "!", operand: bothUndefined, type: BOOL, loc },
+        type: BOOL,
+        loc,
+      }
+    : {
+        kind: "logical",
+        op: "||",
+        left: { kind: "bin", op: "===", left: a, right: b, type: BOOL, loc },
+        right: bothUndefined,
+        type: BOOL,
+        loc,
+      };
+  return stmts.length === 0 ? result : { kind: "seqExpr", stmts, result, type: BOOL, loc };
+}
+
 export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr {
   const loc = locOf(expr);
   const op = expr.operatorToken.kind;
 
   const cacheHas = lowerRequireCacheHas(lowerer, expr);
   if (cacheHas) return cacheHas;
+
+  if (lowerer.nanCodedReads?.needsUndefinedEquality(expr)) {
+    const undefinedEquality = lowerNanCodedEquality(lowerer, expr);
+    if (undefinedEquality) return undefinedEquality;
+  }
 
   if (
     op === ts.SyntaxKind.EqualsToken ||
@@ -14372,6 +14519,15 @@ function classFieldTarget(
   const lowerObjectReceiver = (): IrExpr => {
     let obj = represented;
     if (obj.type.kind === "union") {
+      // A receiver that may hold a missing value (a field assigned an
+      // unchecked read): Node's member-read TypeError for the unit arm.
+      const present = lowerer.runtimeOptionalPropertyReceiver(
+        receiverNode,
+        obj,
+        receiverType,
+        fieldName,
+      );
+      if (present) return present;
       const helper = lowerer.narrowedArmHelper(obj.type.unionId, receiverType, locOf(receiverNode));
       obj = helper
         ? lowerer.checkedNarrowCall(helper, obj, receiverType, locOf(receiverNode))

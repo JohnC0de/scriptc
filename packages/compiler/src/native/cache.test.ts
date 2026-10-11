@@ -38,6 +38,20 @@ test("cache hits require an intact payload and digest", () => {
   expect(cache.read("object", key)).toBeNull();
 });
 
+test("text parts publish one digest-checked entry and oversized reads are misses", () => {
+  const cache = new NativeCache(directory());
+  const key = contentDigest("parts identity");
+  const parts = ['{"a":', '"\u00e9é😀"', ",", "", '"b":1}'];
+  cache.writeParts("frontend", key, parts);
+  const bytes = cache.read("frontend", key);
+  expect(bytes?.toString("utf8")).toBe(parts.join(""));
+  expect(readFileSync(join(cache.root, "frontend", key + ".sha256"), "utf8").trim()).toBe(
+    contentDigest(parts.join("")),
+  );
+  expect(cache.read("frontend", key, bytes!.length)).toEqual(bytes);
+  expect(cache.read("frontend", key, bytes!.length - 1)).toBeNull();
+});
+
 test("a failed cache publication does not fail the build or replace unrelated files", () => {
   const cache = new NativeCache(directory());
   const occupied = join(cache.root, "object");

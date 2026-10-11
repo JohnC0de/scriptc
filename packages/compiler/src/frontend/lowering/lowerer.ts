@@ -76,6 +76,7 @@ import { ArrayElementStates } from "./runtime-optional-elements.js";
 import { indexReadInBounds } from "./runtime-optional-bounds.js";
 import { ArrayOwnership } from "./runtime-optional-ownership.js";
 import { StringIndexBounds } from "./string-index-bounds.js";
+import { NanCodedReads } from "./nan-coded-reads.js";
 import { RuntimeOptionalLocals } from "./runtime-optional-locals.js";
 import { sanitizeUnregisteredClassTypes } from "./sanitize-class-types.js";
 import { UnregisteredClassTypes } from "./unregistered-class-types.js";
@@ -1642,6 +1643,10 @@ export class Lowerer {
   /** Per-symbol result of the never-reassigned file scan
    * (bindingNeverReassigned — object-literal generic-method receivers). */
   readonly neverReassignedCache = new Map<ts.Symbol, boolean>();
+  /** Typed-array element reads whose every consumer treats undefined like
+   * NaN, which lower to plain doubles (see nan-coded-reads.ts). Settled by
+   * analyzeRuntimeOptionalArrayReads before any body lowers. */
+  nanCodedReads: NanCodedReads | null = null;
   private stringIndexBoundsCache: StringIndexBounds | null = null;
   /** Proofs that a string element read names an existing code unit. The
    * indexed-read analysis and expression lowering share one instance, so a
@@ -3899,6 +3904,38 @@ export class Lowerer {
         }
       }
     }
+    const mappedOrNull = (node: ts.Node): IrType | null =>
+      panicSafe(() => this.mapTypeOf(this.typeOf(node)), null);
+    const nanCoded = new NanCodedReads(
+      {
+        symbolOf,
+        declarationOf: (symbol) => this.checker.valueDeclarationOf(symbol),
+        bytesElemOf: (receiver) => {
+          const t = mappedOrNull(receiver);
+          return t?.kind === "bytes" ? t.elem : null;
+        },
+        isNumber: (node) => mappedOrNull(node)?.kind === "f64",
+        isString: (node) => mappedOrNull(node)?.kind === "string",
+        hasLength: (node) => {
+          const kind = mappedOrNull(node)?.kind;
+          return kind === "array" || kind === "bytes";
+        },
+        isStdlibGlobal: (node, name) => this.isStdlibGlobal(node, name),
+        paramIsNumber: (fn, index) => {
+          const param = signatureBySymbol.get(fn)?.params[index];
+          return (
+            param !== undefined &&
+            param.type.kind === "f64" &&
+            (param.mode === "required" || param.mode === "omittable")
+          );
+        },
+        returnIsNumber: (fn) => signatureBySymbol.get(fn)?.returnType.kind === "f64",
+        methodOverridden: (fn) => (familyBySymbol.get(fn)?.length ?? 1) > 1,
+      },
+      sourceFiles,
+    );
+    nanCoded.analyze();
+    this.nanCodedReads = nanCoded;
     const peel = (node: ts.Expression): ts.Expression => {
       let e = node;
       while (
@@ -4010,8 +4047,10 @@ export class Lowerer {
       if (!ts.isElementAccessExpression(e)) return false;
       const kind = this.mapTypeOf(this.typeOf(e.expression))?.kind;
       if (kind === "string") return !this.stringIndexBounds.inBounds(e);
-      // Typed-array reads answer undefined for an invalid index too.
-      return kind === "array" || kind === "bytes";
+      // Typed-array reads answer undefined for an invalid index too, unless
+      // every consumer treats undefined like NaN.
+      if (kind === "bytes") return !nanCoded.isNumericRead(e);
+      return kind === "array";
     };
     const isDynamicObjectEntryRead = (node: ts.Expression): boolean => {
       const read = peel(node);
@@ -4099,6 +4138,11 @@ export class Lowerer {
         ) >= 0
       )
         return true;
+      // A NaN-coded value that reaches a consumer able to observe undefined
+      // is rebuilt as the ordinary optional value there; every other read
+      // of a NaN-coded slot is a plain number.
+      if (nanCoded.reboxes(e)) return true;
+      if (nanCoded.readsNanCodedSlot(e)) return false;
       if (ts.isIdentifier(e)) {
         const symbol = symbolOf(e);
         return (
@@ -4183,6 +4227,23 @@ export class Lowerer {
       const symbol = symbolOf(decl.name);
       if (!symbol) return false;
       return noteFieldSymbol(symbol, name);
+    };
+    /** An instance field of a TypeScript class whose declared storage is
+     * exactly `T | undefined`: an assignment from a missing read stores the
+     * undefined arm while the checker narrows later reads to `T`. */
+    const optionalInstanceField = (symbol: ts.Symbol): boolean => {
+      const decl = this.checker.valueDeclarationOf(symbol);
+      if (!decl || !ts.isPropertyDeclaration(decl) || !ts.isIdentifier(decl.name)) return false;
+      if (ts.getCombinedModifierFlags(decl) & ts.ModifierFlags.Static) return false;
+      const sf = decl.getSourceFile();
+      if (isJsSourceFile(sf) || sf.isDeclarationFile) return false;
+      const declared = typeOrNull(decl.name);
+      const mapped = declared ? this.mapTypeOf(declared) : null;
+      if (mapped?.kind !== "union" || this.armTag(mapped.unionId, UNDEFINED_T) < 0) return false;
+      const arms = this.unions.get(mapped.unionId)?.arms ?? [];
+      return (
+        arms.length === 2 && arms.every((arm) => arm.kind === "undefinedT" || !isUnitType(arm))
+      );
     };
     const noteFieldSymbol = (symbol: ts.Symbol, name: string): boolean => {
       const set = optionalFields.get(symbol) ?? new Set<string>();
@@ -4314,12 +4375,29 @@ export class Lowerer {
       return found;
     };
     const jsLambdas: ts.FunctionLikeDeclaration[] = [];
+    // TypeScript lambdas keep the checker's inferred return type, which
+    // spells a missing read as its bare element type and `read ?? "text"`
+    // as a number. Their closures return the runtime result instead.
+    const tsLambdas: ts.FunctionLikeDeclaration[] = [];
     for (const sf of sourceFiles) {
-      if (!isJsSourceFile(sf)) continue;
+      const js = isJsSourceFile(sf);
+      if (!js && sf.isDeclarationFile) continue;
       ts.walkPreorder(sf, (node) => {
-        if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) jsLambdas.push(node);
+        if (ts.isArrowFunction(node) || ts.isFunctionExpression(node))
+          (js ? jsLambdas : tsLambdas).push(node);
       });
     }
+    /** The primitive result union of a lambda's returns (see
+     * optionalPrimitiveResultType), as declared functions record it. */
+    const lambdaArithmeticReturn = (fn: ts.FunctionLikeDeclaration): IrType | null => {
+      if (fn.body && !ts.isBlock(fn.body))
+        return optionalPrimitiveResultType(fn.body as ts.Expression);
+      for (const expression of returnsOf(fn)) {
+        const result = optionalPrimitiveResultType(expression);
+        if (result) return result;
+      }
+      return null;
+    };
     for (const [symbol, signature] of signatureBySymbol) {
       const declaration = functionDeclBySymbol.get(symbol);
       if (!declaration || !isJsSourceFile(declaration.getSourceFile())) continue;
@@ -5010,6 +5088,13 @@ export class Lowerer {
               optionalSymbols.add(field);
               provenance?.note("static-field", node.left, node.right);
               changed = true;
+            } else if (field && !optionalSymbols.has(field) && optionalInstanceField(field)) {
+              // The checker narrows the field to the assigned read's bare
+              // type, but the stored value can be undefined: reads keep the
+              // stored union (runtimeOptionalClassField).
+              optionalSymbols.add(field);
+              provenance?.note("assigned-field", node.left, node.right);
+              changed = true;
             } else if (ts.isIdentifier(node.left.expression)) {
               const symbol = symbolOf(node.left.expression);
               if (symbol && noteFieldSymbol(symbol, node.left.name.text)) {
@@ -5344,6 +5429,54 @@ export class Lowerer {
       for (const sf of sourceFiles) if (scanFile(sf)) changed = true;
       for (const [symbol, decl] of functionDeclBySymbol)
         if (scanReturns(symbol, decl)) changed = true;
+      for (const fn of tsLambdas) {
+        // An annotated return is the author's contract, as for parameters.
+        if (fn.type) continue;
+        const mapped = this.mapTypeOf(this.typeOf(fn));
+        if (mapped?.kind !== "func") continue;
+        const previous = this.runtimeOptionalFunctionReturnType(fn, mapped.ret);
+        // Async, generator and void bodies keep their own result shapes.
+        if (
+          previous.kind === "promise" ||
+          previous.kind === "generator" ||
+          previous.kind === "void"
+        )
+          continue;
+        const arithmetic = lambdaArithmeticReturn(fn);
+        const next =
+          arithmetic &&
+          (previous.kind === "f64" || previous.kind === "string" || previous.kind === "bool")
+            ? arithmetic
+            : bodyReturnsOptional(fn)
+              ? this.runtimeOptionalType(previous)
+              : previous;
+        if (!typeEquals(previous, next)) {
+          this.runtimeOptionalFunctionReturns.set(fn, next);
+          provenance?.note("lambda-return", fn, fn.body);
+          changed = true;
+        }
+        // Calls through the lambda's own binding (`const get = () => xs[i];
+        // get()`) produce the same result as calls of a declared function.
+        const binding = fn.parent;
+        if (
+          next !== previous &&
+          ts.isVariableDeclaration(binding) &&
+          binding.initializer === fn &&
+          !binding.type &&
+          ts.isIdentifier(binding.name)
+        ) {
+          const symbol = symbolOf(binding.name);
+          if (symbol && next.kind === "union" && this.armTag(next.unionId, UNDEFINED_T) >= 0) {
+            if (!optionalReturns.has(symbol)) {
+              optionalReturns.add(symbol);
+              changed = true;
+            }
+          } else if (symbol && !arithmeticReturns.has(symbol)) {
+            arithmeticReturns.set(symbol, next);
+            changed = true;
+          }
+        }
+      }
       for (const fn of jsLambdas) {
         if (!bodyReturnsOptional(fn)) continue;
         const mapped = this.mapTypeOf(this.typeOf(fn));
@@ -5376,6 +5509,21 @@ export class Lowerer {
           }
         }
       }
+    }
+    // NaN-coded slots convert optional values on entry instead of holding
+    // the union, so promotion never applies to them.
+    for (const symbol of [...optionalSymbols])
+      if (nanCoded.nanCodedBinding(symbol)) optionalSymbols.delete(symbol);
+    for (const symbol of [...optionalReturns])
+      if (nanCoded.nanCodedReturn(symbol)) optionalReturns.delete(symbol);
+    for (const [symbol, params] of optionalParams) {
+      const decl = functionDeclBySymbol.get(symbol);
+      for (const index of [...params]) {
+        const name = decl?.parameters[index]?.name;
+        const param = name && ts.isIdentifier(name) ? symbolOf(name) : null;
+        if (param && nanCoded.nanCodedBinding(param)) params.delete(index);
+      }
+      if (params.size === 0) optionalParams.delete(symbol);
     }
     for (const [site, present] of presentSites) if (present) this.presentElementCalls.add(site);
     for (const [loop, present] of presentLoops) if (present) this.presentElementLoops.add(loop);
@@ -5439,11 +5587,11 @@ export class Lowerer {
         const symbol = symbolOf(node.name);
         if (!symbol) return;
         if (
-          isJsSourceFile(sf) &&
           !node.type &&
           !hasJsTypeAnnotation(node) &&
           node.initializer &&
-          (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+          (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)) &&
+          (isJsSourceFile(sf) || this.runtimeOptionalFunctionReturns.has(node.initializer))
         ) {
           const global = this.globalsBySymbol.get(symbol);
           if (global?.type.kind === "func")
@@ -9544,14 +9692,32 @@ export class Lowerer {
   /* ── scoping and captures ─────────────────────────────────────────── */
 
   declareLocal(nameNode: ts.Node, name: string, type: IrType, mutable: boolean): IrLocal {
-    return declareContextLocal(
+    const symbol = this.checker.getSymbolAtLocation(nameNode);
+    const local = declareContextLocal(
       this.ctx,
       name,
       type,
       mutable,
-      this.checker.getSymbolAtLocation(nameNode),
+      symbol,
       bindingSource(nameNode),
     );
+    // A binding declared `T | undefined` that receives a missing read: the
+    // checker narrows it to `T` after the assignment, but the stored value
+    // can be undefined. Track it like widened storage so bare reads keep
+    // the union until a guard proves presence.
+    if (
+      symbol &&
+      this.runtimeOptionalAssignedSymbols.has(symbol) &&
+      type.kind === "union" &&
+      this.armTag(type.unionId, UNDEFINED_T) >= 0 &&
+      this.unions.get(type.unionId)?.arms.length === 2 &&
+      !isUnitType(this.stripUndefinedArm(type))
+    ) {
+      const root = this.runtimeOptionalRootOf(local);
+      this.runtimeOptionalStorageLocals.add(root);
+      this.runtimeOptionalLocals.add(root);
+    }
+    return local;
   }
 
   /** A never-returning call in a value position of type `expected`: the
