@@ -2161,6 +2161,23 @@ typedef struct ScrBox {
   uint64_t slot; /* double/bool/pointer via memcpy and casts */
 } ScrBox;
 
+/* A box can lie on a cycle only when its trace visits its payload: a
+ * closure, or a class instance that carries a cycle header. Every other box
+ * is a leaf of the object graph, so its releases buffer no candidate. The
+ * emitted inline release (llvm/shapes.ts, the box row) mirrors this test,
+ * reading `kind` and `obj_trace` at the asserted offsets. */
+static inline bool scr_box_traced(const ScrBox *b) {
+  return b->kind == SCR_BOX_FUNC || b->obj_trace != NULL;
+}
+_Static_assert(SCR_BOX_FUNC == 4, "the emitted box release compares kind against 4");
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(offsetof(ScrBox, kind) == 8 && offsetof(ScrBox, obj_trace) == 32,
+               "the emitted box release reads kind at 8 and obj_trace at 32");
+#else
+_Static_assert(offsetof(ScrBox, kind) == 4 && offsetof(ScrBox, obj_trace) == 16,
+               "the emitted box release reads kind at 4 and obj_trace at 16");
+#endif
+
 ScrBox *scr_box_new(ScrBoxKind kind); /* returns +1, slot zeroed */
 ScrBox *scr_box_new_obj(void *(*retain)(void *), void (*release)(void *),
                          ScrTraceFn trace);

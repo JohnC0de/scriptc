@@ -390,7 +390,23 @@ function releaseHelper(host: ShapeHost, family: string, row: InlineRcFamily): st
           `  br i1 %untraced, label %done, label %root`,
           `root:`,
         ]
-      : []),
+      : family === "box"
+        ? [
+            // scr_box_release buffers a surviving box only when its trace
+            // visits the payload (scr_box_traced): a closure (kind 4), or a
+            // class instance whose obj_trace is set.
+            `  %kp = getelementptr i8, ptr %o, ${S} ${S === "i64" ? 8 : 4} ; ScrBox.kind`,
+            `  %kind = load i32, ptr %kp`,
+            `  %func = icmp eq i32 %kind, 4`,
+            `  br i1 %func, label %root, label %objbox`,
+            `objbox:`,
+            `  %otp = getelementptr i8, ptr %o, ${S} ${S === "i64" ? 32 : 16} ; ScrBox.obj_trace`,
+            `  %ot = load ptr, ptr %otp`,
+            `  %untraced = icmp eq ptr %ot, null`,
+            `  br i1 %untraced, label %done, label %root`,
+            `root:`,
+          ]
+        : []),
     ...(cycle === "always" ? cycleRootLines(host, "done") : [`  br label %done`]),
     `done:`,
     `  ret void`,

@@ -127,7 +127,7 @@ void scr_box_release(ScrBox *b) {
   if (--b->rc == 0) {
     scr_cyc_dead(b);
     scr_rc_destroy(b, scr_box_destroy);
-  } else {
+  } else if (scr_box_traced(b)) {
     scr_cyc_released(b); /* possible cycle root; may collect — b is done */
   }
 }
