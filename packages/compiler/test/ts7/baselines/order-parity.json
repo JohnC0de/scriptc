@@ -15846,6 +15846,43 @@
     "<repo>/tests/corpus/final-field-borrows.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-exception-state.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-exception-state.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4598-os-available-parallelism.ts": {
+   "order": [
+    "<repo>/tests/corpus/4598-os-available-parallelism.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/constant-module-globals/main.ts": {
+   "order": [
+    "<repo>/tests/corpus/constant-module-globals/consts.ts",
+    "<repo>/tests/corpus/constant-module-globals/main.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts": {
+   "order": [
+    "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts"
+   ],
+   "diags": []
   }
  }
 }
