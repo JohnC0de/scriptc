@@ -522,7 +522,7 @@ export class LlEmitter {
   private debugScope: string | null = null;
   readonly sizeType: "i32" | "i64";
   readonly ffiExtendNarrowIntegers: boolean;
-  readonly cycleColorOffset: number;
+  readonly cycleBufferedOffset: number;
   readonly wasi: boolean;
   /** The target lacks a rounding instruction at its baseline CPU (x86-64
    * before SSE4.1), so `llvm.trunc` would lower to a libm call: emit
@@ -859,10 +859,10 @@ export class LlEmitter {
     this.runtimeAbiMarker = options.runtimeAbiMarker === true;
     this.detachedExit = options.detachedExit === true;
     this.rcHelpers = options.inlineRc === true ? new Set() : null;
-    // ScrCycHdr.color stays 12 bytes behind a wasm32 object and 16 bytes
-    // behind a 64-bit object. The wasm32 header pads before color so its
-    // payload remains double-aligned without changing this ABI offset.
-    this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
+    // ScrCycHdr.buffered sits 6 bytes behind every object. The wasm32
+    // header pads before its descriptor so its payload remains
+    // double-aligned without changing this ABI offset.
+    this.cycleBufferedOffset = 6;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
     this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);
@@ -956,7 +956,7 @@ export class LlEmitter {
     this.tracedUnions = traced.unions;
     this.shapeHost = {
       sizeType: this.sizeType,
-      cycleColorOffset: this.cycleColorOffset,
+      cycleBufferedOffset: this.cycleBufferedOffset,
       tracedShapes: this.tracedShapes,
       tracedUnions: this.tracedUnions,
       nullableUnions: this.nullableUnions,

@@ -385,7 +385,8 @@ static void mock_cyc_release(void *p) {
 }
 
 static MockRec *mock_cyc_new(int value) {
-  MockRec *r = scr_cyc_alloc(sizeof *r, &mock_trace, &mock_gcfree);
+  static const ScrCycType cyc_type = { &mock_trace, &mock_gcfree };
+  MockRec *r = scr_cyc_alloc(sizeof *r, &cyc_type);
   r->rc = 1;
   r->value = value;
   mock_live++;

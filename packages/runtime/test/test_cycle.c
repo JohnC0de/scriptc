@@ -63,7 +63,8 @@ static Node *make_ring(size_t count) {
   Node **nodes = calloc(count, sizeof(*nodes));
   if (!nodes) scr_trap("cycle test: out of memory\n");
   for (size_t i = 0; i < count; i++) {
-    nodes[i] = scr_cyc_alloc(sizeof(*nodes[i]), node_trace, node_free);
+    static const ScrCycType cyc_type = { &node_trace, &node_free };
+    nodes[i] = scr_cyc_alloc(sizeof(*nodes[i]), &cyc_type);
     nodes[i]->rc = 1; /* the ring edge that will point at this node */
   }
   for (size_t i = 0; i < count; i++)
@@ -118,7 +119,8 @@ static void check_age_reset_when_last_mature_root_dies(void) {
   ring = make_ring(32);
   ring->rc++;
   release_live(ring);
-  leaf = scr_cyc_alloc(sizeof(*leaf), node_trace, node_free);
+  static const ScrCycType cyc_type = { &node_trace, &node_free };
+  leaf = scr_cyc_alloc(sizeof(*leaf), &cyc_type);
   leaf->rc = 1;
   leaf->rc++; /* temporary release makes it a nursery candidate */
   release_live(leaf);
@@ -153,7 +155,8 @@ static void check_dead_backlog_rearms_release_trigger(void) {
   Node *leaves[BACKLOG];
 
   for (size_t i = 0; i < BACKLOG; i++) {
-    leaves[i] = scr_cyc_alloc(sizeof(*leaves[i]), node_trace, node_free);
+    static const ScrCycType cyc_type = { &node_trace, &node_free };
+    leaves[i] = scr_cyc_alloc(sizeof(*leaves[i]), &cyc_type);
     leaves[i]->rc = 2; /* external owner plus a temporary reference */
     release_live(leaves[i]);
   }
@@ -180,7 +183,8 @@ static void check_dead_backlog_rearms_release_trigger(void) {
 }
 
 static Node *make_leaf(void) {
-  Node *leaf = scr_cyc_alloc(sizeof(*leaf), node_trace, node_free);
+  static const ScrCycType cyc_type = { &node_trace, &node_free };
+  Node *leaf = scr_cyc_alloc(sizeof(*leaf), &cyc_type);
   leaf->rc = 1;
   return leaf;
 }
@@ -609,7 +613,8 @@ static void check_deep_cross_generation_chain(void) {
   size_t before = freed;
   Node *chain = NULL;
   for (size_t i = 0; i < DEPTH; i++) {
-    Node *node = scr_cyc_alloc(sizeof(*node), node_trace, node_free);
+    static const ScrCycType cyc_type = { &node_trace, &node_free };
+    Node *node = scr_cyc_alloc(sizeof(*node), &cyc_type);
     node->rc = 1;
     node->next = chain;
     chain = node;

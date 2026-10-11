@@ -285,7 +285,8 @@ static void scr_promise_gcfree(void *o) {
 }
 
 ScrPromise *scr_promise_new(void) {
-  ScrPromise *p = scr_cyc_alloc(sizeof *p, &scr_promise_trace, &scr_promise_gcfree);
+  static const ScrCycType cyc_type = { &scr_promise_trace, &scr_promise_gcfree };
+  ScrPromise *p = scr_cyc_alloc(sizeof *p, &cyc_type);
   p->rc = 1;
   p->identity = malloc(sizeof *p->identity);
   if (!p->identity) scr_oom();

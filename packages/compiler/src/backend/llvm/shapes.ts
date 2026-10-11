@@ -26,7 +26,7 @@ import {
   mangleRecordStruct,
   mangleRecordTrace,
 } from "../mangle.js";
-import { emitObjectAlloc, emitObjectFree } from "./alloc.js";
+import { cycTypeDescriptor, emitObjectAlloc, emitObjectFree } from "./alloc.js";
 import { llvmCommentText } from "./common.js";
 import type { NullableUnions } from "./nullable-unions.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
@@ -39,8 +39,8 @@ export interface ShapeHost {
   needOom(): void;
   /** The target C ABI's `size_t` / refcount integer type. */
   readonly sizeType: "i32" | "i64";
-  /** Byte offset from an object pointer back to ScrCycHdr.color. */
-  readonly cycleColorOffset: number;
+  /** Byte offset from an object pointer back to ScrCycHdr.buffered. */
+  readonly cycleBufferedOffset: number;
   readonly tracedShapes: Set<string>;
   readonly tracedUnions: Set<string>;
   /** Unions represented as a nullable arm pointer (nullable-unions.ts):
@@ -390,7 +390,23 @@ function releaseHelper(host: ShapeHost, family: string, row: InlineRcFamily): st
           `  br i1 %untraced, label %done, label %root`,
           `root:`,
         ]
-      : []),
+      : family === "box"
+        ? [
+            // scr_box_release buffers a surviving box only when its trace
+            // visits the payload (scr_box_traced): a closure (kind 4), or a
+            // class instance whose obj_trace is set.
+            `  %kp = getelementptr i8, ptr %o, ${S} ${S === "i64" ? 8 : 4} ; ScrBox.kind`,
+            `  %kind = load i32, ptr %kp`,
+            `  %func = icmp eq i32 %kind, 4`,
+            `  br i1 %func, label %root, label %objbox`,
+            `objbox:`,
+            `  %otp = getelementptr i8, ptr %o, ${S} ${S === "i64" ? 32 : 16} ; ScrBox.obj_trace`,
+            `  %ot = load ptr, ptr %otp`,
+            `  %untraced = icmp eq ptr %ot, null`,
+            `  br i1 %untraced, label %done, label %root`,
+            `root:`,
+          ]
+        : []),
     ...(cycle === "always" ? cycleRootLines(host, "done") : [`  br label %done`]),
     `done:`,
     `  ret void`,
@@ -826,7 +842,7 @@ export function releaseFastPath(
 
 /** The possible-cycle-root step of a release that left a headered object
  * alive: scr_cyc_on_release with its early return inlined. Read `buffered`
- * (the i16 four bytes after color; nonzero for a queued candidate or a
+ * (the i16 at obj-6; nonzero for a queued candidate or a
  * tenured object) and call the runtime only to enqueue a new candidate.
  * Every emitted release of a headered object shares this sequence
  * (scr_runtime.h asserts the offset); it ends by branching to `done`. */
@@ -834,7 +850,7 @@ export function cycleRootLines(host: ShapeHost, done: string): string[] {
   const S = host.sizeType;
   host.declare(`declare void @scr_cyc_on_release(ptr)`);
   return [
-    `  %bufp = getelementptr i8, ptr %o, ${S} -${host.cycleColorOffset - 4}`,
+    `  %bufp = getelementptr i8, ptr %o, ${S} -${host.cycleBufferedOffset}`,
     `  %buf = load i16, ptr %bufp`,
     `  %queued = icmp ne i16 %buf, 0`,
     `  br i1 %queued, label %${done}, label %enqueue`,
@@ -852,7 +868,7 @@ export function cycleDeadLines(host: ShapeHost, next: string): string[] {
   const S = host.sizeType;
   host.declare(`declare void @scr_cyc_on_dead(ptr)`);
   return [
-    `  %dbufp = getelementptr i8, ptr %o, ${S} -${host.cycleColorOffset - 4}`,
+    `  %dbufp = getelementptr i8, ptr %o, ${S} -${host.cycleBufferedOffset}`,
     `  %dbuf = load i16, ptr %dbufp`,
     `  %dqueued = icmp ne i16 %dbuf, 0`,
     `  br i1 %dqueued, label %unbuffer, label %${next}`,
@@ -936,18 +952,17 @@ export function emitRecordShapes(
       `define internal ptr @${mangleRecordNew(shape.id)}() ${FN_ATTRS} {`,
       `entry:`,
     ];
-    nw.push(
-      ...emitObjectAlloc(
-        host,
-        sizeOf,
-        traced
-          ? {
-              trace: `@${mangleRecordTrace(shape.id)}`,
-              free: `@${mangleRecordGcFree(shape.id)}`,
-            }
-          : null,
-      ),
-    );
+    const cycType = `@${mangleRecordTrace(shape.id)}.cyctype`;
+    if (traced)
+      defs.push(
+        cycTypeDescriptor(
+          cycType,
+          `@${mangleRecordTrace(shape.id)}`,
+          `@${mangleRecordGcFree(shape.id)}`,
+        ),
+        ``,
+      );
+    nw.push(...emitObjectAlloc(host, sizeOf, traced ? { type: cycType } : null));
     nw.push(`  store ${host.sizeType} 1, ptr %o`);
     if (shape.indexValue) {
       // The overflow map (string-keyed): value handling is type-directed
