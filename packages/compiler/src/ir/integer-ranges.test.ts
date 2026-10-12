@@ -124,6 +124,8 @@ const condition = (
 ): IrExpr => ({ loc, kind: "bin", op, left, right, type: BOOL });
 const observe = (value: IrExpr): IrStmt => ({ loc, kind: "exprStmt", expr: value });
 const INT32 = { min: -2147483648, max: 2147483647 };
+const UINT32 = { min: 0, max: 4294967295 };
+const INT32_AND_UINT32 = { min: 0, max: 2147483647 };
 
 test("joins branch assignments and refines signed masks on guarded paths", () => {
   const inside = ref(),
@@ -237,11 +239,12 @@ test("labeled exits and do-while conditions cannot lend facts to skipped paths",
       },
     ]),
   );
-  // The break skips `x = 1`; both writes are int32 literals, so the join
-  // keeps only the int32-closed range, never the skipped path's fact.
-  expect(ranges.get(afterBlock)).toEqual(INT32);
+  // The break skips `x = 1`; both writes are non-negative int32 literals,
+  // so the join keeps only the closed range (int32 and uint32 at once),
+  // never the skipped path's fact.
+  expect(ranges.get(afterBlock)).toEqual(INT32_AND_UINT32);
   // Likewise the condition's `x = 0` does not reach the first iteration.
-  expect(ranges.get(firstBody)).toEqual(INT32);
+  expect(ranges.get(firstBody)).toEqual(INT32_AND_UINT32);
 });
 
 test("unit induction is exact but loop-carried assignments remain unknown", () => {
@@ -377,11 +380,9 @@ test("int32-closed locals keep the int32 range across loops and switches", () =>
   const closedRanges = analyzeIntegerRanges(closed.f);
   expect(closedRanges.get(closed.inside)).toEqual(INT32);
   expect(closedRanges.get(closed.after)).toEqual(INT32);
-  for (const write of [
-    bin("+", ref(), num(1)),
-    bin("/", ref(), num(2)),
-    bin(">>>", ref(), num(0)),
-  ]) {
+  const unsigned = loop(bin(">>>", ref(), num(0)));
+  expect(analyzeIntegerRanges(unsigned.f).get(unsigned.after)).toEqual(UINT32);
+  for (const write of [bin("+", ref(), num(1)), bin("/", ref(), num(2))]) {
     const open = loop(write);
     expect(analyzeIntegerRanges(open.f).get(open.after), write.kind).toBeNull();
   }
@@ -402,6 +403,70 @@ test("int32-closed locals keep the int32 range across loops and switches", () =>
     ]),
   );
   expect(switched.get(afterSwitch)).toEqual(INT32);
+});
+
+test("uint32-closed locals keep the uint32 range across loop back edges", () => {
+  // for (let i = 0; i < n; i++) { v = unknown >>> 0; acc = (acc + v) >>> 0; ... }
+  const loop = (start: IrExpr | null, writes: IrExpr[]) => {
+    const inside = ref("acc"),
+      sum = bin("+", inside, ref("v")),
+      after = ref("acc");
+    const set = (localId: string, value: IrExpr): IrStmt => ({
+      loc,
+      kind: "assign",
+      localId,
+      value,
+    });
+    const f = fn([
+      ...(start ? [set("acc", start)] : []),
+      {
+        loc,
+        kind: "for",
+        init: { loc, kind: "varDecl", localId: "i", init: num(0) },
+        cond: condition("<", ref("i"), ref("n")),
+        update: set("i", bin("+", ref("i"), num(1))),
+        body: [
+          set("v", bin(">>>", ref("unknown"), num(0))),
+          set("acc", bin(">>>", sum, num(0))),
+          ...writes.map((value) => set("acc", value)),
+        ],
+      },
+      observe(after),
+    ]);
+    for (const id of ["acc", "i", "v", "n"])
+      f.locals.push({ id, name: id, type: F64, mutable: true });
+    return { inside, sum, after, ranges: analyzeIntegerRanges(f) };
+  };
+  const closed = loop(num(0), []);
+  expect(closed.ranges.get(closed.inside)).toEqual(UINT32);
+  // The add before `>>> 0` stays exact: it can exceed 2^32.
+  expect(closed.ranges.get(closed.sum)).toEqual({ min: 0, max: 2 * 4294967295 });
+  expect(closed.ranges.get(closed.after)).toEqual(UINT32);
+  // A uint32 literal above 2^31 and a `>>>` chain through the closed local
+  // keep the closure.
+  for (const write of [num(4294967295), bin(">>>", ref("acc"), num(1))]) {
+    const kept = loop(num(2147483648), [write]);
+    expect(kept.ranges.get(kept.inside)).toEqual(UINT32);
+    expect(kept.ranges.get(kept.after)).toEqual(UINT32);
+  }
+  // Mixing signed and unsigned writes, any other write, an entry outside
+  // uint32 or an unknown entry leaves the local unknown at the loop head.
+  const open: [IrExpr | null, IrExpr | null][] = [
+    [num(0), bin("|", ref("acc"), num(0))],
+    [num(0), num(-1)],
+    [num(0), num(4294967296)],
+    [num(0), num(-0)],
+    [num(0), num(0.5)],
+    [num(0), bin("+", ref("acc"), num(1))],
+    [num(-1), null],
+    [num(4294967296), null],
+    [null, null],
+  ];
+  for (const [start, write] of open) {
+    const result = loop(start, write ? [write] : []);
+    expect(result.ranges.get(result.inside)).toBeNull();
+    expect(result.ranges.get(result.after)).toBeNull();
+  }
 });
 
 test("whole-program slot facts seed parameters, field reads and call results", () => {

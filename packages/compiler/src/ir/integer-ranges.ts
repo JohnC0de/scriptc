@@ -211,10 +211,10 @@ export interface IntegerSlotFacts {
  * but argument expressions can; unknown evaluation forms invalidate all
  * syntactically written slots before their children are inspected. Loops
  * discard loop-carried facts and retain only invariant or induction facts,
- * except int32-closed locals: a local whose region-entry value is an int32
- * and whose every write inside the region is int32 by construction
- * (bitwise results, int32 literals and slots, other such locals) remains a
- * full int32 range across the region. Suspensions and captured bindings
+ * except closed locals: a local whose region-entry value is an int32 (a
+ * uint32) and whose every write inside the region is one by construction
+ * (bitwise results, `>>>` results for uint32, literals and slots in range,
+ * other such locals) remains a full int32 (uint32) range across the region. Suspensions and captured bindings
  * deliberately remain outside the proof. */
 export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {}): IntegerRanges {
   const ranges = new Map<IrExpr, IntegerRange | null>();
@@ -280,69 +280,88 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
   }
   let functionWrites: Map<string, (IrExpr | null)[]> | null = null;
 
-  /** Locals that hold an int32 everywhere inside and after a region whose
-   * control flow this analysis does not follow. A candidate either enters
-   * with an int32 fact or is declared inside the region and written only
-   * there (definite assignment: every read follows one of those writes).
-   * The greatest fixpoint keeps candidates whose every write is int32 by
-   * construction given the other candidates. */
-  function closedLocals(nodes: (IrExpr | IrStmt)[], entry: Facts): Set<string> {
+  /** Locals that hold an int32 or a uint32 everywhere inside and after a
+   * region whose control flow this analysis does not follow, with that
+   * range. A candidate either enters with a fact inside the range or is
+   * declared inside the region and written only there (definite assignment:
+   * every read follows one of those writes). For each range, the greatest
+   * fixpoint keeps candidates whose every write lands in it by construction
+   * given the other candidates; the two closures are independent, so a local
+   * written both ways (`x | 0` and `x >>> 0`) closes under neither. */
+  function closedLocals(nodes: (IrExpr | IrStmt)[], entry: Facts): Map<string, IntegerRange> {
     const { values, declared } = regionWrites(nodes);
-    const closed = new Set<string>();
-    if (values.size === 0) return closed;
-    for (const [id, list] of values) {
-      if (withinInt32(entry.get(id))) closed.add(id);
-      else if (declared.has(id)) {
-        functionWrites ??= regionWrites(fn.body).values;
-        if (functionWrites.get(id)?.length === list.length) closed.add(id);
-      }
-    }
-    const int32 = (e: IrExpr): boolean => {
-      if (e.type.kind !== "f64") return false;
-      switch (e.kind) {
-        case "numLit":
-          return (
-            Number.isInteger(e.value) &&
-            withinInt32({ min: e.value, max: e.value }) &&
-            !Object.is(e.value, -0)
-          );
-        case "bin":
-          return e.op === "&" || e.op === "|" || e.op === "^" || e.op === "<<" || e.op === ">>";
-        case "unary":
-          return e.op === "~";
-        case "libCall":
-          return e.fn === "math.imul" || e.fn === "math.clz32";
-        case "ternary":
-          return int32(e.then) && int32(e.else_);
-        case "logical":
-          return int32(e.left) && int32(e.right);
-        case "assignExpr":
-          return int32(e.value);
-        case "seqExpr":
-          return int32(e.result);
-        case "varRef":
-          return (
-            closed.has(e.localId) ||
-            (!values.has(e.localId) && withinInt32(entry.get(e.localId))) ||
-            withinInt32(boxedRange(e.localId))
-          );
-        case "fieldGet":
-        case "call":
-          return withinInt32(slotRange(e));
-        default:
-          return false;
-      }
-    };
-    for (let changed = true; changed;) {
-      changed = false;
-      for (const id of closed)
-        if (values.get(id)!.some((value) => value === null || !int32(value))) {
-          closed.delete(id);
-          changed = true;
+    const result = new Map<string, IntegerRange>();
+    if (values.size === 0) return result;
+    const within = (bound: IntegerRange, range: IntegerRange | null | undefined): boolean =>
+      !!range && range.min >= bound.min && range.max <= bound.max;
+    const closure = (bound: IntegerRange): Set<string> => {
+      const signed = bound === SIGNED;
+      const closed = new Set<string>();
+      for (const [id, list] of values) {
+        if (within(bound, entry.get(id))) closed.add(id);
+        else if (declared.has(id)) {
+          functionWrites ??= regionWrites(fn.body).values;
+          if (functionWrites.get(id)?.length === list.length) closed.add(id);
         }
+      }
+      const member = (e: IrExpr): boolean => {
+        if (e.type.kind !== "f64") return false;
+        switch (e.kind) {
+          case "numLit":
+            return (
+              Number.isInteger(e.value) &&
+              within(bound, { min: e.value, max: e.value }) &&
+              !Object.is(e.value, -0)
+            );
+          case "bin":
+            return signed
+              ? e.op === "&" || e.op === "|" || e.op === "^" || e.op === "<<" || e.op === ">>"
+              : e.op === ">>>";
+          case "unary":
+            return signed && e.op === "~";
+          case "libCall":
+            return (signed && e.fn === "math.imul") || e.fn === "math.clz32";
+          case "ternary":
+            return member(e.then) && member(e.else_);
+          case "logical":
+            return member(e.left) && member(e.right);
+          case "assignExpr":
+            return member(e.value);
+          case "seqExpr":
+            return member(e.result);
+          case "varRef":
+            return (
+              closed.has(e.localId) ||
+              (!values.has(e.localId) && within(bound, entry.get(e.localId))) ||
+              within(bound, boxedRange(e.localId))
+            );
+          case "fieldGet":
+          case "call":
+            return within(bound, slotRange(e));
+          default:
+            return false;
+        }
+      };
+      for (let changed = true; changed;) {
+        changed = false;
+        for (const id of closed)
+          if (values.get(id)!.some((value) => value === null || !member(value))) {
+            closed.delete(id);
+            changed = true;
+          }
+      }
+      return closed;
+    };
+    const int32 = closure(SIGNED),
+      uint32 = closure(UNSIGNED);
+    for (const id of entry.keys()) {
+      const signed = int32.has(id),
+        unsigned = uint32.has(id);
+      if (signed && unsigned) result.set(id, { min: 0, max: SIGNED.max });
+      else if (signed) result.set(id, SIGNED);
+      else if (unsigned) result.set(id, UNSIGNED);
     }
-    for (const id of closed) if (!entry.has(id)) closed.delete(id);
-    return closed;
+    return result;
   }
 
   function remember(e: IrExpr, range: IntegerRange | null): IntegerRange | null {
@@ -381,12 +400,13 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
   function invalidate(facts: Facts, nodes: (IrExpr | IrStmt)[]): void {
     for (const node of nodes) for (const id of writes(node)) facts.delete(id);
   }
-  /** Invalidate the region's writes, keeping int32-closed locals as int32.
-   * `entry` is the state before any of the region's writes can run. */
+  /** Invalidate the region's writes, keeping int32- and uint32-closed
+   * locals at their closed range. `entry` is the state before any of the
+   * region's writes can run. */
   function havoc(facts: Facts, nodes: (IrExpr | IrStmt)[], entry: Facts): void {
     const closed = closedLocals(nodes, entry);
     invalidate(facts, nodes);
-    for (const id of closed) facts.set(id, SIGNED);
+    for (const [id, range] of closed) facts.set(id, range);
   }
   function refine(condition: IrExpr, truth: boolean, facts: Facts): void {
     // A comparison constrains operand snapshots. If evaluating it writes a

@@ -222,10 +222,11 @@ export function integerRangeCases(): RangeCase[] {
         };
         break;
     }
-    // Where control flow is not followed, x keeps only the int32-closed
-    // range: it enters as 3 and every write in the region is an int32 (the
-    // for-of loop binds x itself to unproven elements, so nothing survives).
-    const int32 = [-2147483648, 2147483647] as const;
+    // Where control flow is not followed, x keeps only the closed range: it
+    // enters as 3 and every write in the region is a non-negative int32, so
+    // both the int32 and the uint32 closure hold (the for-of loop binds x
+    // itself to unproven elements, so nothing survives).
+    const closed = [0, 2147483647] as const;
     const expected = [
       proof(inside, 11),
       region === "block"
@@ -234,13 +235,13 @@ export function integerRangeCases(): RangeCase[] {
           ? proof(after, 3, 11)
           : region === "forOf"
             ? proof(after, null)
-            : proof(after, ...int32),
+            : proof(after, ...closed),
     ];
     if (region !== "block")
       expected.push(
         region === "if" || region === "for" || region === "forOf"
           ? proof(before, 3)
-          : proof(before, ...int32),
+          : proof(before, ...closed),
       );
     add(
       `${region} regions retain only valid entry and exit facts`,
