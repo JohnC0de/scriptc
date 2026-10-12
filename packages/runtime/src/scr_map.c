@@ -1130,9 +1130,60 @@ bool scr_map_get_str_bool(const ScrMap *m, const ScrStr *key, bool *out) {
   return true;
 }
 
-const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key) {
+static __attribute__((noinline)) const ScrMapEntry *scr_map_entry_str_slow(const ScrMap *m,
+                                                                           const ScrStr *key) {
   size_t e = scr_map_find_str(m, key);
   return e == SCR_MAP_EMPTY ? NULL : &m->entries[e];
+}
+
+/* A stored key with the probe's hash but another identity: compare bytes.
+ * Equal hashes of different strings are rare enough to answer by the
+ * complete lookup. */
+static __attribute__((noinline)) const ScrMapEntry *scr_map_entry_str_bytes(const ScrMap *m,
+                                                                            const ScrStr *key,
+                                                                            const ScrMapEntry *e) {
+  const ScrStr *stored = scr_map_slot_to_ptr(e->key);
+  if (stored->len == key->len && scr_key_equal(stored->data, key->data, key->len)) return e;
+  return scr_map_entry_str_slow(m, key);
+}
+
+/* Every string-key read of generated code lands here. The common shapes, a
+ * key with a cached hash probing linear or compact-bucket storage, run
+ * without a stack frame: a hash match on another string object tail-calls
+ * the byte comparison, and anything else (an uncached hash, wide buckets)
+ * the complete lookup. */
+const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key) {
+#if SCR_STR_HASH_CACHE
+  uint32_t h = key->hash;
+  size_t nbuckets = m->nbuckets;
+  if (__builtin_expect(h != 0 && scr_map_compact_buckets(nbuckets), 1)) {
+    uint64_t hash = scr_map_hash_widen(h);
+    uint64_t bits = scr_map_filter_bits(hash);
+    if ((m->filter & bits) != bits) return NULL;
+    const ScrMapEntry *entries = m->entries;
+    if (nbuckets == 0) {
+      for (size_t e = 0, n = m->nentries; e < n; e++) {
+        if (entries[e].hash != hash) continue;
+        if (entries[e].key == scr_map_slot_from_ptr((void *)key)) return &entries[e];
+        return scr_map_entry_str_bytes(m, key, &entries[e]);
+      }
+      return NULL;
+    }
+    const uint32_t *buckets = m->buckets;
+    uint32_t tag = (uint32_t)(hash >> 32 & UINT32_C(0xff000000));
+    size_t mask = nbuckets - 1;
+    for (size_t i = hash & mask;; i = (i + 1) & mask) {
+      uint32_t bucket = buckets[i];
+      if (!bucket) return NULL;
+      if ((bucket & ~SCR_MAP_INDEX_MASK) != tag) continue;
+      const ScrMapEntry *e = &entries[(bucket & SCR_MAP_INDEX_MASK) - 1];
+      if (e->hash != hash) continue;
+      if (e->key == scr_map_slot_from_ptr((void *)key)) return e;
+      return scr_map_entry_str_bytes(m, key, e);
+    }
+  }
+#endif
+  return scr_map_entry_str_slow(m, key);
 }
 
 void *scr_map_get_str_ref(const ScrMap *m, const ScrStr *key) {
