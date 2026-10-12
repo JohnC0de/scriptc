@@ -7,9 +7,11 @@
  * scr_map_entry_f64 otherwise. The generated code then reads the entry's
  * value slot itself and retains a reference value with the value type's own
  * retain, which is the adapter the collection was constructed with.
- * String-keyed reference reads use the same entry contract through
- * scr_map_entry_str, so their retain is inline rather than the runtime's
- * indirect adapter call.
+ * String-keyed reads use the same entry contract through the internal
+ * sc_map_entry_str helper, which rejects keys outside the map's absent-key
+ * filter inline and defers to scr_map_entry_str otherwise: reference reads
+ * retain inline rather than through the runtime's indirect adapter call,
+ * and scalar reads and has() share the one lookup.
  */
 import type { IrType } from "../../ir/ir.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
@@ -40,8 +42,25 @@ export const STRING_MAP_ENTRY_DECL = "declare ptr @scr_map_entry_str(ptr, ptr)";
 export function emitStringMapEntry(host: LlvmEmitterContext, map: string, key: string): string {
   host.declare(STRING_MAP_ENTRY_DECL);
   const entry = host.B.tmp();
-  host.B.line(`${entry} = call ptr @scr_map_entry_str(ptr ${map}, ptr ${key})`);
+  host.B.line(`${entry} = call ptr @sc_map_entry_str(ptr ${map}, ptr ${key})`);
   return entry;
+}
+
+/** Map.has / Set.has under a string key. */
+export function emitStringMapHas(host: LlvmEmitterContext, map: string, key: string): string {
+  const entry = emitStringMapEntry(host, map, key);
+  const found = host.B.tmp();
+  host.B.line(`${found} = icmp ne ptr ${entry}, null`);
+  return found;
+}
+
+/** Map.get of a scalar value under a string key; see emitNumberMapGetScalar. */
+export function emitStringMapGetScalar(
+  host: LlvmEmitterContext,
+  map: string,
+  key: string,
+): { found: string; bits: string } {
+  return emitMapEntryGetScalar(host, emitStringMapEntry(host, map, key));
 }
 
 /** Map.get of a reference value: a +1 value, or null when absent — the
@@ -94,8 +113,15 @@ export function emitNumberMapGetScalar(
   map: string,
   key: string,
 ): { found: string; bits: string } {
+  return emitMapEntryGetScalar(host, emitNumberMapEntry(host, map, key));
+}
+
+/** The found flag and raw 64-bit slot (zero when absent) of an entry. */
+function emitMapEntryGetScalar(
+  host: LlvmEmitterContext,
+  entry: string,
+): { found: string; bits: string } {
   const B = host.B;
-  const entry = emitNumberMapEntry(host, map, key);
   const found = B.tmp();
   B.line(`${found} = icmp ne ptr ${entry}, null`);
   const hit = B.newLabel("mapn.hit"),

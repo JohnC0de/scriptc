@@ -1845,11 +1845,12 @@ export class LlEmitter {
         ? []
         : [`%ScrMapRc = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr }`]),
       // The complete ScrMap and its { key, val, hash } entry, read by the
-      // inline number-key lookup (sc_map_entry_f64): entries is field 12,
-      // the direct index and its length fields 18 and 19.
-      ...(this.decls.has(NUMBER_MAP_ENTRY_DECL)
+      // inline number-key lookup (sc_map_entry_f64): field 11 is the i64
+      // absent-key filter, entries is field 13, the direct index and its
+      // length fields 19 and 20.
+      ...(this.decls.has(NUMBER_MAP_ENTRY_DECL) || this.decls.has(STRING_MAP_ENTRY_DECL)
         ? [
-            `%ScrMapIx = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ptr, ptr, ${this.sizeType} }`,
+            `%ScrMapIx = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, i64, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ptr, ptr, ${this.sizeType} }`,
           ]
         : []),
       // String-keyed reference reads load the value slot of the entry
@@ -2692,7 +2693,7 @@ export class LlEmitter {
       defs.push(
         `define internal ptr @sc_map_entry_f64(ptr %m, double %k) ${FN_ATTRS} {`,
         `entry:`,
-        `  %ndp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 19`,
+        `  %ndp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 20`,
         `  %nd = load ${sz}, ptr %ndp`,
         // A non-integral key inside the table is as absent as one outside it.
         ...mapIndex.lines.map((line) => `  ${line}`),
@@ -2701,7 +2702,7 @@ export class LlEmitter {
         sz === "i64"
           ? `  %i = add i64 ${mapIndex.wide}, 0`
           : `  %i = trunc i64 ${mapIndex.wide} to ${sz}`,
-        `  %dp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 18`,
+        `  %dp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 19`,
         `  %dense = load ptr, ptr %dp`,
         `  %sp = getelementptr inbounds i32, ptr %dense, ${sz} %i`,
         `  %s = load i32, ptr %sp`,
@@ -2710,7 +2711,7 @@ export class LlEmitter {
         `hit:`,
         `  %e32 = sub i32 %s, 1`,
         sz === "i32" ? `  %e = add i32 %e32, 0` : `  %e = zext i32 %e32 to ${sz}`,
-        `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 12`,
+        `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 13`,
         `  %entries = load ptr, ptr %ep`,
         `  %found = getelementptr inbounds %ScrMapEntry, ptr %entries, ${sz} %e`,
         `  ret ptr %found`,
@@ -2721,6 +2722,48 @@ export class LlEmitter {
         `  br i1 %dense.any, label %miss, label %slow`,
         `slow:`,
         `  %r = call ptr @scr_map_entry_f64(ptr %m, double %k)`,
+        `  ret ptr %r`,
+        `}`,
+        ``,
+      );
+    }
+    // String-key Map/Set lookups test the map's absent-key filter inline
+    // (scr_map.c scr_map_filter_bits): a key whose two filter bits are not
+    // both set is absent, so most misses on small and medium maps return
+    // without a call. On 64-bit targets the key's cached hash h is the high
+    // half of its capacity word, the runtime's widened hash is (h << 32) | h,
+    // and the filter reads its bits 44..55, which are the capacity word's
+    // own. A key without a cached hash, and every possible hit, take the
+    // runtime lookup.
+    if (this.decls.has(STRING_MAP_ENTRY_DECL)) {
+      defs.push(
+        `define internal ptr @sc_map_entry_str(ptr %m, ptr %k) ${FN_ATTRS} {`,
+        `entry:`,
+        ...(this.sizeType === "i64"
+          ? [
+              `  %fp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 11`,
+              `  %filter = load i64, ptr %fp`,
+              `  %capp = getelementptr inbounds %ScrStr, ptr %k, i32 0, i32 2`,
+              `  %cap = load i64, ptr %capp`,
+              `  %cached = icmp uge i64 %cap, 4294967296`,
+              `  br i1 %cached, label %test, label %slow`,
+              `test:`,
+              `  %s1 = lshr i64 %cap, 44`,
+              `  %i1 = and i64 %s1, 63`,
+              `  %b1 = shl i64 1, %i1`,
+              `  %s2 = lshr i64 %cap, 50`,
+              `  %i2 = and i64 %s2, 63`,
+              `  %b2 = shl i64 1, %i2`,
+              `  %bits = or i64 %b1, %b2`,
+              `  %have = and i64 %filter, %bits`,
+              `  %maybe = icmp eq i64 %have, %bits`,
+              `  br i1 %maybe, label %slow, label %absent`,
+              `absent:`,
+              `  ret ptr null`,
+            ]
+          : [`  br label %slow`]),
+        `slow:`,
+        `  %r = call ptr @scr_map_entry_str(ptr %m, ptr %k)`,
         `  ret ptr %r`,
         `}`,
         ``,

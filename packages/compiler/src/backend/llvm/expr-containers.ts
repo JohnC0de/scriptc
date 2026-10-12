@@ -31,6 +31,8 @@ import {
   emitNumberMapGetScalar,
   emitNumberMapHas,
   emitStringMapGetRef,
+  emitStringMapGetScalar,
+  emitStringMapHas,
 } from "./map-number-lookup.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
 import { emitStringSliceRead } from "./string-slices.js";
@@ -1159,8 +1161,11 @@ export function emitMapLikeIntrinsic(
         const outTy = value.kind === "f64" ? "double" : "i8";
         let found: string;
         let readHit: () => string;
-        if (numberKey !== null) {
-          const scalar = emitNumberMapGetScalar(host, r.name, numberKey);
+        if (numberKey !== null || stringKey !== null) {
+          const scalar =
+            numberKey !== null
+              ? emitNumberMapGetScalar(host, r.name, numberKey)
+              : emitStringMapGetScalar(host, r.name, stringKey!);
           found = scalar.found;
           readHit = () => {
             const hit = B.tmp();
@@ -1246,6 +1251,7 @@ export function emitMapLikeIntrinsic(
     case "has": {
       const k = borrowInputs ? host.emitReadReceiver(e.args[0]!) : host.emitExpr(e.args[0]!);
       if (kAcc === "f64") return { name: emitNumberMapHas(host, r.name, k.name), type: e.type };
+      if (kAcc === "str") return { name: emitStringMapHas(host, r.name, k.name), type: e.type };
       host.declare(`declare zeroext i1 @scr_map_has_${kAcc}(ptr, ${kTy})`);
       const t = B.tmp();
       B.line(`${t} = call zeroext i1 @scr_map_has_${kAcc}(ptr ${r.name}, ${kTy} ${k.name})`);
