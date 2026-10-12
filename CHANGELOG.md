@@ -6,6 +6,26 @@ All notable changes to scriptc will be documented in this file.
 
 <!-- release:start -->
 
+## 0.2.10
+
+### Features
+
+- **Contract types check extra promises at compile time.** The new types-only `@scriptc/types` package adds `NoThrow<T>`, `Int32`, `Immutable<T>`, `Acyclic` and `ProgramLifetime`. They mean nothing to TypeScript or Node.js, but scriptc proves each one or fails the build with a diagnostic that names the throwing path, the non-int32 store, the write that breaks immutability or the reference cycle. Proven `Int32` slots are stored as native integers, immutable module constants take no reference counts, and program-lifetime classes skip reference counting and cycle collection. Outside worker programs, a surrounding `try`/`catch` discharges `NoThrow`.
+
+### Performance
+
+- **Construction and narrowed reads do less work.** Private constructor stores drop publication guards, construction-only fields are borrowed, string-keyed `Map` reads retain inline, and narrowed member reads are rechecked only when a call can invalidate them.
+- **Indexed reads and integer code are cheaper.** `charCodeAt` at proven integer indices skips the double round trip, literal `switch` statements dispatch without range tests, indexed-read helpers are inlined, identity bitwise forms over proven int32 operands return the operand, and array counters use signed conversions.
+- **Allocation is faster and smaller.** Small arrays are sized exactly, map storage stays on the runtime allocator, array element reference-count entry points live in one shared descriptor per element type, glibc's large blocks use transparent huge pages, and Linux pre-faults allocator memory on a helper thread.
+- **Runtime throw paths stay out of line,** so hot code around checks that rarely fail stays smaller.
+
+### Fixes
+
+- **Published object graphs stay immutable in more cases.** A constructor that stores `this` into its own field keeps its publication guards, and calls that may replace a field keep their own reference to arguments read from it.
+- **Native program objects use runtime ABI v13.** Array headers changed, so external object consumers must link the matching v0.2.10 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
+
+<!-- release:end -->
+
 ## 0.2.9
 
 ### Features
@@ -28,8 +48,6 @@ All notable changes to scriptc will be documented in this file.
 - **Union class fields work in more shapes.** Optional base-class receivers are narrowed before shared field access, and fields declared with different types across a union can be read and written.
 - **Workers share descriptor tables safely,** and live array references are accessed one element at a time.
 - **Native program objects use runtime ABI v12.** Runtime object layouts changed, so external object consumers must link the matching v0.2.9 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
-
-<!-- release:end -->
 
 ## 0.2.8
 
