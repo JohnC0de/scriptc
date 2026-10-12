@@ -16,7 +16,7 @@ const loc = { file: "class-membership.ts", start: 0, end: 1 };
 test("leaf layouts keep direct teardown while recursive layouts share the depth budget", () => {
   const linked = { kind: "object" as const, className: "Linked" };
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
@@ -61,7 +61,7 @@ test("releases split into an inlinable fast path and an out-of-line remainder", 
   // An array of the class itself makes the hierarchy cycle-capable.
   const kids = { kind: "array" as const, elem: { kind: "object" as const, className: "Node" } };
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
@@ -90,7 +90,7 @@ test("ProgramLifetime hierarchies are never freed and take no reference counts",
   const kids = { kind: "array" as const, elem: { kind: "object" as const, className: "Node" } };
   const owners = { kind: "array" as const, elem: { kind: "object" as const, className: "Owner" } };
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],
@@ -142,7 +142,7 @@ test("published ProgramLifetime instances use the published mark every other obj
   const leaf = { kind: "object" as const, className: "Leaf" };
   const root = { localId: "root", name: "root", type: node };
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [
@@ -234,7 +234,7 @@ function graph() {
     { name: "FlippedString", base: "PairString", genericOf: "Flipped" },
   ];
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [],
@@ -268,7 +268,7 @@ test.each(["i32", "i64"])(
     expect(helper).toContain("label %ordinary");
     expect(helper).toContain("or i1");
     const ordinary: IrModule = {
-      irVersion: 15,
+      irVersion: 16,
       sourceFile: loc.file,
       entry: "main",
       functions: [],
@@ -283,7 +283,7 @@ test.each(["i32", "i64"])(
 
 test("unconstructed narrowing layouts may omit abstract slots while live classes require implementations", () => {
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [{ name: "main", params: [], returnType: VOID, locals: [], body: [], loc }],

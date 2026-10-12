@@ -77,7 +77,6 @@ suspended("a,b").then(console.log);
       outDir: dir,
       outPath: output,
       outputKind: "ir",
-      dynamic: false,
     });
     if (!result.ok)
       throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

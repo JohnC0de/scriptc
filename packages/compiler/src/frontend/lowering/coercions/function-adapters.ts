@@ -4,11 +4,9 @@ import { InternalCompilerError } from "../../../errors.js";
 import type { IrExpr, IrParam, IrStmt, IrType, SrcLoc } from "../../../ir/ir.js";
 import {
   canAdaptDynFuncTo,
-  canMarshalTypedFuncIntoIsland,
   DYN,
   F64,
   isUnitType,
-  JSVAL,
   STRING,
   typeEquals,
   UNDEFINED_T,
@@ -78,28 +76,7 @@ export function coercibleValue(lowerer: Lowerer, src: IrType, dst: IrType): bool
   if (typeEquals(src, dst)) return true;
   if (src.kind === "object" && dst.kind === "object")
     return lowerer.isSubclassOf(src.className, dst.className);
-  // The island boundary joins the mechanical set: values that MARSHAL
-  // in (units, the checked-dynamic deep copy, JSON-safe data, liftable
-  // composites, marshalable closures — coerceToExpected's jsval-IN
-  // block) and island handles whose exits VALIDATE (boundaryExitSafe) —
-  // the `defaultFallback(cfg) { return { login, id, scopes } }` shape,
-  // whose slot returns a package ('any') type.
-  if (dst.kind === "jsval") {
-    return (
-      src.kind !== "jsval" &&
-      (isUnitType(src) ||
-        src.kind === "dyn" ||
-        lowerer.boundarySafe(src) ||
-        lowerer.jsvalLiftable(src) ||
-        (src.kind === "func" &&
-          canMarshalTypedFuncIntoIsland(
-            src,
-            (id) => lowerer.shapes.get(id),
-            (id) => lowerer.unions.get(id),
-          )))
-    );
-  }
-  if (src.kind === "jsval") return lowerer.boundaryExitSafe(dst);
+
   if (dst.kind === "dyn") return src.kind !== "dyn" && lowerer.dynConvertible(src);
   if (src.kind === "dyn") {
     // The checked-dynamic function boundary's OUT direction joins the
@@ -139,9 +116,9 @@ export function cleanFuncAdaptable(
   for (let i = 0; i < src.params.length; i++) {
     if (!lowerer.coercibleValue(dst.params[i]!, src.params[i]!)) return false;
   }
-  if (dst.ret.kind === "void") return src.ret.kind !== "jsval";
+  if (dst.ret.kind === "void") return true;
   if (lowerer.coercibleValue(src.ret, dst.ret)) return true;
-  return src.ret.kind === "void" && (dst.ret.kind === "dyn" || dst.ret.kind === "jsval");
+  return src.ret.kind === "void" && dst.ret.kind === "dyn";
 }
 
 /** Adapt a function value to a destination signature, forwarding and
@@ -163,8 +140,8 @@ export function funcCoerceAdapter(
   //   compiles, INVOKING the slot throws the stranded TypeError (a
   //   never-called mismatched callback is exact; divergence 38's stance
   //   extended to calls).
-  // - voidRet "dyn"/"jsval": calling yields JS's undefined — the exact
-  //   undefined dyn/engine value after the call's effects.
+
+  // - voidRet "dyn": return native undefined after the call's effects.
   // - voidRet "strand": a void result where the slot promises a typed
   //   value — the call runs (a `never` thrower never comes back, so the
   //   trap is unreachable there), then the stranded TypeError.
@@ -211,7 +188,7 @@ export function funcCoerceAdapter(
     }
     strandParams = true;
   }
-  let voidRet: "dyn" | "jsval" | "strand" | null = null;
+  let voidRet: "dyn" | "strand" | null = null;
   let strandRet = false;
   if (toT.ret.kind !== "void" && !lowerer.coercibleValue(fromT.ret, toT.ret)) {
     if (fromT.ret.kind !== "void") {
@@ -222,10 +199,9 @@ export function funcCoerceAdapter(
       // throws the stranded TypeError where its result would convert.
       strandRet = true;
     } else {
-      voidRet = toT.ret.kind === "dyn" ? "dyn" : toT.ret.kind === "jsval" ? "jsval" : "strand";
+      voidRet = toT.ret.kind === "dyn" ? "dyn" : "strand";
     }
   }
-  if (toT.ret.kind === "void" && fromT.ret.kind === "jsval") return null;
   const key = `fnadapt:${typeKey(fromT)}:${typeKey(toT)}`;
   const existing = lowerer.coercions.retags.get(key);
   if (existing) return existing;
@@ -310,15 +286,6 @@ export function funcCoerceAdapter(
       body = [
         { kind: "exprStmt", expr: call, loc },
         { kind: "return", value: dynUndefinedExpr(loc), loc },
-      ];
-    } else if (voidRet === "jsval") {
-      body = [
-        { kind: "exprStmt", expr: call, loc },
-        {
-          kind: "return",
-          value: { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc },
-          loc,
-        },
       ];
     } else if (voidRet === "strand") {
       body = [

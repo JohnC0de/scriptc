@@ -9,7 +9,7 @@ export function isNativeProxyInitializer(
   lowerer: Lowerer,
   expression: ts.Expression | undefined,
 ): boolean {
-  if (lowerer.dynamic || !expression) return false;
+  if (!expression) return false;
   while (ts.isParenthesizedExpression(expression)) expression = expression.expression;
   return (
     ts.isNewExpression(expression) &&

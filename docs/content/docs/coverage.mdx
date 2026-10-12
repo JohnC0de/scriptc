@@ -2,13 +2,11 @@
 title: "Coverage Reports"
 ---
 
-`scriptc coverage` analyzes a program without building an executable. It reports how many executable statements compile statically, which operations require the embedded JavaScript engine, and which operations are unsupported.
+`scriptc coverage` analyzes a program without building an executable. It reports how many executable statements compile to native code and groups unsupported operations by diagnostic code. Counts describe the program being analyzed, not JavaScript or Node.js support in general.
 
-The counts apply to the program being analyzed, not to JavaScript or Node.js support in general. Dependency implementation statements are excluded from these totals.
+<span id="static-programs" />
 
-## Static programs
-
-The following program compiles entirely to native code:
+## A native program
 
 ```console
 $ cat hello.ts
@@ -20,148 +18,43 @@ $ scriptc coverage hello.ts
   statements analyzed   2
   compile statically    2  (100%)
 
-  fully static — this program has no dynamic remainder.
+  fully static — all analyzed statements compile to native code.
 ```
 
-A static executable does not include a JavaScript engine.
+<span id="report-fields" />
 
-## Programs that require dynamic execution
+## Reading the report
 
-This program imports an npm package whose JavaScript requires the embedded engine:
-
-```console
-$ cat cli.ts
-import pc from "picocolors";
-
-console.log(pc.green("hello"));
-
-$ scriptc coverage cli.ts
-
-  statements analyzed   1
-  compile statically    0  (0%)
-
-  runs with --dynamic   2 sites (embeds a JS engine, ~620KB — static stays the default)
-      ×1  SC2013  importing 'picocolors' requires the embedded dynamic engine, which this build does not include — the package's implementation runs there
-          at cli.ts:1:1
-          hint: build with --dynamic to run npm package code in the embedded engine (adds ~620KB to the binary), or try --npm-static auto to compile eligible packages' JavaScript statically; static builds never include the engine
-      ×1  SC2013  values from the 'picocolors' package run in the embedded dynamic engine, which this build does not include
-          at cli.ts:3:13
-          hint: build with --dynamic to run npm package code in the embedded engine (adds ~620KB to the binary), or try --npm-static auto to compile eligible packages' JavaScript statically; static builds never include the engine
-```
-
-Each group collects the sites that share one root cause: the same code and message, with type arguments of generic instantiations collapsed, so one uncompilable declaration reported through several instantiations appears once. The `at` line lists the first sites in source order, and every group carries a hint.
-
-The package must be installed before analysis; the quickstart shows [how to install and use it](/docs/quickstart#use-an-npm-dependency).
-
-### Report fields
+Each blocker group collects the sites that share one root cause: the same code and message, with type arguments of generic instantiations collapsed, so one uncompilable declaration reported through several instantiations appears once. The `at` line lists the first sites in source order, and every group carries a hint.
 
 <table>
-  <thead>
-    <tr>
-      <th>Field</th>
-      <th>Meaning</th>
-    </tr>
-  </thead>
+  <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr>
-      <td><code>statements analyzed</code></td>
-      <td>Executable statements in the program, excluding dependency implementation code.</td>
-    </tr>
-    <tr>
-      <td><code>compile statically</code></td>
-      <td>Statements that compile to native code.</td>
-    </tr>
-    <tr>
-      <td><code>runs with --dynamic</code></td>
-      <td>Sites that require the embedded engine. Without <code>--dynamic</code>, these sites are compilation errors. Site counts can differ from statement counts.</td>
-    </tr>
-    <tr>
-      <td><code>blockers</code></td>
-      <td>Unsupported operations, listed with a count, diagnostic code, reason, locations, and hint. Enabling <code>--dynamic</code> does not resolve these blockers.</td>
-    </tr>
-    <tr>
-      <td><code>in unreached code</code></td>
-      <td>Blockers in code the entry never reaches. A build never compiles that code, so these cannot fail it.</td>
-    </tr>
-    <tr>
-      <td><code>differs from Node</code></td>
-      <td>Sites that compile but can behave differently from Node.js. See <a href="#node-divergences">Node divergences</a>.</td>
-    </tr>
+    <tr><td><code>statements analyzed</code></td><td>Executable statements in application code, excluding dependency implementation code.</td></tr>
+    <tr><td><code>compile statically</code></td><td>Statements that compile to native instructions.</td></tr>
+    <tr><td><code>blockers</code></td><td>Unsupported operations with counts, diagnostic codes, reasons, locations, and hints.</td></tr>
+    <tr><td><code>in unreached code</code></td><td>Blockers in code the entry never reaches. A build never compiles that code, so these cannot fail it.</td></tr>
+    <tr><td><code>differs from Node</code></td><td>Sites that compile but can behave differently from Node.js. See <a href="#node-divergences">Node divergences</a>.</td></tr>
+    <tr><td><code>npm package compilation</code></td><td>Native package compilation outcomes and refusal reasons.</td></tr>
   </tbody>
 </table>
 
+Unreached code and deferred JavaScript operations are reported separately. A deferred operation can remain in a compiled package, but executing it raises a runtime error. A successful build therefore does not establish compatibility for every package API.
+
 The statement totals include the bodies of functions whose signatures cannot compile. Their statements count as not static, so the percentage reflects how much of the program compiles.
 
-## Analyze with --dynamic
-
-Add `--dynamic` to include dynamic execution in the analysis:
-
-```console
-$ cat cli.ts
-import pc from "picocolors";
-
-console.log(pc.green("hello"));
-
-$ scriptc coverage cli.ts --dynamic
-
-  statements analyzed   1
-  compile statically    0  (0%)
-  compile dynamically   1  (100%) (island sites — the embedded engine runs them)
-
-  builds with --dynamic — no remaining blockers (the island sites above run in the embedded engine).
-```
-
-The final line indicates whether the program can build with `--dynamic`. Any remaining blockers are listed in the report.
-
-## Embedded Node.js builtins
-
-When embedded dependencies import Node.js builtin modules, the dynamic report lists each module, its shim status, and the package that imports it.
-
-The [commander example](/docs/dependencies#use-a-package) uses the following source:
-
-```console
-$ cat tool.ts
-import { Command } from "commander";
-
-const program = new Command();
-
-program
-  .name("greet")
-  .argument("<name>", "who to greet")
-  .option("-u, --upper", "use uppercase")
-  .action((name: string, opts: { upper?: boolean }) => {
-    const text = `hello, ${name}`;
-    console.log(opts.upper ? text.toUpperCase() : text);
-  });
-
-program.parse();
-
-$ scriptc coverage tool.ts --dynamic
-
-  statements analyzed   5
-  compile statically    2  (40%)
-  compile dynamically   3  (60%) (island sites — the embedded engine runs them)
-
-  embedded npm code imports Node builtins:
-    node:child_process  shimmed  (commander)
-    node:events         shimmed  (commander)
-    node:fs             shimmed  (commander)
-    node:path           shimmed  (commander)
-    node:process        shimmed  (commander)
-    node:util           shimmed  (commander)
-
-  builds with --dynamic — no remaining blockers (the island sites above run in the embedded engine).
-```
-
-Shims provide supported Node.js APIs inside the embedded engine. They are separate implementations from Node.js's modules. See [npm Dependencies](/docs/dependencies#runtime-behavior) and the [Node.js compatibility reference](/compatibility) for their restrictions.
+<span id="programs-that-require-dynamic-execution" />
+<span id="analyze-with-dynamic" />
+<span id="embedded-nodejs-builtins" />
 
 ## Diagnostic codes
 
 Coverage uses the same diagnostic codes as `scriptc build`. Common examples include:
 
-- `SC2020`: a declared standard-library or Node.js API has no supported compiler implementation. Use the diagnostic's suggested alternative where available.
-- `SC2013`: a package import or package value requires the embedded engine. Enable `--dynamic`, remove the dependency, or evaluate the experimental [static package options](/docs/dependencies#static-package-compilation-experimental).
-- `SC1100`: a value crosses an unsupported `unknown`/`any` boundary. Narrow or cast the value as directed by the diagnostic.
+- `SC2020`: a declared standard-library or Node.js API has no supported compiler implementation.
+- `SC2012`: this API form cannot compile natively.
+- `SC2013`: a package cannot compile natively; inspect the package-specific reason and the [dependency guide](/docs/dependencies).
+- `SC1100`: a value crosses an unsupported checked-value boundary. Narrow or cast the value as directed by the diagnostic.
 
 ## Node divergences
 
@@ -257,11 +150,11 @@ An unchanged program reuses the previous verdict: coverage records the files and
     </tr>
     <tr>
       <td><code>stats</code></td>
-      <td>Coverage only, absent after a preflight failure: the report's statement counts.</td>
+      <td>Coverage only, absent after a preflight failure: the report's statement counts. <code>statementsDynamic</code> is always 0 and remains for schema compatibility.</td>
     </tr>
     <tr>
       <td><code>category</code></td>
-      <td><code>invalid-source</code> (the program has a TypeScript or JSON error), <code>unsupported</code> (valid code scriptc cannot compile yet), <code>dynamic-only</code> (compiles with <code>--dynamic</code>), <code>divergence</code> (compiles, but can behave differently from Node.js), <code>environment</code> (project configuration, scriptc's type world, toolchain, or target), or <code>internal</code> (a compiler bug).</td>
+      <td><code>invalid-source</code> (the program has a TypeScript or JSON error), <code>unsupported</code> (valid code scriptc cannot compile yet), <code>divergence</code> (compiles, but can behave differently from Node.js), <code>environment</code> (project configuration, scriptc's type world, toolchain, or target), or <code>internal</code> (a compiler bug).</td>
     </tr>
     <tr>
       <td><code>severity</code></td>

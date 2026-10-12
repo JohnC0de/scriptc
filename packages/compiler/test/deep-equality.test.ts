@@ -29,7 +29,6 @@ console.log("after");
 `,
     );
     const result = await compile(entry, {
-      dynamic: false,
       sanitize: process.env["SCRIPTC_SAN"] === "1",
       outDir: dir,
       outPath: join(dir, "program"),

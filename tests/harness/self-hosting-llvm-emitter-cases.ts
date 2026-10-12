@@ -48,7 +48,7 @@ export interface LlvmEmitterCase {
 
 export function llvmEmitterCases(): LlvmEmitterCase[] {
   // The LLVM emitter consumes complete IR, including library entry
-  // points, recursive layouts, closure boxes and embedded package tables.
+  // points, recursive layouts and closure boxes.
   const cases: LlvmEmitterCase[] = emitterInputCases().map((item) => ({
     name: item.name,
     module: item.module,
@@ -73,7 +73,6 @@ export function llvmEmitterCases(): LlvmEmitterCase[] {
   );
   find("synchronous callback environment").excludes.push("@scr_closure_new", "@scr_box_new");
   find("thread-local library globals").contains.push("thread_local");
-  find("level-nine module and facade compression").contains.push("@scr_zlib_inflate_exact");
   for (const name of [
     "empty executable",
     "scalar, reference and tuple layouts",

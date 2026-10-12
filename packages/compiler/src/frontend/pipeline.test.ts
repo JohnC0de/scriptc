@@ -70,21 +70,27 @@ test("closes the current program if opening a probe fails", () => {
 });
 
 test("does not retain or close disposed fallback loads twice", () => {
-  preflight.mockReturnValueOnce([typeError]).mockReturnValueOnce([typeError]).mockReturnValue([]);
+  preflight
+    .mockReturnValueOnce([])
+    .mockReturnValueOnce([typeError])
+    .mockReturnValueOnce([typeError])
+    .mockReturnValue([]);
   const frontend = runFrontend("/main.ts", loader, ["fixture"]);
-  expect(opened).toHaveLength(3);
-  expect(frontend.npmStatic).toMatchObject([{ package: "fixture", status: "fallback" }]);
+  expect(opened).toHaveLength(4);
+  expect(frontend.npmStatic).toMatchObject([{ package: "fixture", status: "refused" }]);
   expect(opened[0]!.dispose).toHaveBeenCalledTimes(1);
   expect(opened[1]!.dispose).toHaveBeenCalledTimes(1);
-  expect(opened[2]!.dispose).not.toHaveBeenCalled();
+  expect(opened[2]!.dispose).toHaveBeenCalledTimes(1);
+  expect(opened[3]!.dispose).not.toHaveBeenCalled();
   frontend.dispose();
   for (const load of opened) expect(load.dispose).toHaveBeenCalledTimes(1);
 });
 
 test("preserves the original failure and continues cleanup when a disposer throws", () => {
   preflight
+    .mockReturnValueOnce([])
     .mockImplementationOnce(() => {
-      vi.mocked(opened[0]!.dispose).mockImplementation(() => {
+      vi.mocked(opened[1]!.dispose).mockImplementation(() => {
         throw new Error("close failed");
       });
       return [typeError];
@@ -93,6 +99,6 @@ test("preserves the original failure and continues cleanup when a disposer throw
       throw new Error("probe failed");
     });
   expect(() => runFrontend("/main.ts", loader, ["fixture"])).toThrow("probe failed");
-  expect(opened).toHaveLength(2);
+  expect(opened).toHaveLength(3);
   for (const load of opened) expect(load.dispose).toHaveBeenCalledTimes(1);
 });

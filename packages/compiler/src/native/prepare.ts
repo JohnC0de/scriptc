@@ -123,13 +123,11 @@ function validFeatures(value: unknown): value is NativeLinkFeatures {
   const features = value as Record<string, unknown>;
   if (features["workers"] !== undefined && typeof features["workers"] !== "boolean") return false;
   return [
-    "dynamic",
     "regex",
     "copying",
     "textDecoderLegacy",
     "fileHandle",
     "fetch",
-    "netIsland",
     "zlib",
     "assert",
     "inspect",
@@ -295,7 +293,7 @@ export function prepareNativeExecutable(
     llvm,
     ir,
     sidecarJson: null,
-    features: executableLinkFeatures(prepared.mod, options.dynamic ?? false),
+    features: executableLinkFeatures(prepared.mod),
     sources: [...prepared.sourceTexts],
     ...(prepared.warnings.length > 0 ? { warnings: prepared.warnings } : {}),
   };
@@ -403,7 +401,7 @@ export function prepareNativeLibrary(
     llvm,
     ir: options.emitIr ? batchTextParts(serializeModuleParts(prepared.mod)) : null,
     sidecarJson: prepared.sidecarJson,
-    features: executableLinkFeatures(prepared.mod, false),
+    features: executableLinkFeatures(prepared.mod),
     sources: [...prepared.sourceTexts],
   };
   timing("link-features");

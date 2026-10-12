@@ -243,15 +243,6 @@ export function computeMayThrow(
           )
             f.throws = true;
           break;
-        case "jsOp":
-        case "jsExit":
-        case "jsMarshal":
-        case "jsBridgePromise":
-          // Island operations bridge engine exceptions into the cell
-          // (jsMarshal only on engine-level surprise, but the emitted
-          // pending check exists — seed conservatively).
-          f.throws = true;
-          break;
         case "libCall":
           // The may-throw seed hook: throwing library calls (fs.*,
           // json.parse) count exactly like a `throw` statement.

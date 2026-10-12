@@ -72,13 +72,11 @@ async function main(): Promise<number> {
             toolchain.target,
             toolchain.compilerVersion,
             {
-              dynamic: profile === "dynamic",
               fetch: profile === "tls",
               regex: false,
               copying: false,
               textDecoderLegacy: false,
               fileHandle: false,
-              netIsland: false,
               zlib: false,
               assert: false,
               inspect: false,

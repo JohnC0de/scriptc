@@ -17,7 +17,6 @@ test("native executable cache discovery, restoration and invalidation match Node
       outDir: directory,
       outPath: join(directory, "cache" + (process.platform === "win32" ? ".exe" : "")),
       optimization: "dev",
-      dynamic: false,
       sanitize: process.env["SCRIPTC_SAN"] === "1",
     });
     if (!built.ok) throw new Error(JSON.stringify(built.diagnostics));

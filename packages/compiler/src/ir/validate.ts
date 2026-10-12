@@ -25,15 +25,11 @@ import {
   canAdaptDynFuncTo,
   canDynCheckTo,
   canConvertToDyn,
-  canExitIslandToType,
-  canMarshalIntoIsland,
-  canMarshalTypedFuncIntoIsland,
   DYN,
   DYN_HANDLE_KINDS,
   F64,
   ffiClassType,
   ffiSourceParamTypes,
-  islandPromisePayloadTag,
   isDynTypedRefType,
   isFfiCallbackParam,
   isFfiContextParam,
@@ -48,8 +44,6 @@ import {
   isSupportedMapValue,
   isSupportedSetElem,
   isUnitType,
-  jsOpResultKind,
-  JSVAL,
   REF_TRUTHY_KINDS,
   RUNTIME_EMITTER_CLASS,
   RUNTIME_ERROR_CLASSES,
@@ -137,7 +131,7 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   const moduleLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
   if (mod.workers !== undefined && typeof mod.workers !== "boolean")
     errors.push({ message: "worker execution mode must be a boolean", loc: moduleLoc });
-  if (mod.workers && (mod.lib !== undefined || mod.embedded !== undefined))
+  if (mod.workers && mod.lib !== undefined)
     errors.push({
       message: "worker execution requires a native static executable",
       loc: moduleLoc,
@@ -661,9 +655,8 @@ export function validateModule(mod: IrModule): IrValidationError[] {
       if (fields.has(f.name)) {
         errors.push({ message: `record ${rec.id}: duplicate field "${f.name}"`, loc: noLoc });
       } else fields.set(f.name, f.type);
-      // Unit kinds (undefinedT/nullT) exist only as union arms — a BARE
-      // unit field is as malformed as a void one. dyn and jsval slots
-      // are valid; both are refcounted values held by the record shape.
+      // Bare unit and void types have no record-field storage; unit values
+      // use their union representation.
       if (f.type.kind === "void" || isUnitType(f.type)) {
         errors.push({
           message: `record ${rec.id}: field "${f.name}" is ${f.type.kind}`,
@@ -811,7 +804,6 @@ export function validateModule(mod: IrModule): IrValidationError[] {
         arm.kind === "void" ||
         arm.kind === "union" ||
         arm.kind === "dyn" ||
-        arm.kind === "jsval" ||
         arm.kind === "date" ||
         arm.kind === "generator"
       ) {
@@ -1161,10 +1153,6 @@ function validateFunction(
     }
   };
 
-  /** Union arms a truthiness helper can answer: units (false), scalars and
-   * strings (per-value), ref kinds (always true), jsval (the engine
-   * answers). dyn/caught arms have no ToBoolean — the frontend fences them
-   * before emitting toBool/logical over the union. */
   const checkTruthyUnion = (unionId: string, loc: SrcLoc) => {
     const def = unions.get(unionId);
     if (!def) {
@@ -1198,12 +1186,7 @@ function validateFunction(
 
   function checkNullishOperands(e: IrExpr & { kind: "nullish" }): void {
     expectType(e.right, e.type, "nullish right operand");
-    // The ISLAND form: `a ?? b` over an engine value — left, right,
-    // and result are all handles (the emitters' jsval nullish arm).
-    if (e.left.type.kind === "jsval") {
-      if (e.type.kind !== "jsval") err("jsval nullish must answer jsval", e.loc);
-      return;
-    }
+
     // The CHECKED-DYNAMIC form: the runtime kind decides (the
     // emitters' scr_dyn_is_nullish arm) — left, right, and result
     // all live in the checked-dynamic tree.
@@ -1261,11 +1244,10 @@ function validateFunction(
           e.type.kind !== "f64" &&
           e.type.kind !== "string" &&
           e.type.kind !== "bool" &&
-          e.type.kind !== "jsval" &&
           e.type.kind !== "union" &&
           e.type.kind !== "dyn"
         ) {
-          err(`logical ${e.op} must be f64|string|bool|jsval|union|dyn, got ${e.type.kind}`, e.loc);
+          err(`logical ${e.op} must be f64|string|bool|union|dyn, got ${e.type.kind}`, e.loc);
         }
         if (e.type.kind === "union") checkTruthyUnion(e.type.unionId, e.loc);
         expectType(e.left, e.type, `logical ${e.op} left`);
@@ -1376,7 +1358,6 @@ function validateFunction(
       case "fieldAbsent":
         return checkRecordExpr(e);
       case "dynFrom":
-      case "dynFromJsval":
       case "dynCall":
       case "dynInvoke":
       case "dynObjLit":
@@ -1410,11 +1391,6 @@ function validateFunction(
       case "newPromise":
       case "promiseWithResolvers":
         return checkAsyncExpr(e);
-      case "jsMarshal":
-      case "jsOp":
-      case "jsExit":
-      case "jsBridgePromise":
-        return checkIslandExpr(e);
       default: {
         const _exhaustive: never = e;
         void _exhaustive;
@@ -1677,16 +1653,14 @@ function validateFunction(
       }
       case "dynDestrCheck": {
         checkExpr(e.value);
-        if (e.value.type.kind !== "dyn" && e.value.type.kind !== "jsval")
-          err("dynDestrCheck value must be dyn or jsval", e.loc);
+        if (e.value.type.kind !== "dyn") err("dynDestrCheck value must be dyn", e.loc);
         if (e.type.kind !== e.value.type.kind)
           err("dynDestrCheck must have its value's type", e.loc);
         break;
       }
       case "dynIterN": {
         checkExpr(e.value);
-        if (e.value.type.kind !== "dyn" && e.value.type.kind !== "jsval")
-          err("dynIterN value must be dyn or jsval", e.loc);
+        if (e.value.type.kind !== "dyn") err("dynIterN value must be dyn", e.loc);
         if (e.type.kind !== e.value.type.kind) err("dynIterN must have its value's type", e.loc);
         if (!Number.isInteger(e.count) || e.count < 0)
           err("dynIterN count must be a non-negative integer", e.loc);
@@ -1779,23 +1753,7 @@ function validateFunction(
         break;
       case "optChain": {
         checkExpr(e.receiver);
-        // An island-handle chain (`x?.y` on 'any'): the nullish test is a
-        // runtime ask of the engine value; the body is the plain island
-        // operation over the bound handle, and both body and result stay
-        // jsval (the unit path is the engine's undefined).
-        if (e.receiver.type.kind === "jsval") {
-          if (activeChains.has(e.id)) err(`optChain id "${e.id}" shadows an active chain`, e.loc);
-          activeChains.set(e.id, JSVAL);
-          checkExpr(e.body);
-          activeChains.delete(e.id);
-          if (e.body.type.kind !== "jsval") {
-            err(`jsval optChain with ${e.body.type.kind} body`, e.loc);
-          }
-          if (e.type.kind !== "jsval") {
-            err(`jsval optChain must be jsval, got ${e.type.kind}`, e.loc);
-          }
-          break;
-        }
+
         // A dyn (dyn) chain (`rawName?.match(re)` on a JSON.parse result):
         // the nullish test reads the node's kind tag; the body is the
         // validated dynamic dispatch, its result converted back into the
@@ -2728,7 +2686,7 @@ function validateFunction(
         // declared params plus that one must match.
         if (e.type.kind === "func") {
           const wantRet = callSiteReturnType(target);
-          // ISLAND-REST types (restAbi jsval) SPELL their trailing engine
+
           // array param — the lifted signature matches directly, no
           // hidden slot.
           const hiddenRest = e.type.rest === true && e.type.restAbi === undefined;
@@ -3304,7 +3262,6 @@ function validateFunction(
     e: IrExpr & {
       kind:
         | "dynFrom"
-        | "dynFromJsval"
         | "dynCall"
         | "dynInvoke"
         | "dynObjLit"
@@ -3350,17 +3307,6 @@ function validateFunction(
         }
         if (e.liveRef && !liveDynRefEligible(vt)) {
           err(`live dynFrom of unsupported type ${vt.kind}`, e.loc);
-        }
-        break;
-      }
-      case "dynFromJsval": {
-        // The jsval→dyn crossing: exactly a jsval operand into a dyn
-        // result (the by-reference island wrap; scalars normalize at
-        // runtime).
-        checkExpr(e.value);
-        if (e.type.kind !== "dyn") err(`dynFromJsval must be dyn-typed, got ${e.type.kind}`, e.loc);
-        if (e.value.type.kind !== "jsval") {
-          err(`dynFromJsval operand must be jsval, got ${e.value.type.kind}`, e.loc);
         }
         break;
       }
@@ -4940,14 +4886,6 @@ function validateFunction(
   }
 
   function checkLibSpecialCall(e: IrExpr & { kind: "libCall" }): boolean {
-    if (e.fn === "island.castFail") {
-      // The deferred boundary failure's typed dummy: a promise (the
-      // only cast shape the frontend defers).
-      if (e.type.kind !== "promise") {
-        err(`libCall island.castFail must return a promise type, got ${e.type.kind}`, e.loc);
-      }
-      return true;
-    }
     if (e.fn === "global.undefRead") {
       // Always throws — the result type is whatever the declared type
       // of the undefined global mapped to (never materialized).
@@ -5667,167 +5605,6 @@ function validateFunction(
           reject.params[0]!.className !== "%Error"
         ) {
           err("promiseWithResolvers reject must be (%Error) => void", e.loc);
-        }
-        break;
-      }
-      default: {
-        const _exhaustive: never = e;
-        void _exhaustive;
-      }
-    }
-  }
-
-  function checkIslandExpr(
-    e: IrExpr & { kind: "jsMarshal" | "jsOp" | "jsExit" | "jsBridgePromise" },
-  ): void {
-    switch (e.kind) {
-      case "jsMarshal": {
-        checkExpr(e.value);
-        if (e.type.kind !== "jsval") err(`jsMarshal must be jsval, got ${e.type.kind}`, e.loc);
-        const src = e.value.type;
-        // The marshal direction admits qualifying closures (host-function
-        // wrapping) on top of the JSON-safe set; jsExit does not. Typed
-        // closures (per-param call-time conversion through the exit
-        // machinery) are the wider func shape.
-        // Typed arrays and URLs marshal IN (an engine typed-array copy /
-        // an engine URL built from the components) without ever joining
-        // the round-trip (JSON) set — the frontend's union lift narrows
-        // union arms before marshaling, so bare bytes/url operands are
-        // exactly what it produces.
-        if (
-          src.kind !== "bytes" &&
-          src.kind !== "url" &&
-          src.kind !== "dyn" && // dyn values deep-copy in (data kinds; the runtime throws on boxes)
-          // A STATIC promise crosses as a real engine thenable when its
-          // fulfillment is in the reverse bridge's payload domain
-          // (scr_jsval_from_promise — the async-callback return bridge).
-          !(src.kind === "promise" && islandPromisePayloadTag(src.inner) !== null) &&
-          !canMarshalIntoIsland(
-            src,
-            (id) => records.get(id),
-            (id) => unions.get(id),
-          ) &&
-          !canMarshalTypedFuncIntoIsland(
-            src,
-            (id) => records.get(id),
-            (id) => unions.get(id),
-          )
-        ) {
-          err(`jsMarshal of unmarshalable type ${src.kind}`, e.loc);
-        }
-        break;
-      }
-      case "jsOp": {
-        for (const a of e.args) checkExpr(a);
-        if (e.type.kind !== jsOpResultKind(e.op)) {
-          err(`jsOp ${e.op} must be ${jsOpResultKind(e.op)}, got ${e.type.kind}`, e.loc);
-        }
-        const named =
-          e.op === "getProp" ||
-          e.op === "setProp" ||
-          e.op === "callMethod" ||
-          e.op === "optCallMethod" ||
-          e.op === "globalGet" ||
-          e.op === "callSpread"; // the spread expression's source spelling (V8's nullish text spells it)
-        if (named !== (e.name !== undefined)) {
-          err(`jsOp ${e.op} ${named ? "requires" : "forbids"} a name`, e.loc);
-        }
-        const arity: Record<string, number | null> = {
-          add: 2,
-          sub: 2,
-          mul: 2,
-          div: 2,
-          mod: 2,
-          pow: 2,
-          lt: 2,
-          le: 2,
-          gt: 2,
-          ge: 2,
-          eq: 2,
-          neq: 2,
-          instanceOf: 2,
-          neg: 1,
-          plus: 1,
-          truthy: 1,
-          not: 1,
-          typeof: 1,
-          toStr: 1,
-          getProp: 1,
-          setProp: 2,
-          getIdx: 2,
-          setIdx: 3,
-          globalGet: 0,
-          undefLit: 0,
-          nullLit: 0,
-          iterNew: 1,
-          defineGetter: 3,
-          objSpread: 2,
-          callSpread: 3, // callee + pre array + spread source
-          callMethod: null,
-          optCallMethod: null,
-          callFn: null,
-          callFnThis: null,
-          construct: null, // receiver/callee + any number of args
-          objLit: null,
-          arrLit: null,
-          tplStrings: null, // variable length (objLit: key/value pairs; tplStrings: n cooked + n raw)
-        };
-        const want = arity[e.op];
-        if (want !== null && want !== undefined && e.args.length !== want) {
-          err(`jsOp ${e.op} takes ${want} arg(s), got ${e.args.length}`, e.loc);
-        }
-        if (
-          want === null &&
-          e.op !== "objLit" &&
-          e.op !== "arrLit" &&
-          e.op !== "tplStrings" &&
-          e.args.length < 1
-        ) {
-          err(`jsOp ${e.op} needs a receiver/callee arg`, e.loc);
-        }
-        if (e.op === "callFnThis" && e.args.length < 2) {
-          err("jsOp callFnThis needs a callee and receiver", e.loc);
-        }
-        if (e.op === "objLit" && e.args.length % 2 !== 0) {
-          err("jsOp objLit takes key/value pairs", e.loc);
-        }
-        if (e.op === "tplStrings" && e.args.length % 2 !== 0) {
-          err("jsOp tplStrings takes n cooked + n raw strings", e.loc);
-        }
-        for (const a of e.args) {
-          if (a.type.kind !== "jsval")
-            err(`jsOp ${e.op} arg must be jsval, got ${a.type.kind}`, e.loc);
-        }
-        break;
-      }
-      case "jsExit": {
-        checkExpr(e.value);
-        expectType(e.value, JSVAL, "jsExit operand");
-        if (
-          !canExitIslandToType(
-            e.type,
-            (id) => records.get(id),
-            (id) => unions.get(id),
-          )
-        ) {
-          err(`jsExit to non-extractable type ${e.type.kind}`, e.loc);
-        }
-        break;
-      }
-      case "jsBridgePromise": {
-        checkExpr(e.value);
-        expectType(e.value, JSVAL, "jsBridgePromise operand");
-        // The settled engine value crosses as a HANDLE (or not at all) —
-        // plus the ONE converting payload: an `any[]`-declared
-        // fulfillment exits Array.isArray-gated by reference AT THE
-        // SETTLE (SCR_ISLP_JSVAL_ARR); every other typed use exits later.
-        if (
-          e.type.kind !== "promise" ||
-          (e.type.inner.kind !== "jsval" &&
-            e.type.inner.kind !== "void" &&
-            !(e.type.inner.kind === "array" && e.type.inner.elem.kind === "jsval"))
-        ) {
-          err("jsBridgePromise must be a promise of jsval, void, or jsval-element array", e.loc);
         }
         break;
       }

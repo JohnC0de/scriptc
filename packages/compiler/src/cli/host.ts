@@ -9,7 +9,7 @@ import type {
 import type { NativeOptimization } from "../backend/optimization.js";
 import type { ProvenanceSources } from "../frontend/provenance-registry.js";
 
-export type NativeCacheWarmProfile = "runtime" | "tls" | "dynamic";
+export type NativeCacheWarmProfile = "runtime" | "tls";
 
 /** Only host operations vary between the seed and installed compiler. */
 export interface CliHost {

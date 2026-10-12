@@ -21,7 +21,6 @@ test.each(["Child.count++", "++Child.count", "Child.count--", "--Child.count"])(
           (d) => d.code === "SC1090" && d.message.includes("assigning the inherited static"),
         ).length,
       ).toBe(2);
-      expect(coverage.stats.statementsIsland).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

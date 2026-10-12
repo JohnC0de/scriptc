@@ -1,35 +1,4 @@
-/* Regular expressions (see scr_runtime.h for the API contract).
- *
- * The engine is quickjs-ng's libregexp — the exact ECMAScript regex
- * implementation the dynamic island uses — compiled standalone (libregexp.c
- * + libunicode.c; cutils is header-only) and linked ONLY into programs that
- * contain a regex literal. This file is likewise regex-only: it is NOT in
- * the always-compiled runtime source list (see native-toolchain.ts), so regex-free
- * programs keep a byte-identical link line.
- *
- * - Each literal evaluation creates a refcounted regex with fresh state.
- *   Instances share an immortal template per (pattern, flags) pair. The
- *   template compiles and caches bytecode LAZILY on first use; a pattern
- *   lre_compile rejects aborts with a clear
- *   message (Node throws SyntaxError at parse time — documented divergence;
- *   rare, since tsc's parser has already syntax-checked the literal).
- * - ASCII subjects borrow their existing bytes; other subjects use a
- *   per-call UTF-16 conversion (exec/test keep the last long subject's
- *   decoding, see scr_regex_input_init_cached). Both engine representations report UTF-16
- *   code-unit indices, matching .length/slice/charCodeAt.
- * - Match loops mirror quickjs.c's own (JS_RegExpDelete /
- *   js_regexp_Symbol_replace): capture buffers are sized by
- *   lre_get_alloc_count (NOT capture_count*2 — the executor writes
- *   temporary registers past the capture slots), unmatched groups leave
- *   NULL pointers, and zero-length matches advance by one code unit — or by
- *   a whole surrogate pair under /u (AdvanceStringIndex).
- * - Global and sticky exec/test use numeric lastIndex and update or reset
- *   it after matching. String matching/replacement follows its own state
- *   rules; matchAll, search, and split preserve the original regex state.
- * - One-byte (ASCII) subjects run a native matcher translated from the same
- *   bytecode when the pattern stays inside its subset (scr_regex_native.h);
- *   it reports lre_exec's exact captures, so every loop below is shared.
- */
+
 #include "scr_runtime.h"
 
 #include <stdio.h>
@@ -44,18 +13,6 @@ static void scr_regex_oom(void) {
   scr_trap("scriptc: out of memory\n");
 }
 
-/* ── libregexp host hooks ─────────────────────────────────────────────
- * Static builds provide the minimal hooks (malloc-backed, no interrupt,
- * no stack guard — patterns come from source literals and the executor's
- * backtrack stack is heap-allocated). --dynamic builds MUST NOT define
- * them: the engine archive's quickjs.c already does, with the opaque
- * interpreted as the island's JSContext — so under SCR_DYNAMIC every
- * lre_compile/lre_exec call here passes the island's context instead
- * (forcing lazy engine init on first regex use).
- */
-#ifdef SCR_DYNAMIC
-static void *lre_opaque(void) { return scr_island_lre_opaque(); }
-#else
 static void *lre_opaque(void) { return NULL; }
 
 bool lre_check_stack_overflow(void *opaque, size_t alloca_size) {
@@ -77,14 +34,6 @@ void *lre_realloc(void *opaque, void *ptr, size_t size) {
   }
   return realloc(ptr, size);
 }
-#endif /* SCR_DYNAMIC */
-
-/* ── lazy compilation ─────────────────────────────────────────────────
- * Compiled bytecodes are cached on the immortal ScrRegex statics and freed
- * at exit through lre_realloc (registered AFTER the first compile, so under
- * --dynamic it runs before the LIFO-later island teardown and the island's
- * allocation audit sees the bytecode gone).
- */
 
 static SCR_TL ScrRegex **scr_compiled = NULL;
 static SCR_TL size_t scr_compiled_len = 0, scr_compiled_cap = 0;
@@ -985,7 +934,6 @@ ScrStr *scr_regex_replace_callback(ScrStr *s, ScrRegex *re, ScrDyn *callback, bo
   scr_regex_input_dispose(&input);
   return scr_jb_finish(&output);
 }
-
 
 /* The pinned Node ANSI matcher derives from ansi-regex, copyright (c)
  * Sindre Sorhus <sindresorhus@gmail.com>, used under the MIT license:

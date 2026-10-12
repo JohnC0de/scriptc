@@ -1,6 +1,6 @@
 # Static scriptc and Test262
 
-This runner compiles Test262 programs with `dynamic: false` and scriptc's default backend selection, then executes native binaries in separate processes. `upstream.json` pins the Test262 revision, archive checksum, complete snapshot digest, and unmodified vendored regression inputs. Test262's BSD license is retained in `vendor/LICENSE`.
+This runner compiles Test262 programs with scriptc's native compiler, then executes native binaries in separate processes. `upstream.json` pins the Test262 revision, archive checksum, complete snapshot digest, and unmodified vendored regression inputs. Test262's BSD license is retained in `vendor/LICENSE`.
 
 Run the offline regression profile from the repository root:
 

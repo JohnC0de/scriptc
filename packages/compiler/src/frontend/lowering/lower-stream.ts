@@ -1660,11 +1660,7 @@ export function lowerStreamModuleCall(
       const argV = lowerer.lowerExpr(args[0]!);
       const argInfo =
         argV.type.kind === "object" ? lowerer.classes.get(argV.type.className) : undefined;
-      if (
-        argV.type.kind !== "dyn" &&
-        argV.type.kind !== "jsval" &&
-        !streamSidesOf(lowerer, argInfo)
-      ) {
+      if (argV.type.kind !== "dyn" && !streamSidesOf(lowerer, argInfo)) {
         lowerer.noLowering(
           `stream/consumers.${bi.member} over a value that is not a stream`,
           call,

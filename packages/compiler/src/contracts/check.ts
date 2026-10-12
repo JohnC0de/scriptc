@@ -768,7 +768,7 @@ class Int32Contracts {
         else if (dynamic.has(family))
           this.refuse(
             note,
-            "instances of the class reach dynamic code (any, unknown casts, islands) where a store to the field is not checked",
+            "instances of the class reach dynamic code (any or unknown casts) where a store to the field is not checked",
             "keep instances of this class out of any-typed values, or remove Int32",
           );
       }
@@ -1516,7 +1516,7 @@ class ImmutableContracts {
           if (PASS_THROUGH.has(e.kind) || OBSERVE.has(e.kind)) return;
           if (e.kind === "fieldGet" || e.kind === "recordGet" || e.kind === "arrayGet") return;
           // Any other parent: a derived child goes somewhere this pass does
-          // not follow (dynamic conversions, islands, runtime helpers).
+          // not follow (dynamic conversions, runtime helpers).
           everyExprChild(
             e,
             (child) => {
@@ -1759,10 +1759,6 @@ function describeSink(e: IrExpr): string {
     case "dynObjLit":
     case "dynArrLit":
       return "dynamic (any or unknown) code";
-    case "jsOp":
-    case "jsMarshal":
-    case "jsExit":
-      return "the JavaScript island";
     case "intrinsic":
       return `the runtime (${e.name})`;
     default:

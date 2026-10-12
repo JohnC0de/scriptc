@@ -79,7 +79,6 @@ function checkReport(report: MappingReport): void {
     "HookIndexed:f64:string",
     "HookKeys:f64:string",
     "HookLiteral:f64:string",
-    "dynamic memo isolation",
   ]);
 }
 
@@ -158,7 +157,7 @@ for (const backend of ["llvm"] as const) {
           "--input-type=module",
           "--eval",
           `import { analyze, compile } from ${JSON.stringify(api)};
-         const options = { dynamic: false, ffiProfilePath: process.argv[2] };
+         const options = { ffiProfilePath: process.argv[2] };
          const { coverage } = analyze(process.argv[1], options);
          const built = await compile(process.argv[1], {
            ...options, backend: process.argv[3], optimization: 'dev', sanitize: process.argv[4] === '1',
@@ -184,7 +183,6 @@ for (const backend of ["llvm"] as const) {
       expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.stats.functionsSkipped).toBe(0);
       if (!built.ok)
         throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

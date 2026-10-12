@@ -47,7 +47,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: join(dir, "program"),
         backend,
-        dynamic: false,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });
       if (!built.ok) throw new Error(built.diagnostics.map((d) => d.message).join("\n"));

@@ -294,7 +294,7 @@ export function lowerLambda(
       loc,
       funcType.rest === true &&
         funcType.restAbi === undefined &&
-        !shapes.some((s) => s.mode === "dynRest" || s.mode === "islandRest"),
+        !shapes.some((s) => s.mode === "dynRest"),
     );
 
     let body: IrStmt[];
@@ -417,10 +417,7 @@ export function lowerLambda(
     }));
     // A REST-MARKED value type hides one synthetic trailing dyn-array
     // param in the lifted function (the boxed call thunk fills it) —
-    // the fence lambda must spell that slot too or the validator's
-    // closure-signature check trips (SC9001). Island rest types SPELL
-    // their trailing engine-array param, so funcType.params already
-    // covers those.
+    // the fence lambda must spell that slot too to preserve its ABI.
     if (funcType.rest === true && funcType.restAbi === undefined) {
       params.push({ localId: "%pfrest", name: "%pfrest", type: DYN });
     }

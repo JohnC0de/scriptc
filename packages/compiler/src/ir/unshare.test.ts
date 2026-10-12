@@ -57,7 +57,7 @@ function sharedRead(): { mod: IrModule; read: IrExpr } {
     },
   ];
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [

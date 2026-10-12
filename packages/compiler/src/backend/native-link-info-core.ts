@@ -16,13 +16,11 @@ import type { NativeTargetSpec } from "./targets.js";
 
 export interface NativeLinkFeatures {
   workers?: boolean;
-  dynamic: boolean;
   regex: boolean;
   copying: boolean;
   textDecoderLegacy: boolean;
   fileHandle: boolean;
   fetch: boolean;
-  netIsland: boolean;
   zlib: boolean;
   assert: boolean;
   inspect: boolean;

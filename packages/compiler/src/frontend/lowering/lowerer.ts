@@ -56,19 +56,11 @@ import {
   deferredReadHelper,
 } from "./coercions/unions.js";
 import {
-  jsvalLiftable,
-  jsvalLiftExpr,
-  unionToJsvalHelper,
-  recordToJsvalHelper,
-  arrayToJsvalHelper,
-  arrayToJsvalArrayHelper,
-} from "./coercions/island.js";
-import {
   lowerUtilTypeValue,
   pathModuleValue,
   utilTypesModuleValue,
 } from "./lower-builtin-values.js";
-import { everyExprChild, everyStmtChild, transformStmtList } from "../../ir/traverse.js";
+import { transformStmtList } from "../../ir/traverse.js";
 import { RuntimeOptionalProvenance } from "./runtime-optional-provenance.js";
 import { presentAtUse, reassignedBindings } from "./runtime-optional-guards.js";
 import { NarrowingStability } from "./narrowing-stability.js";
@@ -122,7 +114,7 @@ import { literalValues } from "../literal-values.js";
 import { discriminantOwners, literalUnionArm, type UnionLiteral } from "../union-discriminants.js";
 import type { ScrDiagnostic } from "../../diagnostics/diagnostic.js";
 import {
-  anyOpRequiresDynamicDiag,
+  unsupportedAnyOperationDiag,
   blockedBindingUseDiag,
   checkerPanicDiag,
   componentTypeDiag,
@@ -133,9 +125,8 @@ import {
   noLoweringDiag,
   overloadedSignatureTypeDiag,
   recordShapeMismatchDiag,
-  requiresDynamicApiDiag,
-  requiresDynamicPackageDiag,
-  requiresDynamicTypeDiag,
+  unsupportedNativeApiDiag,
+  unsupportedPackageValueDiag,
   unionMismatchDiag,
   UNSUPPORTED,
   unsupportedDiag,
@@ -162,9 +153,6 @@ import {
   canAdaptDynFuncTo,
   canDynCheckTo,
   canConvertToDyn,
-  canCrossIslandBoundary,
-  canExitIslandToType,
-  canMarshalTypedFuncIntoIsland,
   DYN,
   DYN_HANDLE_KINDS,
   F64,
@@ -176,7 +164,6 @@ import {
   isSupportedMapValue,
   isUndefinedArmedUnion,
   isUnitType,
-  JSVAL,
   NULL_T,
   RUNTIME_ERROR_CLASSES,
   STRING,
@@ -184,7 +171,6 @@ import {
   UNDEFINED_T,
   VOID,
 } from "../../ir/ir.js";
-import type { DynamicImportResolution, NpmBuiltinUse, NpmLazyTrap } from "../npm.js";
 import { provenanceActive } from "../provenance-registry.js";
 import {
   ambientDtsPath,
@@ -212,7 +198,7 @@ import {
   describeComponentBlocker,
   describeRecordMemberBlocker,
   formatIrType,
-  ISLAND_AMBIENT_TYPES,
+  FETCH_AMBIENT_TYPES,
   isUnitOnlyTsType,
   isWorkerHandleType,
   jsOpenObjectType,
@@ -226,9 +212,7 @@ import {
 } from "../type-mapper.js";
 import {
   type CompoundOp,
-  type IslandFnEntry,
-  boundaryIntoIslandMsg,
-  boundaryOutOfIslandMsg,
+  type StdlibFnEntry,
   type BuiltinModuleFn,
   builtinConstLit,
   builtinModuleConstOf,
@@ -378,8 +362,6 @@ import {
 } from "./lower-event-emitter.js";
 import {
   builtinImportOf,
-  createRequireBindingDecl,
-  createRequireNamespaceDecl,
   createRequireProgramModuleOf,
   createRequireSpecOf,
   fencedBuiltinImportOf,
@@ -439,15 +421,9 @@ import {
   fenceStaticReadableStreamMember,
   fenceStaticResponseMember,
   fenceUnsupportedFetchConstructorMember,
-  isIslandExpr,
-  islandFuncValueFence,
-  islandRegexpOf,
-  jsvalIn,
-  requireDynamicApi,
-  islandGlobalFnOf,
+  refuseUnsupportedApi,
+  stdlibGlobalFnOf,
   lowerAbortControllerNew,
-  lowerDynamicHeadersIteratorCall,
-  lowerDynamicHeadersSpread,
   lowerDynamicImportCall,
   lowerFetchCall,
   lowerFetchElementMethodCall,
@@ -461,12 +437,12 @@ import {
   lowerStaticReadableStreamNew,
   lowerStaticReadableStreamReaderCall,
   lowerStaticResponseCall,
-  lowerIslandMethodCall,
+  lowerStdlibMethodCall,
   lowerMathProperty,
   npmPackageOf,
   npmMemberFence,
   npmPackageOfSymbol,
-} from "./lower-island.js";
+} from "./lower-stdlib.js";
 import {
   lowerHttpHeadersElement,
   lowerNetModuleCall,
@@ -504,7 +480,6 @@ import {
   lowerDestructuringDecl,
   lowerDestructuringAssignParts,
   lowerBindingPattern,
-  lowerJsvalBindingPattern,
   checkBindingElement,
   bindPatternTarget,
   isParseArgsDynCheckerType,
@@ -599,56 +574,15 @@ export function own<T>(table: Record<string, T | undefined>, key: string): T | u
   return Object.hasOwn(table, key) ? table[key] : undefined;
 }
 
-/* ── the island boundary, in one voice ────────────────────────────────
- * Whether a value can cross between the static world and the island is
- * ONE question — canCrossIslandBoundary (ir.ts), asked here through
- * boundarySafe() — and each rejected direction has ONE message builder,
- * so the rule and its wording cannot drift apart across the implicit
- * coercion path, the explicit marshal path, and the exact-type fence. */
-
 export interface LowerStats {
   /** Statements the lowerer attempted (nested statements count individually;
    * statements inside a poisoned construct were never reached and don't). */
   statementsTotal: number;
   statementsFailed: number;
-  /** Statements that LOWERED but contain island constructs (jsOp/jsExit —
-   * package calls, island-backed lib members): they compile, but their
-   * work runs in the embedded engine. Only a --dynamic analysis produces
-   * these; coverage renders them as "compile dynamically". */
-  statementsIsland: number;
+
   /** Functions whose signature couldn't be analyzed (bodies not counted). */
   functionsSkipped: number;
 }
-
-/** IrStmt discriminants — the island walk below must not descend into
- * NESTED statements (each is counted individually by its own lowerStmts
- * visit; descending would attribute a nested island statement to every
- * enclosing construct too). The top-level statement object itself is
- * always visited. */
-const IR_STMT_KINDS = new Set([
-  "varDecl",
-  "assign",
-  "exprStmt",
-  "if",
-  "while",
-  "doWhile",
-  "switch",
-  "arraySet",
-  "arraySetLength",
-  "arraySetUndefined",
-  "arrayDelete",
-  "forOf",
-  "return",
-  "fieldSet",
-  "recordSet",
-  "break",
-  "continue",
-  "block",
-  "tryCatch",
-  "throw",
-  "rethrow",
-  "runtimeFence",
-]);
 
 /** Every identifier a binding name binds: the identifier itself, or all
  * identifiers of a (possibly nested) destructuring pattern in source
@@ -663,31 +597,6 @@ export function boundIdentifiersOf(name: ts.BindingName): ts.Identifier[] {
     out.push(...boundIdentifiersOf(el.name));
   }
   return out;
-}
-
-/** Inspect executable children directly, without boxing the statement tree
- * into checked-dynamic storage just to calculate coverage. */
-export function stmtUsesIsland(stmts: IrStmt | IrStmt[]): boolean {
-  // Keep the accounting boundary at the source statement: nested statement
-  // lists are counted by their own lowerStmts invocation.
-  const nested = (stmt: IrStmt): boolean =>
-    IR_STMT_KINDS.has(stmt.kind) || everyStmtChild(stmt, expr, nested);
-  const expr = (node: IrExpr): boolean => {
-    if (
-      node.kind === "jsOp" ||
-      node.kind === "jsExit" ||
-      node.kind === "jsBridgePromise" ||
-      (node.kind === "libCall" &&
-        (node.fn === "island.eval" ||
-          node.fn === "island.import" ||
-          node.fn === "island.importDyn" ||
-          node.fn === "island.castFail"))
-    )
-      return false;
-    return everyExprChild(node, expr, nested);
-  };
-  if (Array.isArray(stmts)) return !stmts.every((stmt) => everyStmtChild(stmt, expr, nested));
-  return !everyStmtChild(stmts, expr, nested);
 }
 
 /** Statements a never-lowered body would have contributed to the coverage
@@ -737,7 +646,7 @@ export interface LowerResult {
   stats: LowerStats;
   /** --provenance-sources only: per-file statement attribution (the
    * coverage report aggregates it per provenance package). */
-  statsByFile?: Map<string, { total: number; failed: number; island: number }>;
+  statsByFile?: Map<string, { total: number; failed: number }>;
   /** --provenance-sources only: diagnostics of elided pure-annotated dead
    * consts in fetched source modules — off the build, on the report. */
   provenanceElided?: ScrDiagnostic[];
@@ -747,22 +656,11 @@ export interface LowerResult {
   /** Compile-time-detectable behavior differences from Node (SC6xxx
    * divergence warnings) in the program's own modules. Never failures. */
   divergences?: ScrDiagnostic[];
-  /** --dynamic only: every Node builtin the embedded npm graph imports,
-   * shimmed or not — the coverage report's island honesty. */
-  npmBuiltins?: NpmBuiltinUse[];
-  /** --dynamic only: unresolvable specifiers reached ONLY by require()/
-   * import() edges — the build embeds Node's call-time error as a runtime
-   * trap; the coverage report lists them beside the builtins. */
-  npmLazyTraps?: NpmLazyTrap[];
 }
 
 export interface LowerOptions {
   /** Parser/checker services owned by the load; required for npm graph analysis. */
   frontendServices?: FrontendServices | undefined;
-  /** --dynamic: the island engine is linked, so island constructs
-   * (__island_eval) may lower. Off by default — without it they produce a
-   * requires-dynamic diagnostic instead. */
-  dynamic?: boolean;
   /** Coverage: additionally lower the unreached remainder (bodies nothing
    * on the entry path reaches) in a throwaway pass and report its
    * diagnostics and stats under `unreached` — the whole-program analysis
@@ -932,13 +830,12 @@ export function lowerToIr(
     process.stderr.write(`scriptc lowering ${JSON.stringify(event)}\n`);
     phaseLast = now;
   };
-  const dynamic = options.dynamic ?? false;
   const targetPlatform = options.targetPlatform ?? process.platform;
   const startupCrash = options.startupCrash ?? null;
   // Modules reachable only through literal import() of the program's own
   // files join the compiled graph here, ONCE, before any
   // pass constructs (nothing calls their %init at startup — the import()
-  // site's namespace builder does, on the engine microtask, Node's
+  // site's namespace builder does, on the native microtask, Node's
   // evaluation point for them). Inadmissible static cycles inside the
   // added subgraph are minted here and handed to reachable emit after this
   // extension of the shared array; no later pass re-walks the subgraph.
@@ -971,7 +868,7 @@ export function lowerToIr(
   const externalTypes = options.externalTypes ?? new Map<string, string>();
   const externalTypeSpecifiersByFile =
     options.externalTypeSpecifiersByFile ?? directExternalTypeSpecifiersByFile(externalTypes);
-  const validation = new Lowerer(program, entry, moduleOrder, dynamic, {
+  const validation = new Lowerer(program, entry, moduleOrder, {
     frontendServices: options.frontendServices,
     targetPlatform,
     startupCrash,
@@ -992,7 +889,7 @@ export function lowerToIr(
   const reachableEmit =
     ffiImports.length === 0
       ? validation
-      : new Lowerer(program, entry, moduleOrder, dynamic, {
+      : new Lowerer(program, entry, moduleOrder, {
           frontendServices: options.frontendServices,
           targetPlatform,
           startupCrash,
@@ -1019,7 +916,7 @@ export function lowerToIr(
   // historical compiler. This is a rare compatibility fallback; programs
   // without such a settled fence retain checker-backed IR exactly once.
   if (reachableEmit.requiresHistoricalOrderRelower) {
-    const emit = new Lowerer(program, entry, moduleOrder, dynamic, {
+    const emit = new Lowerer(program, entry, moduleOrder, {
       frontendServices: options.frontendServices,
       reachable,
       targetPlatform,
@@ -1075,7 +972,7 @@ export function lowerToIr(
     };
   else if (contracts.count > 0) result = { ...result, contracts };
   if (options.coverage !== true) return result;
-  const remainder = new Lowerer(program, entry, moduleOrder, dynamic, {
+  const remainder = new Lowerer(program, entry, moduleOrder, {
     frontendServices: options.frontendServices,
     reachable,
     remainder: true,
@@ -1103,31 +1000,6 @@ export function lowerToIr(
   };
 }
 
-/** The island-handle type a `import(...)` initializer gives a binding
- * whose DECLARED type has no static mapping (`Promise<typeof
- * import("./m")>` — module-namespace types don't map): the direct form
- * holds the static promise-of-handle, the awaited form holds the handle
- * itself. Null for every other initializer shape. */
-export function importCallHandleType(expr: ts.Expression | undefined): IrType | null {
-  if (!expr) return null;
-  let e = expr;
-  let awaited = false;
-  for (;;) {
-    if (ts.isParenthesizedExpression(e)) {
-      e = e.expression;
-    } else if (ts.isAwaitExpression(e)) {
-      awaited = true;
-      e = e.expression;
-    } else {
-      break;
-    }
-  }
-  if (ts.isCallExpression(e) && e.expression.kind === ts.SyntaxKind.ImportKeyword) {
-    return awaited ? JSVAL : { kind: "promise", inner: JSVAL };
-  }
-  return null;
-}
-
 /** The native namespace type produced by a literal static import() of a
  * compiled program module or supported Node builtin. This syntax-level
  * fallback is used where the checker exposes an anonymous builtin-module
@@ -1137,7 +1009,7 @@ export function staticImportNamespaceType(
   lowerer: Lowerer,
   expr: ts.Expression | undefined,
 ): IrType | null {
-  if (!expr || lowerer.dynamic) return null;
+  if (!expr) return null;
   let e = expr;
   let awaited = false;
   for (;;) {
@@ -1173,47 +1045,11 @@ export function staticImportNamespaceType(
   return awaited ? ns : { kind: "promise", inner: ns };
 }
 
-/** True when `expr` is a call that resolved to an overload SIGNATURE of a
- * source-implemented function whose implementation returns an island value
- * (`any` under --dynamic): tsc never checks overload return types against
- * the body — only the implementation signature is checked — so the
- * overload's return is an unverifiable claim about an island value. The
- * binding stores the HANDLE instead of trap-extracting the claimed type
- * (reconcileOverloadReturn keeps the call jsval by the same rule), and
- * uses dispatch to engine ops — exactly the value Node's binding holds.
- * Ambient (.d.ts) declarations never reach this: they have no compiled
- * implementation, so their calls lower through the island/builtin paths
- * whose validated exits keep the checker-trust trap. */
 export function uncheckedOverloadHandleCall(
-  lowerer: Lowerer,
-  expr: ts.Expression | undefined,
+  _lowerer: Lowerer,
+  _expr: ts.Expression | undefined,
 ): boolean {
-  if (!lowerer.dynamic || !expr) return false;
-  let e = expr;
-  while (ts.isParenthesizedExpression(e)) e = e.expression;
-  // Tagged templates are calls too (tag(strings, ...values)) and resolve
-  // overload sets the same way — foo1`${1}` against a TemplateStringsArray
-  // overload of an any-returning implementation stores the handle.
-  if (!ts.isCallExpression(e) && !ts.isTaggedTemplateExpression(e)) return false;
-  const rsig = lowerer.checker.getResolvedSignature(e);
-  const rdecl = rsig ? lowerer.checker.signatureDeclaration(rsig) : undefined;
-  if (!rsig || !rdecl) return false;
-  if (!(ts.isFunctionDeclaration(rdecl) || ts.isMethodDeclaration(rdecl)) || rdecl.body)
-    return false;
-  const name = rdecl.name;
-  const symbol = name ? lowerer.checker.getSymbolAtLocation(name) : undefined;
-  if (!symbol) return false;
-  const impl = lowerer.checker
-    .declarationsOf(symbol)
-    .find(
-      (d) =>
-        (ts.isFunctionDeclaration(d) || ts.isMethodDeclaration(d)) &&
-        (d as ts.FunctionDeclaration).body !== undefined,
-    );
-  if (!impl) return false;
-  const implSig = lowerer.checker.getSignatureFromDeclaration(impl);
-  if (!implSig) return false;
-  return lowerer.mapTypeOf(lowerer.checker.getReturnTypeOfSignature(implSig))?.kind === "jsval";
+  return false;
 }
 
 /** The JavaScript declaration fallback for unmappable binding types (see
@@ -1274,29 +1110,6 @@ export function ladderFenceExpr(
   };
 }
 
-/** The checked-dynamic declaration fallback for unmappable binding types
- * (see irTypeOf), two gates over one story:
- *
- * JAVASCRIPT files: `any` and every other inference residue is the
- * checked-dynamic 'unknown' kind, and array types keep their array-ness
- * with the fallback applied to the ELEMENT (any[]/never[] evolving arrays
- * become unknown[], so length/push/index still lower).
- *
- * TYPESCRIPT files: genuine checker-`any` residue ONLY — a bare `any`
- * binding (`flags & Any`), or a single-call-signature function type whose
- * only unmappable pieces are `any` (`(value: any) => value is string` —
- * the arrow the binding holds lowers those params to dyn, so the binding
- * keeps its func-ness with the same per-piece fallback). The honest
- * static subset of `any` is a binding whose VALUES are dyn-representable:
- * the binding is 'unknown' storage with the boundary conversions
- * coerceToExpected already applies (dynFrom into the slot, validated
- * dynCheck out) and per-site SC2011 fences for the operations the checked-dynamic tree
- * cannot carry JS-exactly (the island still lifts those). Every OTHER
- * unmappable TS type keeps its own diagnostic — annotations exist there,
- * and the fence names the real blocker. `--dynamic` builds never reach
- * this fallback for `any` (mapType answers jsval first).
- *
- * Null for void (no value exists to represent). */
 export function dynFallbackType(lowerer: Lowerer, node: ts.Node, t: ts.Type): IrType | null {
   if (t.flags & ts.TypeFlags.Void) return null;
   if (!isJsSourceFile(node.getSourceFile())) {
@@ -1462,12 +1275,7 @@ function jsFallbackFunctionType(lowerer: Lowerer, node: ts.Node, t: ts.Type): Ir
       decl !== undefined &&
       ts.isParameter(decl) &&
       (decl.questionToken !== undefined || decl.initializer !== undefined);
-    if (
-      optional &&
-      mapped.kind !== "dyn" &&
-      mapped.kind !== "jsval" &&
-      !lowerer.bareUndefinedArmedUnion(mapped)
-    ) {
+    if (optional && mapped.kind !== "dyn" && !lowerer.bareUndefinedArmedUnion(mapped)) {
       mapped = lowerer.withUndefinedArm(mapped);
     }
     return mapped;
@@ -2201,8 +2009,7 @@ export class Lowerer {
   runtimeOptionalType(t: IrType): IrType {
     if (t.kind === "union")
       return this.armTag(t.unionId, UNDEFINED_T) >= 0 ? t : (this.withUndefinedArmOf(t) ?? t);
-    if (t.kind === "void" || t.kind === "dyn" || t.kind === "jsval" || t.kind === "generator")
-      return t;
+    if (t.kind === "void" || t.kind === "dyn" || t.kind === "generator") return t;
     return this.withUndefinedArm(t);
   }
 
@@ -2480,33 +2287,21 @@ export class Lowerer {
    * falls back through the shared node (collectGlobals registers both). */
   readonly globalsByDeclNode = new Map<ts.Node, IrGlobal>();
   readonly globalsList: IrGlobal[] = [];
-  /** npm-import init statements (--dynamic), keyed by file AND import
-   * declaration: the island.import assignments/side-effect loads for that
-   * statement. lowerFileInit splices them into the importing file's %init
-   * header at the statement's position — Node evaluates each imported
-   * module (island packages included) where the import appears, so an
-   * `import "polyfill"` before an `import "./app.js"` runs the package
-   * top-level BEFORE app's init, not after. */
+
   readonly npmInitActions = new Map<ts.SourceFile, Map<ts.Statement, IrStmt[]>>();
   /** Per-file %init PRELUDE statements for JSON imports: bakeable DATA
    * assignments with no observable evaluation order of their own —
    * prepended by lowerFileInit so the bindings are live before any
    * top-level statement runs. */
   readonly jsonInitActions = new Map<ts.SourceFile, IrStmt[]>();
-  /** The embedded npm runtime graph (collectNpmImports), attached to the
-   * emitted module. Null without npm imports or without --dynamic. */
-  npmEmbedded: IrModule["embedded"] | null = null;
-  npmBuiltins: NpmBuiltinUse[] | null = null;
-  npmLazyTraps: NpmLazyTrap[] | null = null;
   /** Dynamic `import("literal")` resolutions, keyed
    * `fileName\u0000specifier` (collectDynamicImports fills it during npm
    * collection; lowerDynamicImportCall reads it per site). */
-  readonly dynImports = new Map<string, DynamicImportResolution>();
-  /** createRequire-require resolutions of BARE npm specifiers, keyed
-   * `fileName\u0000specifier` (collectCreateRequires fills it during npm
-   * collection under --dynamic — the require-condition entry key plus its
-   * embedded format; lowerCreateRequireCall reads it per site; "" marks a
-   * failed resolution already reported at collection). */
+  readonly dynImports = new Map<
+    string,
+    { kind: "program-module" } | { kind: "static-builtin"; module: string }
+  >();
+
   readonly createRequireImports = new Map<
     string,
     { entryKey: string; format: "esm" | "cjs" | "json" } | ""
@@ -2515,11 +2310,7 @@ export class Lowerer {
    * (lowerOwnModuleImport): every `import()` of the same program module
    * shares one builder. */
   readonly dynNsBuilders = new Map<ts.SourceFile, string>();
-  /** Parameters forced to the island-handle type (jsval) regardless of
-   * their checker type: then-handler params whose settled value is an
-   * engine handle (a dynamic import's namespace object) — paramShape's
-   * early-out. */
-  readonly jsvalParamOverrides = new Set<ts.ParameterDeclaration>();
+
   readonly checkedCallbackParams = new Set<ts.ParameterDeclaration>();
   /** Inline Promise.then parameters whose contextual type is a builtin
    * module namespace anonymous object. The settled native token is the
@@ -2609,7 +2400,7 @@ export class Lowerer {
   readonly stats: LowerStats = {
     statementsTotal: 0,
     statementsFailed: 0,
-    statementsIsland: 0,
+
     functionsSkipped: 0,
   };
 
@@ -2748,25 +2539,23 @@ export class Lowerer {
    * "did the PACKAGE's statements compile static?" per provenance
    * package. Only populated while the registry is active; the remainder
    * pass skips it (attribution describes the build). */
-  readonly statsByFile = new Map<string, { total: number; failed: number; island: number }>();
+  readonly statsByFile = new Map<string, { total: number; failed: number }>();
 
   /** Bumps the per-file attribution counter (no-op unless provenance is
    * active and this is the emit/discovery lane — mirror the CALLER's
    * suppressStats guard, this method only gates remainder). */
-  bumpFileStat(file: string, kind: "total" | "failed" | "island"): void {
+  bumpFileStat(file: string, kind: "total" | "failed"): void {
     if (this.remainder || !provenanceActive()) return;
     let s = this.statsByFile.get(file);
-    if (!s) this.statsByFile.set(file, (s = { total: 0, failed: 0, island: 0 }));
+    if (!s) this.statsByFile.set(file, (s = { total: 0, failed: 0 }));
     if (kind === "total") s.total += 1;
     else if (kind === "failed") s.failed += 1;
-    else s.island += 1;
   }
 
   constructor(
     readonly program: ts.Program,
     readonly entry: ts.SourceFile,
     readonly moduleOrder: ts.SourceFile[],
-    readonly dynamic: boolean,
     mode: LowererMode = {},
   ) {
     this.frontendServices = mode.frontendServices;
@@ -2868,7 +2657,6 @@ export class Lowerer {
       isNpmFile: this.isNpmFile,
       isExternalTypeFile: (sf) =>
         this.externalTypeSpecifiersByFile.has(tsgoPath(resolve(sf.fileName))),
-      dynamic: this.dynamic,
       typeMemo: this.typeMemo,
       canMemoizeType: () =>
         this.typeParamBindings === null &&
@@ -4071,7 +3859,6 @@ export class Lowerer {
         !element ||
         element.kind === "void" ||
         element.kind === "dyn" ||
-        element.kind === "jsval" ||
         element.kind === "generator"
       )
         return null;
@@ -4104,13 +3891,12 @@ export class Lowerer {
         return false;
       const object = init.arguments[0];
       const objectType = object ? this.mapTypeOf(this.typeOf(object)) : null;
-      return objectType?.kind === "dyn" || objectType?.kind === "jsval";
+      return objectType?.kind === "dyn";
     };
     const addUndefined = (t: IrType): IrType => {
       if (t.kind === "union")
         return this.armTag(t.unionId, UNDEFINED_T) >= 0 ? t : (this.withUndefinedArmOf(t) ?? t);
-      if (t.kind === "void" || t.kind === "dyn" || t.kind === "jsval" || t.kind === "generator")
-        return t;
+      if (t.kind === "void" || t.kind === "dyn" || t.kind === "generator") return t;
       return this.withUndefinedArm(t);
     };
     const fieldName = (node: ts.PropertyAccessExpression): string => node.name.text;
@@ -4335,12 +4121,7 @@ export class Lowerer {
             // checker. The array's element ABI describes every value a
             // position may hold after that call, so bind from that type.
             const mapped = sourceType.elem;
-            if (
-              mapped &&
-              mapped.kind !== "void" &&
-              mapped.kind !== "dyn" &&
-              mapped.kind !== "jsval"
-            ) {
+            if (mapped && mapped.kind !== "void" && mapped.kind !== "dyn") {
               const widened =
                 mapped.kind === "union"
                   ? this.withUndefinedArmOf(mapped)
@@ -4700,7 +4481,7 @@ export class Lowerer {
       if (mapped?.kind === "promise") mapped = mapped.inner;
       const anyElements =
         mapped?.kind === "array"
-          ? mapped.elem.kind === "dyn" || mapped.elem.kind === "jsval"
+          ? mapped.elem.kind === "dyn"
           : mapped === null &&
             this.checker.isArrayType(checkerType) &&
             !this.checker.isTupleType(checkerType) &&
@@ -4882,7 +4663,6 @@ export class Lowerer {
           mapped.kind === "record" ||
           mapped.kind === "object" ||
           mapped.kind === "dyn" ||
-          mapped.kind === "jsval" ||
           mapped.kind === "union"
         );
       },
@@ -5304,10 +5084,7 @@ export class Lowerer {
           }
           const restAt = sig.params.findIndex(
             (shape) =>
-              shape.mode === "rest" ||
-              shape.mode === "dynRest" ||
-              shape.mode === "islandRest" ||
-              shape.mode === "arguments",
+              shape.mode === "rest" || shape.mode === "dynRest" || shape.mode === "arguments",
           );
           node.arguments.forEach((arg, argumentIndex) => {
             const i = restAt >= 0 && argumentIndex >= restAt ? restAt : argumentIndex;
@@ -5780,8 +5557,7 @@ export class Lowerer {
     }
 
     // Each file's top-level statements form its run-once init function.
-    // %main calls only the ENTRY's init: each init's hoisted import header
-    // runs its dependencies (npm island loads at their import positions),
+    // %main calls only the entry's init. Hoisted imports call their inits;
     // inline require statements call theirs mid-body, and the guards make
     // revisits cache hits — Node's evaluation order over the WHOLE graph
     // falls out of the nesting. The coverage remainder skips them — they
@@ -5873,8 +5649,6 @@ export class Lowerer {
         stats: this.stats,
         ...(this.statsByFile.size > 0 ? { statsByFile: this.statsByFile } : {}),
         ...(this.provenanceElided.length > 0 ? { provenanceElided: this.provenanceElided } : {}),
-        ...(this.npmBuiltins ? { npmBuiltins: this.npmBuiltins } : {}),
-        ...(this.npmLazyTraps ? { npmLazyTraps: this.npmLazyTraps } : {}),
       };
     }
 
@@ -5978,14 +5752,13 @@ export class Lowerer {
       this.diags.length > 0
         ? null
         : {
-            irVersion: 15,
+            irVersion: 16,
             sourceFile: this.entry.fileName,
             functions,
             classes: artifacts.classes,
             records: artifacts.records,
             unions: artifacts.unions,
             globals: this.globalsList,
-            ...(this.npmEmbedded ? { embedded: this.npmEmbedded } : {}),
             entry: ENTRY_NAME,
             ...(this.usesWorkers ? { workers: true } : {}),
             ...(isNodeEsmFile(this.entry, this.program) ? {} : { commonJsEntry: true }),
@@ -6000,8 +5773,6 @@ export class Lowerer {
       stats: this.stats,
       ...(this.statsByFile.size > 0 ? { statsByFile: this.statsByFile } : {}),
       ...(this.provenanceElided.length > 0 ? { provenanceElided: this.provenanceElided } : {}),
-      ...(this.npmBuiltins ? { npmBuiltins: this.npmBuiltins } : {}),
-      ...(this.npmLazyTraps ? { npmLazyTraps: this.npmLazyTraps } : {}),
     };
   }
 
@@ -6729,23 +6500,14 @@ export class Lowerer {
     );
   }
 
-  /** The dynamic-family fence for an OPERATION on an `any`-origin
-   * checked-dynamic value that only the engine can execute (operators,
-   * iteration, computed member names, ...). Carries SC2011 — the same
-   * code as the `any` type fence — so the coverage report groups it with
-   * the dynamic-capable family and the two-tier retry knows the island
-   * lifts the site. Use exactly when the blocking operand IS dyn-typed
-   * and its checker type is `any`-flavored; genuine `unknown` keeps the
-   * SC1100-family fences (tsc constrains what unknown can do, so those
-   * sites are checker-error territory, not engine territory). */
   anyOpFence(feature: string, node: ts.Node): never {
-    this.pushDiag(anyOpRequiresDynamicDiag(feature, locOf(node)));
+    this.pushDiag(unsupportedAnyOperationDiag(feature, locOf(node)));
     throw new PoisonError();
   }
 
   /** True when this expression's CHECKER type is `any`-flavored — the
    * gate anyOpFence's call sites use to tell `any`-origin dyn values
-   * (the engine could run the operation) from genuine `unknown` ones. */
+   * with an unsupported operation from genuine `unknown` ones. */
   anyOrigin(node: ts.Node): boolean {
     return (this.typeOf(node).flags & ts.TypeFlags.Any) !== 0;
   }
@@ -6769,12 +6531,11 @@ export class Lowerer {
     // fetch values map earlier to checked-dynamic handles and do not reach
     // here; constructor objects such as Headers still can.
     if (
-      !this.dynamic &&
       typeSym &&
-      (ISLAND_AMBIENT_TYPES as readonly string[]).includes(typeSym.name) &&
+      (FETCH_AMBIENT_TYPES as readonly string[]).includes(typeSym.name) &&
       this.isStdlibSymbol(typeSym)
     ) {
-      this.pushDiag(requiresDynamicApiDiag(`a value of type '${typeSym.name}'`, locOf(node)));
+      this.pushDiag(unsupportedNativeApiDiag(`a value of type '${typeSym.name}'`, locOf(node)));
       throw new PoisonError();
     }
     // ENUM OBJECTS (`typeof e` — a numeric enum's type carries the
@@ -6826,32 +6587,15 @@ export class Lowerer {
         this.pushDiag(noLoweringDiag(this.checker.typeToString(type), locOf(node)));
         throw new PoisonError();
       }
-      // The MEASURED island probe, same mechanism as the general dynamic
-      // reroute below: an index-signature shape the dynamic mapping
-      // accepts (an `any`-valued signature absorbing into an island
-      // object, jsval-entangled members) reports the retry-eligible
-      // SC2011 choice instead of the static recitation.
-      if (
-        !this.dynamic &&
-        !(widened.flags & ts.TypeFlags.Any) &&
-        mapType(widened, { ...this.typeCtx, dynamic: true }) !== null
-      ) {
-        this.pushDiag(requiresDynamicTypeDiag(this.checker.typeToString(type), locOf(node)));
-        throw new PoisonError();
-      }
+
       this.pushDiag(indexSignatureTypeDiag(this.checker.typeToString(type), locOf(node)));
       throw new PoisonError();
     }
-    // Package-declared types in a STATIC build: name the package, not the
-    // type — the per-package requires-dynamic diagnostic (and the coverage
-    // report's one-line-per-package attribution). Under --dynamic these
-    // types map to jsval, so reaching here means the type is genuinely
-    // unrepresentable (a jsval union arm, a jsval array element) — the
-    // generic type message tells that story better.
-    if (!this.dynamic) {
+    // Attribute an unsupported package type to its package.
+    {
       const pkg = this.npmPackageOf(widened);
       if (pkg) {
-        this.pushDiag(requiresDynamicPackageDiag(pkg, locOf(node)));
+        this.pushDiag(unsupportedPackageValueDiag(pkg, locOf(node)));
         throw new PoisonError();
       }
     }
@@ -6871,26 +6615,6 @@ export class Lowerer {
         this.pushDiag(genericSignatureTypeDiag(this.checker.typeToString(type), locOf(node)));
         throw new PoisonError();
       }
-    }
-    // A type the DYNAMIC mapping accepts (`any[]`, records/functions with
-    // `any`-typed members, .d.ts-declared shapes whose values are island
-    // handles): the honest per-site story is the dynamic-family choice, not
-    // the supported-types recitation — proved by re-running mapType with
-    // `dynamic: true`, never guessed from the type text. Probing is safe
-    // here: a diagnostic means this build already failed, so anything the
-    // probe interns or registers on the way is never emitted. Checked LAST
-    // so every more specific story above (island ambients, index
-    // signatures, per-package attribution, generic signatures) keeps its
-    // own fence class. Bare `any` is excepted: unsupportedTypeDiag's own
-    // SC2011 arm tells that story with the stronger stay-static remedy
-    // ('unknown' + a checked cast).
-    if (
-      !this.dynamic &&
-      !(widened.flags & ts.TypeFlags.Any) &&
-      mapType(widened, { ...this.typeCtx, dynamic: true }) !== null
-    ) {
-      this.pushDiag(requiresDynamicTypeDiag(this.checker.typeToString(type), locOf(node)));
-      throw new PoisonError();
     }
     // STANDARD-LIBRARY nominal provenance, decided once: interface/class
     // declarations in the lib's own files (Date, ArrayBuffer, WeakMap, the
@@ -7030,17 +6754,6 @@ export class Lowerer {
 
   fenceFetchObjectAssignment(target: ts.ObjectLiteralExpression, source: ts.Expression): void {
     return fenceFetchObjectAssignment(this, target, source);
-  }
-
-  lowerDynamicHeadersIteratorCall(
-    call: ts.CallExpression,
-    access: ts.ElementAccessExpression,
-  ): IrExpr | null {
-    return lowerDynamicHeadersIteratorCall(this, call, access);
-  }
-
-  lowerDynamicHeadersSpread(node: ts.Expression, type: IrType & { kind: "array" }): IrExpr | null {
-    return lowerDynamicHeadersSpread(this, node, type);
   }
 
   fenceStaticReadableStreamMember(
@@ -7262,34 +6975,6 @@ export class Lowerer {
     return isUndefinedArmedUnion(t, (id) => this.unions.get(id));
   }
 
-  /** canCrossIslandBoundary with this Lowerer's registries — THE test
-   * behind every marshal/exit decision (the implicit coercions, jsvalIn,
-   * the checked island-exit cast). Rejections that follow a false answer
-   * speak through boundaryIntoIslandMsg / boundaryOutOfIslandMsg. */
-  boundarySafe(t: IrType): boolean {
-    return canCrossIslandBoundary(
-      t,
-      (id) => this.shapes.get(id),
-      (id) => this.unions.get(id),
-    );
-  }
-
-  /** canExitIslandToType with this Lowerer's registries — the EXIT
-   * direction's slightly wider test (bare undefined-armed unions of
-   * JSON-safe data arms exit; the engine's undefined takes the undefined
-   * arm before the JSON round trip). */
-  boundaryExitSafe(t: IrType): boolean {
-    return canExitIslandToType(
-      t,
-      (id) => this.shapes.get(id),
-      (id) => this.unions.get(id),
-    );
-  }
-
-  isIslandExpr(node: ts.Expression): boolean {
-    return isIslandExpr(this, node);
-  }
-
   /** True when this node's CHECKER type is proven `any[]`/`unknown[]`,
    * directly or through the intersection tsc builds for a readonly tuple
    * union (`(Model | readonly [Model, Command]) & any[]`; TS7 distributes
@@ -7430,14 +7115,7 @@ export class Lowerer {
       }
       this.unsupported("SC1101", node);
     }
-    // jsval mismatches surviving coerceToExpected involve a type with no
-    // island representation (in) or no validated exit (out).
-    if (actual.kind === "jsval") {
-      this.unsupported("SC1090", node, boundaryOutOfIslandMsg(this.fmt(expected)));
-    }
-    if (expected.kind === "jsval") {
-      this.unsupported("SC1090", node, boundaryIntoIslandMsg(this.fmt(actual)));
-    }
+
     // Class-value mismatches: the pointed stories — a widening whose
     // constructor ABIs differ (construction through the slot would
     // dispatch a mismatched signature), or a structural flow between
@@ -7618,105 +7296,14 @@ export class Lowerer {
       const adapted = iteratorSlotAdapter(this, expr, expected);
       if (adapted) return adapted;
     }
-    // Island boundary, both directions. IN: any static value flowing into
+
     // an any-typed slot marshals implicitly (tsc allows the assignment;
     // the marshal is where its semantics live). OUT: an 'any' value
     // flowing into a typed slot compiles to a VALIDATED exit — like every
     // dyn→static edge, trust-but-verify: a lying `any` throws a catchable
     // TypeError instead of corrupting memory (SEMANTICS.md). Unmarshalable
     // and unextractable types fall through to requireExactShape's fences.
-    if (expected.kind === "jsval" && expr.type.kind !== "jsval") {
-      // Bare unit literals: the engine's own undefined/null (units have no
-      // other producers, so dropping the operand loses nothing).
-      if (isUnitType(expr.type)) {
-        return {
-          kind: "jsOp",
-          op: expr.type.kind === "undefinedT" ? "undefLit" : "nullLit",
-          args: [],
-          type: JSVAL,
-          loc: expr.loc,
-        };
-      }
-      // A CHECKED-DYNAMIC (dyn/'unknown') value entering the island (the
-      // `isJson ? JSON.parse(text) : islandParser(text)` config ternary):
-      // the dyn tree deep-copies into engine values — data kinds only; a
-      // dyn carrying a boxed function/handle/promise throws the catchable
-      // TypeError at runtime (trust-but-verify, like every boundary).
-      if (expr.type.kind === "dyn") {
-        return { kind: "jsMarshal", value: expr, type: JSVAL, loc: expr.loc };
-      }
-      if (this.boundarySafe(expr.type)) {
-        return { kind: "jsMarshal", value: expr, type: JSVAL, loc: expr.loc };
-      }
-      // Closures cross as host functions when their signature marshals —
-      // the same shapes jsvalIn admits at call arguments (`const f: any =
-      // (x: number) => x * 3` is the declaration-slot spelling of the
-      // package-callback pattern).
-      if (
-        expr.type.kind === "func" &&
-        canMarshalTypedFuncIntoIsland(
-          expr.type,
-          (id) => this.shapes.get(id),
-          (id) => this.unions.get(id),
-        )
-      ) {
-        return { kind: "jsMarshal", value: expr, type: JSVAL, loc: expr.loc };
-      }
-      // jsval-BEARING composites (a record holding `any` fields, an array
-      // of such records) have no JSON marshal but an honest per-field
-      // island construction — see jsvalLiftExpr.
-      if (this.jsvalLiftable(expr.type)) {
-        return this.jsvalLiftExpr(expr, expr.loc);
-      }
-      // A RegExp flowing into an 'any' slot: the fresh-engine-RegExp
-      // rebuild (see jsvalIn's regex rule); computed regex values fall
-      // through to requireExactShape's fence.
-      if (expr.type.kind === "regex") {
-        const re = islandRegexpOf(expr);
-        if (re) return re;
-      }
-      return expr;
-    }
-    if (expr.type.kind === "jsval" && expected.kind !== "jsval") {
-      // The jsval→dyn crossing (the world unification's engine-handle
-      // kind): an 'any'-typed engine value flowing into an 'unknown'/
-      // 'object'/JS-residue slot wraps BY REFERENCE as the checked-dynamic tree's island
-      // kind — engine scalars normalize to native dyn kinds at wrap time,
-      // typeof/truthiness/String()/=== route to the engine, un-armed dyn
-      // walks fence loudly, and the value unwraps back identity-preserved
-      // (scr_jsval_from_dyn). Monotone under evolution/widening: a value
-      // wraps once at its first dyn edge and stays valid through every
-      // subsequent dyn slot; narrowing never changes representation.
-      // This wrap RETIRES the silent-wrong-answer fence-closure box for
-      // jsval members of dyn object literals (lowerDynObjectLiteral's
-      // coercion lands here first).
-      if (expected.kind === "dyn") {
-        return { kind: "dynFromJsval", value: expr, type: DYN, loc: expr.loc };
-      }
-      // An island value flowing into a PROMISE-typed slot (the inferred
-      // `loadPlugins` return — `Promise.all(...)` lowered engine-side
-      // against a Promise<any[]> inference): the island→static promise
-      // bridge — the engine promise settles a fresh static promise (void
-      // fulfillments drop, `any[]`-declared fulfillments exit
-      // Array.isArray-gated by reference at the settle, 'any' parks as an
-      // island handle). Only inner shapes the bridge can deliver take the
-      // arm; the rest keep the exit fence with the type named.
-      if (
-        expected.kind === "promise" &&
-        (expected.inner.kind === "void" ||
-          expected.inner.kind === "jsval" ||
-          (expected.inner.kind === "array" && expected.inner.elem.kind === "jsval"))
-      ) {
-        return { kind: "jsBridgePromise", value: expr, type: expected, loc: expr.loc };
-      }
-      // The exit set: everything round-trippable, plus bare undefined-armed
-      // unions of JSON-safe data arms (the engine's undefined takes the
-      // undefined arm before the JSON detour) — canExitIslandToType.
-      if (this.boundaryExitSafe(expected)) {
-        return { kind: "jsExit", value: expr, type: expected, loc: expr.loc };
-      }
-      return expr;
-    }
+
     // A TYPED value flowing into an 'unknown' slot (`const u: unknown = 5`,
     // an unknown-typed param/return, a dyn-valued index slot): the
     // static→dyn conversion — dynFrom, a DEEP COPY (the jsMarshal aliasing
@@ -7807,8 +7394,7 @@ export class Lowerer {
     // A dyn ('unknown') ACTUAL flowing into a typed slot the checker
     // approved (an assertion function's narrowing, the error-any world's
     // forgiven chains): the VALIDATED extraction — dynCheck, the
-    // checked-cast machinery, applied automatically. Trust-but-verify,
-    // exactly the island exit's stance: a value that doesn't match the
+    // checked-cast machinery, applied automatically. A value outside the
     // slot's type throws a catchable TypeError instead of misreading the
     // payload. Only dynCheck's own domain (JSON-representable types,
     // undefined-armed unions of those, bytes<u8>, the %Error root)
@@ -8129,18 +7715,16 @@ export class Lowerer {
       if (lift) return this.applyWidthLift(lift, expr, expected, expr.loc);
       // Arms OUTSIDE widthLiftPlan's domain keep the historic per-arm
       // widthCoerce probe (first match): index-signature record arms (the
-      // overflow CAPTURE helper owns their reshapes) and `any[]` arms
-      // (the island-boundary per-element lift). Bounded to those arm
-      // shapes so the plan's ambiguity rule for record/array lifts is
-      // never undone by a first-match fallback.
+      // overflow CAPTURE helper owns their reshapes). Exclude shapes
+      // already owned by the plan so first-match fallback cannot undo
+      // its ambiguity rule for record/array lifts.
       {
         const def = this.unions.get(expected.unionId);
         if (def) {
           for (let i = 0; i < def.arms.length; i++) {
             const arm = def.arms[i]!;
             const boundaryArm =
-              (arm.kind === "record" && this.shapes.get(arm.shapeId)?.indexValue !== undefined) ||
-              (arm.kind === "array" && arm.elem.kind === "jsval");
+              arm.kind === "record" && this.shapes.get(arm.shapeId)?.indexValue !== undefined;
             if (!boundaryArm) continue;
             const w = this.widthCoerce(expr, arm);
             if (w) {
@@ -8348,34 +7932,6 @@ export class Lowerer {
     return deferredReadHelper(this, fromId, target, loc);
   }
 
-  jsvalLiftable(t: IrType, visiting: Set<string> = new Set()): boolean {
-    return jsvalLiftable(this, t, visiting);
-  }
-
-  jsvalLiftExpr(e: IrExpr, loc: SrcLoc): IrExpr {
-    return jsvalLiftExpr(this, e, loc);
-  }
-
-  unionToJsvalHelper(unionId: string, loc: SrcLoc): string {
-    return unionToJsvalHelper(this, unionId, loc);
-  }
-
-  recordToJsvalHelper(shapeId: string, loc: SrcLoc): string {
-    return recordToJsvalHelper(this, shapeId, loc);
-  }
-
-  arrayToJsvalHelper(elem: IrType, loc: SrcLoc): string {
-    return arrayToJsvalHelper(this, elem, loc);
-  }
-
-  arrayToJsvalArrayHelper(fromElem: IrType, loc: SrcLoc): string | null {
-    return arrayToJsvalArrayHelper(this, fromElem, loc);
-  }
-
-  jsvalIn(e: IrExpr, node: ts.Node): IrExpr {
-    return jsvalIn(this, e, node);
-  }
-
   /** THE coercion path for values flowing into a typed slot: union arms
    * wrap implicitly (coerceToExpected), then the exact-type fence runs
    * (SC2002 for record shapes, SC2003 for unions). Every slot-directed
@@ -8446,18 +8002,7 @@ export class Lowerer {
         }
       }
     }
-    let e =
-      this.dynamic &&
-      expr.type.kind === "dyn" &&
-      expected.kind === "array" &&
-      expected.elem.kind === "jsval"
-        ? {
-            kind: "jsExit" as const,
-            value: this.jsvalIn(expr, node),
-            type: expected,
-            loc: expr.loc,
-          }
-        : this.coerceToExpected(expr, expected);
+    let e = this.coerceToExpected(expr, expected);
     // Keep storage intact when ordinary widening already accepts it. Only
     // a destination needing a more specific class layout uses the site's
     // refinement and checked extraction.
@@ -8483,31 +8028,6 @@ export class Lowerer {
       e.value.type.kind === "array"
     ) {
       e = { ...e, liveRef: true };
-    }
-    // An 'any' value PROVABLY null/undefined (the unit literal itself, or
-    // a read of a binding nothing ever assigns a non-unit value) flowing
-    // implicitly into a primitive slot: the validated exit refuses units
-    // unconditionally, so every run would throw the boundary TypeError
-    // where Node proceeds silently. A failure certain at compile time is
-    // a fence, not a runtime surprise. Explicit casts keep their runtime
-    // checked-cast semantics (the cast lowering builds its own jsExit
-    // before this runs, so `e !== expr` skips them), and union/composite
-    // targets keep the runtime exit (an undefined-armed union ACCEPTS the
-    // engine's undefined; composite validation is dynCheck's business).
-    if (
-      e !== expr &&
-      e.kind === "jsExit" &&
-      (e.type.kind === "f64" || e.type.kind === "string" || e.type.kind === "bool")
-    ) {
-      const unit = this.provenUnitAnyOf(node, e.value);
-      if (unit !== null) {
-        this.unsupported(
-          "SC1090",
-          node,
-          `an 'any' value that is always ${unit} flowing into a '${this.fmt(expected)}' slot (nothing in the program gives this value another shape, and the island boundary's validated exit refuses ${unit} — every run would throw a TypeError where Node proceeds silently)`,
-          `give the binding a value other than ${unit} before this use, or keep the slot's type 'any'`,
-        );
-      }
     }
     // A closure that just BOXED into dyn takes its best-effort JS name
     // from the source node (identifier reads, named function expressions,
@@ -8552,32 +8072,14 @@ export class Lowerer {
         }
       }
     }
-    // A JS FUNC value outside the island marshal set flowing into a
-    // jsval slot (`withPlugins(getSupportInfoWithoutPlugins, 0)` — a
-    // wrapper built at module init around a function the run may never
-    // call): the crossing defers to a call-time fence closure instead of
-    // stopping the statement — jsvalIn's deferral, the implicit-coercion
-    // spelling.
-    if (expected.kind === "jsval" && e.type.kind === "func" && !typeEquals(e.type, expected)) {
-      const diagsBefore = this.diags.length;
-      try {
-        this.requireExactShape(node, e.type, expected);
-      } catch (err) {
-        if (!(err instanceof PoisonError)) throw err;
-        const fence = islandFuncValueFence(this, diagsBefore, node);
-        if (fence) return fence;
-        throw err;
-      }
-      return e;
-    }
+
     this.requireExactShape(node, e.type, expected);
     return e;
   }
 
   /** The unit an 'any' expression PROVABLY holds on every run, or null
-   * when no proof exists. Two spellings prove: the lowered value IS the
-   * engine unit literal (`null as any`, an any-contextual `undefined`),
-   * or the node is an identifier whose every declaration is a plain,
+   * when no proof exists. The node must be an identifier whose every
+   * declaration is a plain,
    * non-ambient `var`/`let`/`const` declarator under a variable STATEMENT
    * (catch bindings, for-of/for-in cursors, parameters, and imports all
    * fail this shape test — each receives values from elsewhere), each
@@ -8588,11 +8090,7 @@ export class Lowerer {
    * bindings are read-only, so cross-file writes don't exist). A hoisted
    * `var` read before its unit-initialized statement holds undefined —
    * also a unit — so the mixed case reports both names. */
-  provenUnitAnyOf(node: ts.Node, value: IrExpr): string | null {
-    if (value.kind === "jsOp" && value.args.length === 0) {
-      if (value.op === "undefLit") return "undefined";
-      if (value.op === "nullLit") return "null";
-    }
+  provenUnitAnyOf(node: ts.Node, _value: IrExpr): string | null {
     let n: ts.Node = node;
     while (ts.isParenthesizedExpression(n)) n = n.expression;
     if (!ts.isIdentifier(n)) return null;
@@ -8709,7 +8207,6 @@ export class Lowerer {
         const to = this.mapTypeOf(this.checker.getTypeFromTypeNode(asserted.type));
         if (
           from?.kind === "dyn" ||
-          from?.kind === "jsval" ||
           (from?.kind === "record" && to?.kind === "record" && !typeEquals(from, to))
         ) {
           this.noLowering(
@@ -8737,7 +8234,7 @@ export class Lowerer {
               this.isSubclassOf(from.className, to.className)),
         ),
       );
-    if (!preservesIdentity || value.kind === "dynCheck" || value.kind === "jsExit") {
+    if (!preservesIdentity || value.kind === "dynCheck") {
       this.noLowering(
         `collection key conversion from '${this.fmt(value.type)}' to '${this.fmt(expected)}' requiring a structural copy or dynamic conversion`,
         node,
@@ -8956,11 +8453,7 @@ export class Lowerer {
     if (value.kind === "unitLit") {
       return { kind: "dynFrom", value, type: DYN, loc: value.loc };
     }
-    // An ISLAND ('any') value: the by-reference jsval→dyn wrap — the same
-    // edge coerceToExpected converts (dyn slots accept engine values).
-    if (value.type.kind === "jsval") {
-      return { kind: "dynFromJsval", value, type: DYN, loc: value.loc };
-    }
+
     if (!this.dynConvertible(value.type)) {
       this.unsupported(
         "SC1100",
@@ -9196,18 +8689,7 @@ export class Lowerer {
     return { kind: "boolLit", value: true, type: BOOL, loc };
   }
 
-  /** The entry value of a binding JS initializes to `undefined` (an
-   * initializer-less declaration, a hoisted `var` before its statement):
-   * undefined-armed unions hold the interned undefined arm, and 'any'
-   * slots hold the ENGINE's undefined — tsc's definite-assignment
-   * analysis never guards `any` reads, so a jsval slot IS readable before
-   * any assignment and must never stay a C-level NULL (a validated exit
-   * or engine op on NULL is memory-unsafe, not a TypeError). Null for
-   * every other type: tsc rejects their pre-assignment reads. */
   unassignedSlotInit(type: IrType, loc: SrcLoc): IrExpr | null {
-    if (type.kind === "jsval") {
-      return { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc };
-    }
     return this.wrappedUndefined(type, loc);
   }
 
@@ -9844,25 +9326,19 @@ export class Lowerer {
           // identifier-param prologue's ternary), then destructure the
           // picked value.
           const abi = shape.type;
-          if (abi.kind === "dyn" || abi.kind === "jsval") {
-            // A DYNAMIC-TIER pattern source (`function f({} = a)` with
-            // `a: any` — jsval for island values, dyn for the checked-
-            // dynamic dyn): the slot holds its tier's undefined directly,
-            // so the default test is the runtime undefined test — then
-            // the pattern destructures the picked value.
+          if (abi.kind === "dyn") {
+            // The checked-value slot holds native undefined directly.
+            // Test it at runtime, then destructure the selected value.
             const dflt = defaultValue(decl.initializer, abi);
             const src = this.declareHiddenLocal("%psrc", abi);
             const inRef = (): IrExpr => ({ kind: "varRef", localId: slot.id, type: abi, loc });
-            const isUndef: IrExpr =
-              abi.kind === "jsval"
-                ? {
-                    kind: "jsOp",
-                    op: "eq",
-                    args: [inRef(), { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }],
-                    type: BOOL,
-                    loc,
-                  }
-                : { kind: "dynTest", test: "undefined", value: inRef(), type: BOOL, loc };
+            const isUndef: IrExpr = {
+              kind: "dynTest",
+              test: "undefined",
+              value: inRef(),
+              type: BOOL,
+              loc,
+            };
             prologue.push({
               kind: "varDecl",
               localId: src.id,
@@ -9959,25 +9435,20 @@ export class Lowerer {
       const name = (decl.name as ts.Identifier).text;
       if (shape.mode === "omittable" && shape.bodyType && decl.initializer) {
         const abi = shape.type;
-        if (abi.kind === "dyn" || abi.kind === "jsval") {
-          // A DYNAMIC-TIER defaulted param (`function f(x = a)` with
-          // `a: any` — jsval for island values, dyn for the checked-
-          // dynamic dyn): the slot holds its tier's undefined directly —
-          // the body local picks the default on the runtime test.
+        if (abi.kind === "dyn") {
+          // The checked-value slot holds native undefined directly;
+          // the body local selects the default with a runtime test.
           const loc = locOf(decl);
           const slot = this.declareHiddenLocal(name, abi);
           params.push({ localId: slot.id, name, type: abi });
           const inRef = (): IrExpr => ({ kind: "varRef", localId: slot.id, type: abi, loc });
-          const isUndef: IrExpr =
-            abi.kind === "jsval"
-              ? {
-                  kind: "jsOp",
-                  op: "eq",
-                  args: [inRef(), { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }],
-                  type: BOOL,
-                  loc,
-                }
-              : { kind: "dynTest", test: "undefined", value: inRef(), type: BOOL, loc };
+          const isUndef: IrExpr = {
+            kind: "dynTest",
+            test: "undefined",
+            value: inRef(),
+            type: BOOL,
+            loc,
+          };
           const dflt = defaultValue(decl.initializer, abi);
           const body = this.declareLocal(decl.name, name, abi, true);
           prologue.push({
@@ -10169,13 +9640,6 @@ export class Lowerer {
     return this.resolveKey(undefined);
   }
 
-  /** READ-ONLY twin of resolveLocal for PROBES (isIslandExpr): answers
-   * the nearest binding entry without boxing, threading, or predeclaring.
-   * resolveKey mutates capture state as a side effect, and a speculative
-   * island-ness query through a context that takes no captures (a plain
-   * declared function between the origin and the reference) was an ICE —
-   * the REAL lowering path still resolves (and diagnoses) the reference
-   * itself. */
   peekLocal(ident: ts.Identifier): IrLocal | null {
     let symbol = this.checker.getSymbolAtLocation(ident);
     if (
@@ -10387,88 +9851,7 @@ export class Lowerer {
       allowDynObject ||=
         srcType.kind === "dyn" && isParseArgsDynCheckerType(this, this.typeOf(pattern));
     }
-    // An ISLAND source (`const { readFileSync } = await import("fs")` —
-    // a namespace handle, or any 'any'-typed object): each bound name is
-    // an engine property read, mirroring the island property-read rule —
-    // a member the .d.ts declares as a primitive exits eagerly to the
-    // static type; everything else (including members whose declared
-    // types have no static mapping, like @types/node's function types)
-    // stays a HANDLE, and its use sites dispatch to engine ops. Patterns
-    // the element-wise walk cannot spell — ARRAY patterns (the iterator
-    // protocol), empty patterns (the coercion checks), holes, rest,
-    // defaults — run the REAL pattern in a synthesized engine function
-    // instead (lowerJsvalBindingPattern).
-    const elementWise =
-      srcType.kind === "jsval" &&
-      ts.isObjectBindingPattern(pattern) &&
-      pattern.elements.length > 0 &&
-      pattern.elements.every(
-        (el) =>
-          !el.dotDotDotToken &&
-          !el.initializer &&
-          el.name !== undefined &&
-          ts.isIdentifier(el.propertyName ?? el.name),
-      );
-    if (srcType.kind === "jsval" && !elementWise) {
-      if (lowerJsvalBindingPattern(this, pattern, srcRef, isLet, out)) return;
-      // No engine form (computed keys, untransportable defaults): fall
-      // through to the static fences below.
-    }
-    if (srcType.kind === "jsval" && ts.isObjectBindingPattern(pattern)) {
-      for (const el of pattern.elements) {
-        this.checkBindingElement(el);
-        // 7's BindingElement declares name optional (array elisions are
-        // nameless there); object-pattern elements always carry one.
-        if (el.name === undefined) continue;
-        const prop = el.propertyName ?? el.name;
-        if (!ts.isIdentifier(prop)) {
-          this.unsupported("SC1031", el, "destructuring with computed or non-identifier keys");
-        }
-        const loc = locOf(el);
-        const read: IrExpr = {
-          kind: "jsOp",
-          op: "getProp",
-          name: prop.text,
-          args: [srcRef()],
-          type: JSVAL,
-          loc,
-        };
-        if (!ts.isIdentifier(el.name)) {
-          // A nested pattern reads through its own handle temp.
-          const tmp = this.declareHiddenLocal("%destr", JSVAL);
-          out.push({ kind: "varDecl", localId: tmp.id, init: read, loc });
-          this.lowerBindingPattern(
-            el.name,
-            () => ({ kind: "varRef", localId: tmp.id, type: JSVAL, loc }),
-            JSVAL,
-            isLet,
-            out,
-          );
-          continue;
-        }
-        const declared = this.mapTypeOf(this.typeOf(el.name));
-        const primitive =
-          declared &&
-          (declared.kind === "f64" || declared.kind === "bool" || declared.kind === "string");
-        const value: IrExpr = primitive
-          ? { kind: "jsExit", value: read, type: declared, loc }
-          : read;
-        const symbol = this.checker.getSymbolAtLocation(el.name);
-        const g = symbol ? this.globalsBySymbol.get(symbol) : undefined;
-        if (g) {
-          out.push({
-            kind: "assign",
-            localId: g.id,
-            value: this.coerceInto(el.name, value, g.type),
-            loc,
-          });
-          continue;
-        }
-        const local = this.declareLocal(el.name, el.name.text, value.type, isLet);
-        out.push({ kind: "varDecl", localId: local.id, init: value, loc });
-      }
-      return;
-    }
+
     return lowerBindingPattern(
       this,
       pattern,
@@ -10500,106 +9883,6 @@ export class Lowerer {
   }
 
   lowerVarDecl(decl: ts.VariableDeclaration, isLet: boolean): IrStmt | null {
-    // ISLAND-HANDLE rescue (--dynamic): `const factory = (await
-    // import("./x.mjs")).default` / `const buf = islandReadFileSync(p)` —
-    // a binding whose DECLARED type either has no static mapping or has
-    // one no island value can EXIT to (bytes, functions, promises), but
-    // whose initializer is an island value. The declared type is a .d.ts
-    // surface over an engine value; the binding stays a HANDLE (jsval
-    // local) and typed use sites go through engine ops and validated
-    // exits like any island value. Exit-CAPABLE declared types (numbers,
-    // strings, JSON-safe composites, their undefined-armed unions) keep
-    // the standard path and its validated-exit machinery; so does
-    // everything non-island — including badType here when the
-    // initializer turns out not to be island-typed, which is exactly
-    // what the standard path would have reported.
-    // Only reference-shaped initializers are candidates (awaits, calls,
-    // member reads, identifiers, casts/parens over those): they are the
-    // island producers, and re-lowering one on the fall-through emits
-    // nothing twice — a lambda or literal initializer would (each
-    // lowering mints a fresh %fn), and is never an island value anyway.
-    const islandCandidate = (e: ts.Expression): boolean => {
-      let cur = e;
-      while (
-        ts.isParenthesizedExpression(cur) ||
-        ts.isAsExpression(cur) ||
-        ts.isTypeAssertion(cur) ||
-        ts.isNonNullExpression(cur)
-      ) {
-        cur = cur.expression;
-      }
-      if (
-        !ts.isAwaitExpression(cur) &&
-        !ts.isCallExpression(cur) &&
-        !ts.isPropertyAccessExpression(cur) &&
-        !ts.isElementAccessExpression(cur) &&
-        !ts.isIdentifier(cur)
-      ) {
-        return false;
-      }
-      // A lambda ANYWHERE inside (a call argument) would emit its %fn
-      // twice across the fall-through's re-lowering — skip those.
-      let lambda = false;
-      const scan = (n: ts.Node): void => {
-        if (lambda) return;
-        if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) {
-          lambda = true;
-          return;
-        }
-        ts.forEachChild(n, scan);
-      };
-      scan(cur);
-      return !lambda;
-    };
-    if (
-      this.dynamic &&
-      ts.isIdentifier(decl.name) &&
-      decl.initializer !== undefined &&
-      // `var` stays out: the rescue's block-positioned jsval local can't
-      // model the function-scoped hoisted binding (a redeclaration or an
-      // out-of-block read would split the variable in two) — vars take the
-      // standard path and its own fences.
-      (ts.getCombinedNodeFlags(decl) & ts.NodeFlags.BlockScoped) !== 0 &&
-      islandCandidate(decl.initializer) &&
-      // createRequire's plumbing decls are COMPILE-TIME erasures (the
-      // require binding and its builtin-namespace bindings) — never
-      // island values; the standard path's skips own them.
-      !createRequireBindingDecl(this, decl.name, decl.initializer) &&
-      !createRequireNamespaceDecl(this, decl.name, decl.initializer)
-    ) {
-      const mapped = this.mapTypeOf(this.typeOf(decl.name));
-      const handleOnly =
-        mapped === null ||
-        (mapped.kind !== "jsval" &&
-          mapped.kind !== "void" &&
-          !canExitIslandToType(
-            mapped,
-            (id) => this.shapes.get(id),
-            (id) => this.unions.get(id),
-          ));
-      const symbol = this.checker.getSymbolAtLocation(decl.name);
-      if (handleOnly && (!symbol || !this.globalsBySymbol.has(symbol))) {
-        const init = this.lowerExpr(decl.initializer);
-        if (init.type.kind === "jsval") {
-          const local = this.declareLocal(decl.name, decl.name.text, JSVAL, isLet);
-          return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
-        }
-        // The CHECKED-DYNAMIC twin of the handle rescue (the runtime-world
-        // local rule): an unmappable declared type over a dyn initializer
-        // (`const first = plugins[0]` — the checker spells 'string |
-        // object' while the read is a dyn keyed read) keeps the binding
-        // dyn; typed use sites ride validated extractions and the routed
-        // engine ops, exactly the JSON.parse-binding story.
-        if (mapped === null && init.type.kind === "dyn") {
-          const local = this.declareLocal(decl.name, decl.name.text, DYN, isLet);
-          return { kind: "varDecl", localId: local.id, init, loc: locOf(decl) };
-        }
-        if (mapped === null) this.badType(decl.name, this.typeOf(decl.name));
-        // A mappable declared type with a non-island initializer: the
-        // standard path owns it (the initializer lowered clean; re-running
-        // it re-produces the same IR with no duplicate diagnostics).
-      }
-    }
     return lowerVarDecl(this, decl, isLet);
   }
 
@@ -10683,13 +9966,6 @@ export class Lowerer {
     return nodeTypesOnlySymbol(this, sym);
   }
 
-  /** True for an npm package's shipped declaration files — under
-   * node_modules but NOT the standard library (typescript's own lib files
-   * live under node_modules too), or inside a registered workspace-linked
-   * package (a node_modules symlink whose realpath'd files carry no
-   * node_modules segment — workspace-registry.ts). The provenance half of the npm
-   * typing rule (package types are island handles) and of the per-package
-   * requires-dynamic attribution. */
   readonly isNpmFile = (sf: ts.SourceFile): boolean =>
     sf.isDeclarationFile &&
     (sf.fileName.includes("/node_modules/") || workspacePackageOfPath(sf.fileName) !== null) &&
@@ -10843,40 +10119,6 @@ export class Lowerer {
   }
 
   lowerAsExpression(expr: ts.AsExpression | ts.TypeAssertion): IrExpr {
-    // ISLAND value cast to a PROMISE type (`factory(opts) as Promise<Mod>`
-    // — the Node-typed async-API shape): promises never have a validated
-    // exit, so instead of refusing the build the cast DEFERS the failure
-    // to runtime — island.castFail evaluates the value (its side effects
-    // are real) and throws a catchable TypeError naming the target, so
-    // typed-but-never-executed code (a wasm decode path behind a
-    // rejecting import) still compiles and a reached cast fails loudly at
-    // the exact site. Claimed only when the source is island-typed by the
-    // checker (jsval, or a promise whose inner is a handle); a source
-    // that lowers to a real static promise keeps erasure — the standard
-    // path's rule for non-island inners. Static builds keep their
-    // per-site diagnostics.
-    if (this.dynamic) {
-      const srcMapped = this.mapTypeOf(this.typeOf(expr.expression));
-      const island =
-        srcMapped?.kind === "jsval" ||
-        (srcMapped?.kind === "promise" && srcMapped.inner.kind === "jsval");
-      if (island) {
-        const targetTs = this.checker.getTypeFromTypeNode(expr.type);
-        const target = this.mapTypeOf(targetTs);
-        if (target?.kind === "promise") {
-          const inner = this.lowerExpr(expr.expression);
-          if (inner.type.kind !== "jsval") return inner; // static promise: erasure
-          const loc = locOf(expr);
-          const name: IrExpr = {
-            kind: "strLit",
-            value: this.fmt(target),
-            type: STRING,
-            loc,
-          };
-          return { kind: "libCall", fn: "island.castFail", args: [inner, name], type: target, loc };
-        }
-      }
-    }
     return lowerAsExpression(this, expr);
   }
 
@@ -11028,8 +10270,6 @@ export class Lowerer {
   }
 
   lowerCall(expr: ts.CallExpression): IrExpr {
-    // Ambient fetch (native in static builds, island-backed under
-    // --dynamic) and dynamic import() claim their calls before the general
     // dispatch. The general identifier-call paths have no lowering for a
     // promise-returning ambient global, and `import` is a keyword callee no
     // identifier path matches.
@@ -11253,37 +10493,6 @@ export class Lowerer {
   }
 
   lowerNew(expr: ts.NewExpression): IrExpr {
-    // `new Uint8Array(handle)` (and the other typed-array ctors) over an
-    // ISLAND argument: the construction is an ENGINE operation — the
-    // engine's own constructor over the engine's own value (an Emscripten
-    // factory's `wasmBinary: new Uint8Array(buf)` where buf came off an
-    // island readFileSync) — and the instance stays a handle. The static
-    // bytes ctor cannot claim it (bytes never cross the boundary), so
-    // this preempts only when the single argument is island-typed;
-    // every static form keeps the standard path.
-    if (
-      this.dynamic &&
-      ts.isIdentifier(expr.expression) &&
-      expr.arguments?.length === 1 &&
-      !ts.isSpreadElement(expr.arguments[0]!) &&
-      /^(Uint8|Uint8Clamped|Int8|Uint16|Int16|Uint32|Int32|Float32|Float64|BigInt64|BigUint64)Array$/.test(
-        expr.expression.text,
-      ) &&
-      this.isStdlibSymbol(this.resolveValueSymbol(expr.expression) ?? undefined) &&
-      this.isIslandExpr(expr.arguments[0]!)
-    ) {
-      const loc = locOf(expr);
-      const ctor: IrExpr = {
-        kind: "jsOp",
-        op: "globalGet",
-        name: expr.expression.text,
-        args: [],
-        type: JSVAL,
-        loc,
-      };
-      const arg = this.lowerExpr(expr.arguments[0]!);
-      return { kind: "jsOp", op: "construct", args: [ctor, arg], type: JSVAL, loc };
-    }
     const builtin =
       lowerAbortControllerNew(this, expr) ??
       lowerFetchWebNew(this, expr) ??
@@ -12145,24 +11354,22 @@ export class Lowerer {
     return lowerNumberStaticProperty(this, expr);
   }
 
-  /* ── the island-backed ambient surface (ISLAND_SURFACE) ───────────── */
-
-  requireDynamicApi(feature: string, node: ts.Node, hint?: string): void {
-    return requireDynamicApi(this, feature, node, hint);
+  refuseUnsupportedApi(feature: string, node: ts.Node, hint?: string): never {
+    return refuseUnsupportedApi(this, feature, node, hint);
   }
 
   lowerMathProperty(expr: ts.PropertyAccessExpression): IrExpr | null {
     return lowerMathProperty(this, expr);
   }
 
-  islandGlobalFnOf(ident: ts.Identifier): IslandFnEntry | null {
-    return islandGlobalFnOf(this, ident);
+  stdlibGlobalFnOf(ident: ts.Identifier): StdlibFnEntry | null {
+    return stdlibGlobalFnOf(this, ident);
   }
 
-  lowerIslandMethodCall(
+  lowerStdlibMethodCall(
     call: ts.CallExpression,
     access: ts.PropertyAccessExpression,
   ): IrExpr | null {
-    return lowerIslandMethodCall(this, call, access);
+    return lowerStdlibMethodCall(this, call, access);
   }
 }

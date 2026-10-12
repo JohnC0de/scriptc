@@ -395,9 +395,8 @@ function lowerAssertEqual(
         // compares are therefore honest reference equality (a trace
         // context's stamped .error, a caught dyn, and the static error's
         // own boxing are the same node exactly when Node's objects are the
-        // same), and the deep walk compares the encoding's name/message/
-        // code — Node's deepStrictEqual over Errors. Island round trips
-        // re-encode and lose the identity (SEMANTICS.md).
+        // same). The deep walk compares the retained error data without
+        // re-encoding and losing identity (SEMANTICS.md).
         (k === "object" && e.type.kind === "object" && e.type.className === "%Error") ||
         (deep && k !== "bytes" && k !== "object" && lowerer.dynConvertible(e.type));
       if (!ok) {

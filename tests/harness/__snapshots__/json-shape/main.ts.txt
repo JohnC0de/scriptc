@@ -1,11 +1,9 @@
-json-shape/main.ts:5:8 - error SC2011: values of type '{ name: string; deprecated: null; }' have no static representation but run in the embedded dynamic engine, which this build does not include
+json-shape/main.ts:5:8 - error SC2001: values of type '{ name: string; deprecated: null; }' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, read-only Date values, functions, classes, records, unions of those, and 'unknown')
 
   4 |  * engine) and uses of the binding poison. */
   5 | import bad from "./nulled.json" with { type: "json" };
     |        ^~~
   6 | 
-
-  hint: build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)
 
 json-shape/main.ts:7:13 - error SC1090: the reference to 'bad' (a binding form with no lowering) is not supported yet
 

@@ -73,7 +73,7 @@ function fixture(arm: IrType = record): IrModule {
     body: [ret(narrow(ref("value"), arm))],
   };
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     records: [{ id: "cell", fields: [{ name: "x", type: F64 }] }],

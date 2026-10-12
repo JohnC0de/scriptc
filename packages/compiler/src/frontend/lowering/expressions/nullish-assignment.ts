@@ -164,7 +164,6 @@ export function lowerShortCircuitAssignment(lowerer: Lowerer, expr: ts.BinaryExp
     nullish &&
     !isUnitType(read.type) &&
     read.type.kind !== "dyn" &&
-    read.type.kind !== "jsval" &&
     (read.type.kind !== "union" || !lowerer.unions.get(read.type.unionId)?.arms.some(isUnitType))
   ) {
     return finish(read);
