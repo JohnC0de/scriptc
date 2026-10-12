@@ -4,7 +4,8 @@
  * aliases by import provenance, like threads-import.ts recognizes the
  * @scriptc/threads exports. TypeScript drops alias identity from inferred
  * types, so only annotations the program WRITES count: parameter, return,
- * variable and class field types. The IR-side checks live in
+ * variable and class field types, and the class markers (Acyclic,
+ * ProgramLifetime) in heritage clauses. The IR-side checks live in
  * ir/contract-check.ts. */
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import type { SrcLoc } from "../ir/ir.js";
@@ -13,8 +14,14 @@ import * as ts from "./ts7/adapter.js";
 
 export const CONTRACT_TYPES_MODULE = "@scriptc/types";
 
-export type ContractMarker = "Int32" | "NoThrow" | "Immutable" | "Acyclic";
-const MARKERS: ReadonlySet<string> = new Set(["Int32", "NoThrow", "Immutable", "Acyclic"]);
+export type ContractMarker = "Int32" | "NoThrow" | "Immutable" | "Acyclic" | "ProgramLifetime";
+const MARKERS: ReadonlySet<string> = new Set([
+  "Int32",
+  "NoThrow",
+  "Immutable",
+  "Acyclic",
+  "ProgramLifetime",
+]);
 
 /** One written contract: what it promises and where the annotation is. */
 export interface ContractNote {
@@ -53,6 +60,8 @@ export interface ContractAnnotations {
   fields: Map<string, ContractNote>;
   /** Acyclic classes and object types. */
   acyclic: AcyclicNote[];
+  /** ProgramLifetime classes (`implements ProgramLifetime`) by class key. */
+  classes: Map<string, ContractNote>;
   diagnostics: ScrDiagnostic[];
   /** Number of annotations found (for timing and tests). */
   count: number;
@@ -74,7 +83,7 @@ function markerOf(checker: ts.TypeChecker, ref: ts.TypeReferenceNode): ContractM
 }
 
 /** The marker a heritage clause names (`implements Acyclic`,
- * `implements sc.Acyclic`). */
+ * `implements sc.ProgramLifetime`). */
 function markerOfHeritage(
   checker: ts.TypeChecker,
   node: ts.ExpressionWithTypeArguments,
@@ -143,6 +152,7 @@ export function collectContractAnnotations(
     bindings: new Map(),
     fields: new Map(),
     acyclic: [],
+    classes: new Map(),
     diagnostics: [],
     count: 0,
   };
@@ -167,6 +177,7 @@ export function collectContractAnnotations(
         if (marker === null) return;
         out.count++;
         if (marker === "Acyclic") placeAcyclicAlias(out, checker, node, resolveUnit);
+        else if (marker === "ProgramLifetime") unsupported(out, node, marker);
         else place(out, checker, node, marker);
       },
       kinds,
@@ -192,7 +203,9 @@ function unsupported(out: ContractAnnotations, node: ts.Node, marker: ContractMa
       ? "NoThrow wraps a function's written return type"
       : marker === "Int32"
         ? "Int32 is checked on parameters, variables, class instance fields and function results"
-        : "Immutable is checked on parameters, variables, class instance fields and function results";
+        : marker === "ProgramLifetime"
+          ? "ProgramLifetime is checked in the implements clause of a class declaration"
+          : "Immutable is checked on parameters, variables, class instance fields and function results";
   out.diagnostics.push(
     contractDiag(
       "SC7006",
@@ -200,12 +213,16 @@ function unsupported(out: ContractAnnotations, node: ts.Node, marker: ContractMa
       `the ${marker} contract is not checked in this position (${where})`,
       marker === "NoThrow"
         ? "write it as the function's return type annotation: function f(): NoThrow<T>"
-        : `write ${marker} directly as the annotation of the declaration; type aliases, interface members and types nested in other types (arrays, unions, type arguments) are not followed`,
+        : marker === "ProgramLifetime"
+          ? "declare it on the class itself: class Node implements ProgramLifetime { ... }"
+          : `write ${marker} directly as the annotation of the declaration; type aliases, interface members and types nested in other types (arrays, unions, type arguments) are not followed`,
     ),
   );
 }
 
-/** `class C implements Acyclic` and `interface I extends Acyclic`. */
+/** The heritage positions of the class markers: `class C implements
+ * Acyclic`, `interface I extends Acyclic` and `class C implements
+ * ProgramLifetime` (a class declaration only). */
 function placeHeritage(
   out: ContractAnnotations,
   checker: ts.TypeChecker,
@@ -215,6 +232,22 @@ function placeHeritage(
 ): void {
   const clause = node.parent;
   const owner = clause?.parent;
+  if (marker === "ProgramLifetime") {
+    if (
+      clause === undefined ||
+      !ts.isHeritageClause(clause) ||
+      clause.token !== ts.SyntaxKind.ImplementsKeyword ||
+      owner === undefined ||
+      !ts.isClassDeclaration(owner)
+    )
+      return unsupported(out, node, marker);
+    out.classes.set(contractLocKey(locOf(owner)), {
+      marker,
+      loc: locOf(node),
+      name: nameText(owner.name),
+    });
+    return;
+  }
   if (
     marker !== "Acyclic" ||
     clause === undefined ||

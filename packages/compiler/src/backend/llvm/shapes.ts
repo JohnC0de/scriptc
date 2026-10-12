@@ -731,8 +731,14 @@ function rcMembers(shape: IrRecordShape): { index: number; type: IrType; name: s
 /** The NULL- and immortal-skipping retain body shared by every shape. A
  * retain never touches the cycle header: a buffered candidate that is
  * retained again stays a candidate (scr_cycle.c, markRoots). */
-export function retainBody(host: ShapeHost, fnName: string, comment = ""): string[] {
+export function retainBody(
+  host: ShapeHost,
+  fnName: string,
+  comment = "",
+  immortal = false,
+): string[] {
   const S = host.sizeType;
+  if (immortal) return immortalRcBody(fnName, "ptr", comment);
   return [
     `define internal ptr @${fnName}(ptr %o) ${FN_ATTRS} {${comment ? ` ; ${comment}` : ""}`,
     `entry:`,
@@ -748,6 +754,19 @@ export function retainBody(host: ShapeHost, fnName: string, comment = ""): strin
     `  br label %done`,
     `done:`,
     `  ret ptr %o`,
+    `}`,
+  ];
+}
+
+/** The retain or release entry point of a class whose every instance lives
+ * until the process exits (no collector header; see classes.ts
+ * programLifetimeClass and programLifetimeRc): nothing to count, so every
+ * inlined call site folds away. */
+function immortalRcBody(fnName: string, ret: "ptr" | "void", comment: string): string[] {
+  return [
+    `define internal ${ret} @${fnName}(ptr %o) ${FN_ATTRS} {${comment ? ` ; ${comment} (immortal)` : ""}`,
+    `entry:`,
+    ret === "ptr" ? `  ret ptr %o` : `  ret void`,
     `}`,
   ];
 }
@@ -772,6 +791,7 @@ export function releaseBody(
   freeBody: string[],
   comment = "",
   bounded = true,
+  immortal = false,
 ): string[] {
   const S = host.sizeType;
   if (bounded) host.declare(`declare void @scr_rc_destroy(ptr, ptr)`);
@@ -786,7 +806,7 @@ export function releaseBody(
           `}`,
         ]
       : []),
-    ...releaseFastPath(host, fnName, `${fnName}_slow`, traced, comment),
+    ...releaseFastPath(host, fnName, `${fnName}_slow`, traced, comment, immortal),
     `define internal void @${fnName}_slow(ptr %o) noinline ${FN_ATTRS} {${comment ? ` ; ${comment}` : ""}`,
     `entry:`,
     `  %isnull = icmp eq ptr %o, null`,
@@ -826,8 +846,10 @@ export function releaseFastPath(
   slow: string,
   traced: boolean,
   comment = "",
+  immortal = false,
 ): string[] {
   const S = host.sizeType;
+  if (immortal) return immortalRcBody(fnName, "void", comment);
   return [
     `define internal void @${fnName}(ptr %o) ${FN_ATTRS} {${comment ? ` ; ${comment} (fast path)` : ""}`,
     `entry:`,

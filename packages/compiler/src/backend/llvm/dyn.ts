@@ -83,6 +83,8 @@ export interface DynHost extends WalkerHost {
   unitInstanceRef(unionId: string, tag: number): string;
   /** See ClassHost.virtualEntry. */
   virtualEntry?(implFn: string): string;
+  /** See ClassHost.programLifetime. */
+  readonly programLifetime?: ReadonlySet<string>;
   /** The immortal ABSENT field-slot state of an undefined-armed union. */
   absentInstanceRef(unionId: string): string;
   /** The shared adapter record: live array capsules read its `arrayOps`, so a
