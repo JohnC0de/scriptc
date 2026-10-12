@@ -16,7 +16,7 @@ import {
 import { mangleFunction, mangleGlobal, mangleRecordStruct } from "../mangle.js";
 import { BlockBuilder } from "./blocks.js";
 import { classFieldIndex, classStructSym } from "./classes.js";
-import { llvmCommentText } from "./common.js";
+import { SCR_ARR_FIELD, llvmCommentText } from "./common.js";
 import {
   FN_ATTRS,
   elemAccess,
@@ -176,9 +176,9 @@ export function streamTypedRefCommitAdapter(
     const storageMembers = [
       { name: "len", index: 1, type: host.sizeType },
       { name: "cap", index: 2, type: host.sizeType },
-      { name: "data", index: 7, type: "ptr" },
-      { name: "present", index: 8, type: "ptr" },
-      { name: "ext", index: 9, type: "ptr" },
+      { name: "data", index: SCR_ARR_FIELD.data, type: "ptr" },
+      { name: "present", index: SCR_ARR_FIELD.present, type: "ptr" },
+      { name: "ext", index: SCR_ARR_FIELD.ext, type: "ptr" },
     ];
     for (const member of storageMembers) {
       lines.push(

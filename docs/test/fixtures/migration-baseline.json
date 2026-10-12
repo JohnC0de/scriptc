@@ -228,6 +228,36 @@
     ]
   },
   {
+    "href": "/docs/contracts",
+    "title": "Contract Types",
+    "headings": [
+      {
+        "text": "Example",
+        "id": "example"
+      },
+      {
+        "text": "Where contracts apply",
+        "id": "where-contracts-apply"
+      },
+      {
+        "text": "NoThrow",
+        "id": "nothrow"
+      },
+      {
+        "text": "Int32",
+        "id": "int32"
+      },
+      {
+        "text": "Immutable",
+        "id": "immutable"
+      },
+      {
+        "text": "Diagnostics",
+        "id": "diagnostics"
+      }
+    ]
+  },
+  {
     "legacy": "/wasm",
     "href": "/docs/wasm",
     "title": "WebAssembly Modules",

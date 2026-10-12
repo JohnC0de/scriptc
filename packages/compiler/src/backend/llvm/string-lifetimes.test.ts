@@ -167,18 +167,23 @@ test("string operands preserve their left-to-right snapshot when a later assignm
   expect(facts(f).parameters.has("replace")).toBe(false);
 });
 
-test("a later global write keeps mutable string arguments owned", () => {
+test("a callee's global write cannot replace the caller's mutable string locals", () => {
   const source = fn("source", [], str("next"));
   source.body.unshift({ kind: "assign", localId: "%g.changed", value: str("effect"), loc });
   const compare = fn("compare", ["text"], equal(ref("text"), call("source", [], STRING)));
-  // A later write anywhere in this function rules out parameter borrowing.
+  // A write anywhere in this function rules out parameter borrowing, but
+  // the rebound local itself owns its value across the later operand.
   compare.body.unshift({ kind: "assign", localId: "text", value: str("first"), loc });
   const module = mod(source, compare);
   module.globals = [{ id: "%g.changed", name: "changed", type: STRING, mutable: true }];
   const ir = body(module, "sc_f_compare");
   const sourceCall = ir.indexOf("@sc_f_source");
   expect(sourceCall).toBeGreaterThan(0);
-  expect(ir.slice(0, sourceCall)).toContain("@scr_str_retain_v");
+  expect(ir.slice(0, sourceCall)).not.toContain("@scr_str_retain_v");
+  // Reading the global the later operand replaces still takes a snapshot.
+  compare.body = [ret(equal(ref("%g.changed"), call("source", [], STRING)))];
+  const global = body(module, "sc_bf_compare");
+  expect(global.slice(0, global.indexOf("@sc_f_source"))).toContain("@scr_str_retain_v");
 });
 
 test("immutable lexical owners survive arbitrary later operands", () => {
@@ -214,8 +219,22 @@ test("reference fields borrow across preserving calls but snapshot across writes
   source.locals.push({ id: "changed", name: "changed", type: STRING, mutable: true });
   source.body.unshift({ kind: "assign", localId: "changed", value: str("effect"), loc });
   expect(body(module, "sc_bf_compare")).not.toContain("@scr_str_retain_v");
+  // A global write replaces no record field: the projection still borrows.
   source.body.unshift({ kind: "assign", localId: "%g.changed", value: str("effect"), loc });
-  module.globals = [{ id: "%g.changed", name: "changed", type: STRING, mutable: true }];
+  module.globals = [
+    { id: "%g.changed", name: "changed", type: STRING, mutable: true },
+    { id: "%g.record", name: "record", type: record, mutable: true },
+  ];
+  expect(body(module, "sc_bf_compare")).not.toContain("@scr_str_retain_v");
+  // Writing the projected field of any record does replace it.
+  source.body.unshift({
+    kind: "recordSet",
+    obj: ref("%g.record", record),
+    shapeId: "text",
+    field: "value",
+    value: str("effect"),
+    loc,
+  });
   expect(body(module, "sc_bf_compare")).toContain("@scr_str_retain_v");
   f.body = [ret(equal(str("constant"), projection))];
   expect(body(module, "sc_bf_compare")).not.toContain("@scr_str_retain_v");
@@ -287,7 +306,10 @@ const methodCases: {
   inline?: boolean;
 }[] = [
   { method: "length", args: [], result: F64, target: "utf16_len", inline: true },
-  { method: "charCodeAt", args: [num(1)], result: F64, target: "char_code_at", inline: true },
+  // An exact integer index skips the double conversion; any other index
+  // enters through the double ABI.
+  { method: "charCodeAt", args: [num(1)], result: F64, target: "char_code_at_int", inline: true },
+  { method: "charCodeAt", args: [num(1.5)], result: F64, target: "char_code_at", inline: true },
   { method: "charAt", args: [num(1)], result: STRING, target: "char_at" },
   { method: "indexOf", args: [ref("argument"), num(1)], result: F64, target: "index_of" },
   { method: "includes", args: [ref("argument")], result: BOOL, target: "includes" },
@@ -321,7 +343,7 @@ const methodCases: {
 ];
 
 test.each(methodCases)(
-  "$method passes borrowed string inputs through its runtime ABI",
+  "$method ($target) passes borrowed string inputs through its runtime ABI",
   ({ method, args, result, target, inline }) => {
     const f = fn(
       "method",
@@ -342,7 +364,7 @@ test.each(methodCases)(
   },
 );
 
-test("string search snapshots both receiver and needle before a numeric argument writes globally", () => {
+test("string search borrows rebound locals but snapshots a global a later argument writes", () => {
   const position = fn("position", [], num(0));
   position.body.unshift({ kind: "assign", localId: "%g.changed", value: str("effect"), loc });
   const search = fn(
@@ -361,9 +383,16 @@ test("string search snapshots both receiver and needle before a numeric argument
   const searchCall = ir.indexOf("@scr_str_index_of");
   expect(start).toBeGreaterThan(0);
   expect(searchCall).toBeGreaterThan(start);
-  // Literals need no owner, but both reads take independent snapshots.
-  expect(ir.slice(0, start).match(/@scr_str_retain_v/g)).toHaveLength(2);
-  expect(ir.slice(searchCall)).toContain("@scr_str_release");
+  // The rebound locals own their values across the call: no snapshots.
+  expect(ir.slice(0, start)).not.toContain("@scr_str_retain_v");
+  // A receiver read from the global the numeric argument replaces does.
+  search.body = [
+    ret(intrinsic(ref("%g.changed"), "indexOf", [ref("needle"), call("position", [], F64)], F64)),
+  ];
+  const global = body(module, "sc_bf_search");
+  const call2 = global.indexOf("@sc_f_position");
+  expect(global.slice(0, call2).match(/@scr_str_retain_v/g)).toHaveLength(1);
+  expect(global.slice(global.indexOf("@scr_str_index_of"))).toContain("@scr_str_release");
 });
 
 test("global string ownership cannot be inferred from an immutable-looking reference", () => {

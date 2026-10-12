@@ -76,6 +76,9 @@ export interface IntegerSlotFacts {
   field?: (className: string, field: string) => IntegerRange | null;
   call?: (callee: string) => IntegerRange | null;
   boxed?: (localId: string) => IntegerRange | null;
+  /** Locals and globals an Int32 contract covers (ir/contract-check.ts):
+   * every write anywhere is proven int32, so every read is one. */
+  locals?: (localId: string) => IntegerRange | null;
 }
 
 /** Structured local dataflow. Calls cannot write uncaptured local slots,
@@ -101,8 +104,10 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
   const loopLocals = new Map(fn.locals.filter((l) => !captures.has(l.id)).map((l) => [l.id, l]));
   // A captured binding has no local dataflow: only a proof that covers
   // every write of the shared box anywhere applies to its reads.
-  const boxedRange = (localId: string): IntegerRange | null =>
-    eligible.has(localId) ? null : (slots.boxed?.(localId) ?? null);
+  const boxedRange = (localId: string): IntegerRange | null => {
+    const boxed = eligible.has(localId) ? null : (slots.boxed?.(localId) ?? null);
+    return boxed ?? slots.locals?.(localId) ?? null;
+  };
   const slotRange = (e: IrExpr): IntegerRange | null =>
     e.type.kind !== "f64"
       ? null
@@ -292,7 +297,11 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
         ? { min: bound.value, max: bound.value }
         : ranges.get(bound);
     if (!boundRange) return;
-    const previous = facts.get(ref.localId);
+    // An Int32 contract local holds an int32 even where the dataflow has
+    // no fact for it (loop headers, after unknown regions).
+    const previous =
+      facts.get(ref.localId) ??
+      (eligible.has(ref.localId) ? (slots.locals?.(ref.localId) ?? undefined) : undefined);
     if (!previous) return;
     if (!truth)
       op =
@@ -584,8 +593,20 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
           if (s.cond) refine(s.cond, true, inside);
           body(s.body, inside);
           // Continue can bypass any body assignment. The update therefore
-          // starts from header invariants rather than the body's exit facts.
-          if (s.update) body([s.update], new Map(loop));
+          // starts from header invariants rather than the body's exit facts,
+          // plus what the condition proved about bindings the body never
+          // writes (they still hold the values the condition tested).
+          if (s.update) {
+            const entry = new Map(loop);
+            if (s.cond) {
+              const refined = new Map(loop);
+              refine(s.cond, true, refined);
+              const written = new Set<string>();
+              for (const node of s.body) for (const id of writes(node)) written.add(id);
+              for (const [id, range] of refined) if (!written.has(id)) entry.set(id, range);
+            }
+            body([s.update], entry);
+          }
           havoc(facts, [s], facts);
           break;
         }

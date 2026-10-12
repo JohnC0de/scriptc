@@ -89,8 +89,12 @@ export function emitLiteralExpr(
         B.line(`${uint32} = load i32, ptr ${integerView}`);
         return { name: t, type: e.type, uint32 };
       }
-      if (isRefCounted(e.type))
+      if (isRefCounted(e.type)) {
+        // An immortal Immutable constant: nothing to count.
+        if (b.kind === "global" && host.immortalGlobals.has(e.localId))
+          return host.markImmortal({ name: t, type: e.type });
         return host.own({ name: host.retainValue(t, e.type), type: e.type });
+      }
       return { name: t, type: e.type };
     }
     default: {

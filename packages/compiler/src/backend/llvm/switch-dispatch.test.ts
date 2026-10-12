@@ -7,6 +7,11 @@ const number = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, l
 const string = (value: string): IrExpr => ({ kind: "strLit", value, type: STRING, loc });
 
 function emit(type: IrType, tests: (IrExpr | null)[], pointerBits: 32 | 64 = 64): string {
+  return emitWith({ kind: "varRef", localId: "value", type, loc }, tests, pointerBits);
+}
+
+function emitWith(disc: IrExpr, tests: (IrExpr | null)[], pointerBits: 32 | 64 = 64): string {
+  const type = disc.kind === "varRef" ? disc.type : F64;
   const mod: IrModule = {
     irVersion: 15,
     sourceFile: loc.file,
@@ -22,7 +27,7 @@ function emit(type: IrType, tests: (IrExpr | null)[], pointerBits: 32 | 64 = 64)
         body: [
           {
             kind: "switch",
-            disc: { kind: "varRef", localId: "value", type, loc },
+            disc,
             cases: tests.map((test, index) => ({
               test,
               body: [{ kind: "return", value: number(index), loc }],
@@ -39,20 +44,35 @@ function emit(type: IrType, tests: (IrExpr | null)[], pointerBits: 32 | 64 = 64)
   )![0];
 }
 
-test("integer dispatch guards range and fractions before selecting a native case", () => {
-  for (const [values, conversion, bits] of [
-    [[-2147483648, -1, 0, 2147483647], "fptosi", "i32"],
-    [[0, 1, 2147483648, 4294967295], "fptoui", "i32"],
-    [[-9007199254740991, -1, 0, 9007199254740991], "fptosi", "i64"],
+test("integer dispatch round-trips a frozen conversion before selecting a native case", () => {
+  for (const [values, bits] of [
+    [[-2147483648, -1, 0, 2147483647], "i32"],
+    [[0, 1, 2147483648, 4294967295], "i64"],
+    [[-9007199254740991, -1, 0, 9007199254740991], "i64"],
   ] as const) {
     const body = emit(F64, values.map(number));
     expect(body).toContain(`switch ${bits}`);
-    expect(body).toContain("fcmp oge double");
-    expect(body).toContain("fcmp ole double");
-    expect(body).toContain(`${conversion} double`);
+    expect(body).toContain(`fptosi double`);
+    expect(body).toContain(`freeze ${bits}`);
+    expect(body).toContain(`sitofp ${bits}`);
     expect(body).toContain("fcmp oeq double");
-    expect(body.indexOf("br i1")).toBeLessThan(body.indexOf(`${conversion} double`));
+    // NaN, infinities and out-of-range values fail the exact round trip;
+    // no separate range tests are needed.
+    expect(body).not.toContain("fcmp oge double");
+    expect(body).not.toContain("fcmp ole double");
+    expect(body.indexOf("freeze")).toBeLessThan(body.indexOf("br i1"));
   }
+});
+
+test("a proven integer discriminant selects without converting", () => {
+  const value: IrExpr = { kind: "varRef", localId: "value", type: F64, loc };
+  const disc: IrExpr = { kind: "bin", op: "|", left: value, right: number(0), type: F64, loc };
+  const body = emitWith(disc, [1, 2, 3, 4].map(number));
+  expect(body).toContain("switch i32");
+  // The ToInt32 coercion of `value | 0` converts once; dispatch adds no
+  // round trip of its own.
+  expect(body).not.toContain("freeze");
+  expect(body).not.toContain("fcmp oeq double");
 });
 
 test("duplicate numeric labels keep the first destination and share zero", () => {

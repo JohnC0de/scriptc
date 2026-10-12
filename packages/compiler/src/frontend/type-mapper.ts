@@ -1201,6 +1201,10 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   ) {
     return { kind: "object", className: "%Error" };
   }
+  // Immutable<T> (@scriptc/types) is a deep-readonly view: the value is
+  // still the T it maps.
+  const immutableSource = immutableSourceType(type, ctx);
+  if (immutableSource !== null) return mapType(immutableSource, ctx);
   if (resolveTypeParam && type.flags & ts.TypeFlags.TypeParameter) {
     const bound = resolveTypeParam(type);
     if (bound) {
@@ -4532,6 +4536,43 @@ function mapBrandedPrimitiveIntersection(widened: ts.Type, ctx: TypeMapperCtx): 
     markerParts++;
   }
   return primitive && markerParts > 0 ? primitive : null;
+}
+
+/** The declaration file of @scriptc/types (installed, pnpm-linked or the
+ * workspace package). */
+const CONTRACT_TYPES_FILE = /[\\/](?:@scriptc[\\/]types|packages[\\/]types)[\\/]index\.d\.ts$/;
+
+/** `Immutable<T>` over a class, interface or object literal type resolves to
+ * a mapped type declared in @scriptc/types; TypeScript drops the alias, but
+ * homomorphic mapped members keep their original declarations. The source
+ * type is the non-generic declaration that declares every member (the most
+ * derived class or interface). Null for every other type. */
+function immutableSourceType(type: ts.Type, ctx: TypeMapperCtx): ts.Type | null {
+  if (!isMappedShape(type)) return null;
+  const { checker } = ctx;
+  const symbol = type.getSymbol();
+  const decl = symbol ? checker.declarationsOf(symbol)[0] : undefined;
+  if (decl === undefined || !CONTRACT_TYPES_FILE.test(decl.getSourceFile().fileName)) return null;
+  const props = checker.getPropertiesOfType(type);
+  const seen = new Set<ts.Node>();
+  for (const prop of props) {
+    const owner = checker.declarationsOf(prop)[0]?.parent;
+    if (owner === undefined || seen.has(owner)) continue;
+    seen.add(owner);
+    let source: ts.Type | null = null;
+    if (ts.isTypeLiteralNode(owner)) source = checker.getTypeFromTypeNode(owner);
+    else if (
+      (ts.isClassDeclaration(owner) || ts.isInterfaceDeclaration(owner)) &&
+      owner.name !== undefined &&
+      (owner.typeParameters?.length ?? 0) === 0
+    ) {
+      const ownerSymbol = checker.getSymbolAtLocation(owner.name);
+      if (ownerSymbol) source = checker.getDeclaredTypeOfSymbol(ownerSymbol);
+    }
+    if (source !== null && checker.getPropertiesOfType(source).length === props.length)
+      return source;
+  }
+  return null;
 }
 
 /** True for MAPPED-type results — `Partial<Config>`, `Record<"a", n>`,

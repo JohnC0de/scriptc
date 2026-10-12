@@ -396,11 +396,14 @@ static MockRec *mock_cyc_new(int value) {
   return r;
 }
 
+static const ScrArrOps mock_ops = { &mock_retain, &mock_release, NULL };
+static const ScrArrOps mock_cyc_ops = { &mock_cyc_retain, &mock_cyc_release, &mock_trace };
+
 static void test_ref_elements(void) {
 #ifdef SCR_RC_AUDIT
   long arrays0 = scr_arr_live_count();
 #endif
-  ScrArr *a = scr_arr_new_ref(&mock_retain, &mock_release, NULL, 0);
+  ScrArr *a = scr_arr_new_ops(&mock_ops, 0);
   scr_arr_push_ref(a, mock_new(1)); /* ownership moves in */
   scr_arr_push_ref(a, mock_new(2));
   check_f64(scr_arr_len(a), 2, "ref push grows");
@@ -446,7 +449,7 @@ static void test_ref_cycle(void) {
   long arrays0 = scr_arr_live_count();
 #endif
   /* arr -> rec -> arr: drop the external references, then collect. */
-  ScrArr *arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 0);
+  ScrArr *arr = scr_arr_new_ops(&mock_cyc_ops, 0);
   MockRec *rec = mock_cyc_new(7);
   rec->owner = (ScrArr *)scr_arr_retain(arr); /* rec points back at arr */
   scr_arr_push_ref(arr, rec);                 /* arr owns rec */
@@ -466,7 +469,7 @@ static void test_ref_truncate_cycle(void) {
   /* The truncation release runs while the record points back at the array.
    * The array edge must be detached before mock_cyc_release can trigger the
    * cycle collector. */
-  ScrArr *arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 0);
+  ScrArr *arr = scr_arr_new_ops(&mock_cyc_ops, 0);
   MockRec *rec = mock_cyc_new(8);
   rec->owner = (ScrArr *)scr_arr_retain(arr);
   scr_arr_push_ref(arr, rec);
@@ -481,7 +484,7 @@ static void test_ref_truncate_cycle(void) {
 
 static void test_ref_trace_storage_boundaries(void) {
   long before = mock_live;
-  ScrArr *arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 4096);
+  ScrArr *arr = scr_arr_new_ops(&mock_cyc_ops, 4096);
   MockRec *dense = mock_cyc_new(1);
   MockRec *sparse = mock_cyc_new(2);
   MockRec *property = mock_cyc_new(3);
@@ -1107,6 +1110,33 @@ static void test_comparator_sort(void) {
   scr_arr_release(wide);
 }
 
+static void test_exact_construction(void) {
+  /* Construction reserves the requested slots (rounded up to the small
+   * allocator's block where it is live); appends past them grow
+   * geometrically, and every new slot starts as a hole. */
+  ScrArr *one = scr_arr_new(SCR_ELEM_F64, 1);
+  check(one->cap >= 1 && one->cap < 4 && scr_arr_len(one) == 0 && !scr_arr_has(one, 0),
+        "one-slot construction keeps an exactly sized empty dense prefix");
+  scr_arr_push_f64(one, 1);
+  size_t first_cap = one->cap;
+  for (int i = 2; i <= 6; i++) scr_arr_push_f64(one, i);
+  check(one->cap >= 6 && one->cap > first_cap && scr_arr_len(one) == 6,
+        "appends past an exact construction grow the dense prefix");
+  for (int i = 0; i < 6; i++) check(scr_arr_get_number(one, i) == i + 1, "grown values kept");
+  scr_arr_set_len(one, (double)one->cap + 3);
+  check(!scr_arr_has(one, 6) && !scr_arr_has(one, (double)one->cap - 1),
+        "spare capacity after growth from an exact size reads as holes");
+  scr_arr_release(one);
+
+  ScrArr *refs = scr_arr_new(SCR_ELEM_STR, 3);
+  scr_arr_push_ref(refs, scr_str_new("a", 1));
+  scr_arr_set_ref(refs, 4, scr_str_new("e", 1));
+  check(scr_arr_len(refs) == 5 && scr_arr_has(refs, 0) && !scr_arr_has(refs, 1) &&
+            !scr_arr_has(refs, 3) && scr_arr_has(refs, 4),
+        "index write past an exact construction leaves holes between");
+  scr_arr_release(refs);
+}
+
 int main(int argc, char **argv) {
   if (argc > 1) {
     ScrArr *a = scr_arr_new(SCR_ELEM_F64, 0);
@@ -1135,6 +1165,7 @@ int main(int argc, char **argv) {
   test_numeric_read();
   test_borrowed_ref_read();
   test_bool();
+  test_exact_construction();
   test_dense_replacement();
   test_unshift_reverse();
   test_str_rc();

@@ -1,11 +1,18 @@
 /* Cheap whole-module may-throw analysis (see computeMayThrow). Pure function
  * of the IR module; the emitter consults the result to place unwind checks. */
-import type { IrExpr, IrStmt, IrModule, IrType } from "../ir/ir.js";
+import type { IrExpr, IrStmt, IrModule, IrType, SrcLoc } from "../ir/ir.js";
 import { isFfiCallbackParam, MAY_THROW_ARR_METHODS, MAY_THROW_BYTES_METHODS } from "../ir/ir.js";
 import { MAY_THROW_LIB_FNS } from "../ir/builtin-effects.js";
 import { everyStmtList } from "../ir/traverse.js";
 import { hasRetainedFfiCallback } from "./ffi-callbacks.js";
 import { computePublishedTypes, writesPublished } from "./publication.js";
+
+/** Why a function may throw (computeMayThrow's `explain` option): its own
+ * throwing operation, or the first call edge to a function that may throw. */
+export type MayThrowReason =
+  | { kind: "seed"; what: string; loc: SrcLoc | null }
+  | { kind: "call"; callee: string; loc: SrcLoc | null }
+  | { kind: "indirect"; target: string; loc: SrcLoc | null };
 
 /** Cheap may-throw analysis (cost discipline: functions that transitively
  * CANNOT throw pay for no pending-exception checks). A function may throw
@@ -19,9 +26,11 @@ import { computePublishedTypes, writesPublished } from "./publication.js";
  * surface a catchable rejection/error and seed the fixpoint like a `throw`. */
 export function computeMayThrow(
   mod: IrModule,
-  options: { stackChecks?: boolean } = {},
+  options: { stackChecks?: boolean; explain?: boolean } = {},
 ): {
   fns: Set<string>;
+  /** With `explain`: the reason each may-throw function was marked. */
+  why?: Map<string, MayThrowReason>;
   indirect: boolean;
   /** Worker programs: the functions that poll for termination on entry. */
   workerEntryPolls?: Set<string>;
@@ -37,7 +46,13 @@ export function computeMayThrow(
     throws: boolean;
     callees: string[];
     callsValue: boolean;
+    /** With `explain`: the first throwing operation, the first site of each
+     * callee, and the first indirect call. */
+    seed?: MayThrowReason;
+    calleeLocs?: Map<string, SrcLoc>;
+    callValueLoc?: SrcLoc;
   }
+  const explain = options.explain === true;
   const facts = new Map<string, Facts>();
   const closureTargets = new Set<string>();
   // FUNC-targeted dynChecks synthesize adapter closures outside the IR's
@@ -70,6 +85,7 @@ export function computeMayThrow(
   }
   for (const fn of mod.functions) {
     const f: Facts = { throws: false, callees: [], callsValue: false };
+    if (explain) f.calleeLocs = new Map();
     // TDZ reads and non-initializing writes can throw ReferenceError.
     // Capture locals carry the same flag as the declaring binding.
     const tdzIds = new Set([...tdzGlobals, ...fn.locals.filter((l) => l.tdz).map((l) => l.id)]);
@@ -79,6 +95,8 @@ export function computeMayThrow(
     ]);
     // Traverse typed executable nodes without copying the IR into unknown.
     const visit = (rec: IrExpr | IrStmt): boolean => {
+      const threw = f.throws;
+      const callees = f.callees.length;
       if (published !== null && writesPublished(published, rec)) f.throws = true;
       switch (rec.kind) {
         case "throw":
@@ -304,19 +322,40 @@ export function computeMayThrow(
         }
         case "callValue":
           f.callsValue = true;
+          if (explain) f.callValueLoc ??= rec.loc;
           break;
         case "closure":
           closureTargets.add(rec.fnName);
           break;
+      }
+      if (explain) {
+        if (!threw && f.throws)
+          f.seed = { kind: "seed", what: describeThrowingNode(rec), loc: rec.loc };
+        for (let i = callees; i < f.callees.length; i++)
+          if (!f.calleeLocs!.has(f.callees[i]!)) f.calleeLocs!.set(f.callees[i]!, rec.loc);
+        if (rec.kind === "newValue" && !f.calleeLocs!.has("\0classValue"))
+          f.calleeLocs!.set("\0classValue", rec.loc);
       }
       return true;
     };
     everyStmtList(fn.body, { expr: visit, stmt: visit });
     // A worker can be terminated at any of its polls: the noncatchable
     // stop unwinds like an exception from every function that polls.
-    if (terminations?.polls.has(fn.name)) f.throws = true;
+    if (terminations?.polls.has(fn.name)) {
+      if (explain && !f.throws)
+        f.seed = { kind: "seed", what: "polls for worker termination", loc: fn.loc };
+      f.throws = true;
+    }
     // A stack-overflow check throws Node's RangeError from the entry.
-    if (stackChecks?.has(fn.name)) f.throws = true;
+    if (stackChecks?.has(fn.name)) {
+      if (explain && !f.throws)
+        f.seed = {
+          kind: "seed",
+          what: "can recurse (directly or through callbacks), so the stack guard may throw RangeError",
+          loc: fn.loc,
+        };
+      f.throws = true;
+    }
     facts.set(fn.name, f);
   }
 
@@ -326,13 +365,23 @@ export function computeMayThrow(
   const indirectCallers: string[] = [];
   const may = new Set<string>();
   const pending: string[] = [];
-  const mark = (name: string): void => {
+  const why = explain ? new Map<string, MayThrowReason>() : null;
+  const mark = (name: string, reason?: MayThrowReason): void => {
     if (may.has(name)) return;
     may.add(name);
     pending.push(name);
+    if (why !== null && reason !== undefined) why.set(name, reason);
   };
+  const callEdge = (caller: string, callee: string): MayThrowReason | undefined =>
+    why === null
+      ? undefined
+      : { kind: "call", callee, loc: facts.get(caller)?.calleeLocs?.get(callee) ?? null };
+  const indirectEdge = (caller: string, target: string): MayThrowReason | undefined =>
+    why === null
+      ? undefined
+      : { kind: "indirect", target, loc: facts.get(caller)?.callValueLoc ?? null };
   for (const [name, f] of facts) {
-    if (f.throws) mark(name);
+    if (f.throws) mark(name, f.seed);
     if (f.callsValue) indirectCallers.push(name);
     for (const callee of new Set(f.callees)) {
       let list = callers.get(callee);
@@ -347,30 +396,126 @@ export function computeMayThrow(
   // is reached at most once, without materializing every descendant edge.
   const throwingHierarchies = new Set<string>();
   let indirect = sawDynFuncAdapter;
-  if (indirect) for (const name of indirectCallers) mark(name);
+  if (indirect) for (const name of indirectCallers) mark(name, indirectEdge(name, ""));
   for (let i = 0; i < pending.length; i++) {
     const name = pending[i]!;
     if (!indirect && closureTargets.has(name) && !asyncFns.has(name) && !genFns.has(name)) {
       indirect = true;
-      for (const caller of indirectCallers) mark(caller);
+      for (const caller of indirectCallers) mark(caller, indirectEdge(caller, name));
     }
-    for (const caller of callers.get(name) ?? []) mark(caller);
+    for (const caller of callers.get(name) ?? []) mark(caller, callEdge(caller, name));
     let cls = constructorClasses.get(name);
     while (cls !== undefined && !throwingHierarchies.has(cls)) {
       const def = classes.get(cls);
       if (!def) break;
       throwingHierarchies.add(cls);
       const valueCallers = classValueCallers.get(cls);
-      if (valueCallers) for (const caller of valueCallers) mark(caller);
+      if (valueCallers)
+        for (const caller of valueCallers)
+          mark(
+            caller,
+            why === null
+              ? undefined
+              : {
+                  kind: "call",
+                  callee: name,
+                  loc: facts.get(caller)?.calleeLocs?.get("\0classValue") ?? null,
+                },
+          );
       cls = def.base;
     }
   }
   return {
     fns: may,
+    ...(why !== null ? { why } : {}),
     indirect,
     ...(terminations ? { workerEntryPolls: entryPolls(mod, terminations.entry, stackChecks) } : {}),
     ...(stackChecks ? { stackChecks } : {}),
   };
+}
+
+/** Error constructors by runtime error kind (SCR_ERR_* in scr_runtime.h). */
+const ERROR_KIND_NAMES: readonly string[] = [
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "DOMException",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+];
+
+/** A short description of a node that seeds the may-throw fixpoint. */
+function describeThrowingNode(rec: IrExpr | IrStmt): string {
+  switch (rec.kind) {
+    case "throw":
+      return "throw statement";
+    case "rethrow":
+      return "rethrow";
+    case "runtimeFence":
+      return "deferred compile fence";
+    case "varRef":
+    case "incDec":
+    case "assignExpr":
+    case "assign":
+      return "binding accessed before initialization (ReferenceError)";
+    case "dynCheck":
+    case "caughtCheck":
+      return "checked cast of a dynamic value (TypeError)";
+    case "dynCall":
+    case "dynInvoke":
+      return "call through a dynamic value";
+    case "dynKeyGet":
+    case "dynHasKey":
+      return "property access on a dynamic value (undefined or null receiver)";
+    case "dynDestrCheck":
+    case "dynIterN":
+      return "destructuring a dynamic value";
+    case "awaitExpr":
+    case "awaitUnionExpr":
+      return "await (a rejected promise throws)";
+    case "yieldExpr":
+    case "genResume":
+      return "generator resumption";
+    case "libCall": {
+      // Compiler-resolved Node throws: name the error and its message.
+      if (rec.fn === "error.nodeThrow" || rec.fn === "error.new") {
+        const nodeThrow = rec.fn === "error.nodeThrow";
+        const kind = rec.args[0];
+        const message = nodeThrow ? rec.args[2] : rec.args[0];
+        const name = nodeThrow
+          ? kind?.kind === "numLit"
+            ? (ERROR_KIND_NAMES[kind.value] ?? "Error")
+            : "Error"
+          : rec.type.kind === "object"
+            ? rec.type.className.replace(/^%/, "")
+            : "Error";
+        return message?.kind === "strLit" ? `throws ${name}: ${message.value}` : `throws ${name}`;
+      }
+      return `library call ${rec.fn}`;
+    }
+    case "intrinsic":
+      return `intrinsic ${rec.name}`;
+    case "strIntrinsic":
+    case "regexIntrinsic":
+    case "arrIntrinsic":
+    case "bytesIntrinsic":
+    case "mapIntrinsic":
+    case "setIntrinsic":
+      return `${rec.kind} ${rec.method}`;
+    case "arraySetLength":
+      return "array length assignment (RangeError)";
+    case "jsonStringify":
+      return "JSON.stringify of a possibly circular value (TypeError)";
+    case "toString":
+      return "string conversion of a dynamic value";
+    case "fieldSet":
+    case "recordSet":
+      return "write into a possibly published object (TypeError)";
+    default:
+      return rec.kind;
+  }
 }
 
 /** The termination polls a worker program places on function entry. A

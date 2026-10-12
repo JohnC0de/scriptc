@@ -111,6 +111,11 @@ test("local map results keep scalar and owned reference payloads without heap wr
           expect(ir).toContain("call ptr @sc_map_entry_f64(");
           expect(ir).not.toContain("@scr_map_get_");
         } else if (value === BOOL) expect(ir).toMatch(/zext i8 %\w+ to i64/);
+        else if (value === STRING) {
+          // String keys read reference values through the entry and retain inline.
+          expect(ir).toContain("call ptr @scr_map_entry_str(");
+          expect(ir).not.toContain("@scr_map_get_str_ref");
+        }
         if (value === STRING) expect(ir).toContain("@scr_str_release");
       }
     }

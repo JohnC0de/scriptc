@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2086-destructuring-island-globals.ts"
+ ],
+ "diags": []
+}

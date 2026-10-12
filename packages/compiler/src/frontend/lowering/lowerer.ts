@@ -71,12 +71,14 @@ import {
 import { everyExprChild, everyStmtChild, transformStmtList } from "../../ir/traverse.js";
 import { RuntimeOptionalProvenance } from "./runtime-optional-provenance.js";
 import { presentAtUse, reassignedBindings } from "./runtime-optional-guards.js";
+import { NarrowingStability } from "./narrowing-stability.js";
 import { ArrayElementStates } from "./runtime-optional-elements.js";
 import { indexReadInBounds } from "./runtime-optional-bounds.js";
 import { ArrayOwnership } from "./runtime-optional-ownership.js";
 import { StringIndexBounds } from "./string-index-bounds.js";
 import { NanCodedReads } from "./nan-coded-reads.js";
 import { RuntimeOptionalLocals } from "./runtime-optional-locals.js";
+import { collectContractAnnotations, type ContractAnnotations } from "../contract-types.js";
 import { sanitizeUnregisteredClassTypes } from "./sanitize-class-types.js";
 import { UnregisteredClassTypes } from "./unregistered-class-types.js";
 import type { WidthLift } from "./width-lift.js";
@@ -726,6 +728,9 @@ export interface LowerResult {
   /** Present iff diagnostics is empty. */
   module: IrModule | null;
   diagnostics: ScrDiagnostic[];
+  /** The program's written contract types (@scriptc/types), keyed by the
+   * source locations the IR carries; absent when it writes none. */
+  contracts?: ContractAnnotations;
   /** JS statements whose compile fences DEFERRED to runtime (runtimeFence
    * statements in the module) — off the build, on the coverage report. */
   runtimeFences: ScrDiagnostic[];
@@ -1038,6 +1043,17 @@ export function lowerToIr(
   const divergences = scanDivergences(resultLowerer, moduleOrder);
   timing("divergence-scan", { found: divergences.length });
   if (divergences.length > 0) result = { ...result, divergences };
+  // Contract types (@scriptc/types): written annotations, checked against
+  // the IR by the compile pipeline (contracts/check.ts).
+  const contracts = collectContractAnnotations(program.getTypeChecker(), moduleOrder);
+  timing("contract-annotations", { found: contracts.count });
+  if (contracts.diagnostics.length > 0)
+    result = {
+      ...result,
+      module: null,
+      diagnostics: [...result.diagnostics, ...contracts.diagnostics],
+    };
+  else if (contracts.count > 0) result = { ...result, contracts };
   if (options.coverage !== true) return result;
   const remainder = new Lowerer(program, entry, moduleOrder, dynamic, {
     frontendServices: options.frontendServices,
@@ -1883,6 +1899,10 @@ export class Lowerer {
    * discriminant was captured. A case match narrows the captured value,
    * not that mutable binding; preserve its tagged representation on reads. */
   readonly unstableSwitchBindings = new Set<ts.Symbol>();
+  /** Whether a checker narrowing of a mutable member or closure-assigned
+   * binding still holds at its use (calls do not reset TypeScript's
+   * narrowing). Stale ones read the declared storage or check it. */
+  readonly narrowing = new NarrowingStability(this);
   /** All storage slots widened for runtime absence, including slots whose
    * current control-flow branch has temporarily narrowed the value. */
   readonly runtimeOptionalStorageLocals = new Set<IrLocal>();
@@ -5690,6 +5710,7 @@ export class Lowerer {
 
   run(): LowerResult {
     const parts = this.splitFiles();
+    this.narrowing.setFiles(parts.map((fp) => fp.sf));
     // The coverage remainder deliberately visits every body that reachable
     // emit skipped. Those files are already phase-managed, so an ordinary
     // checker miss would stay a one-node IPC query instead of falling back
@@ -6059,6 +6080,7 @@ export class Lowerer {
   emitReachable(extraRoots?: readonly string[]): { reachable: Set<string>; result: LowerResult } {
     this.deferredModuleInitializers = new DeferredModuleInitializers();
     const parts = this.splitFiles();
+    this.narrowing.setFiles(parts.map((fp) => fp.sf));
     // Direct lowering callers do not necessarily run program preflight.
     // Establish the same managed header/top-level batch here before
     // collection, while the production path simply finds warm memos.
@@ -7043,6 +7065,11 @@ export class Lowerer {
     // receiver-kind check downstream sees the narrowed arm.
     const narrowed = this.chainNarrowedType.get(node);
     if (narrowed) return narrowed;
+    // A stale narrowing of a mutable member or closure-assigned binding in
+    // an absence/type test (or a slot accepting the declared type) reads
+    // as declared, so the test inspects the stored value.
+    const widened = this.narrowing.widenedType(node);
+    if (widened) return widened;
     const t = this.checker.getTypeAtLocation(node);
     // ALIASED-TYPEOF narrowing: inside a branch a `type === 'string'`
     // test proves (type = typeof val, both never reassigned), references
