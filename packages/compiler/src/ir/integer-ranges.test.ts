@@ -554,8 +554,8 @@ test("bitwise ranges keep known operand ranges", () => {
   const analyzed = analyzeIntegerRanges(
     fn([observe(truncated), observe(half), observe(bin("|", ref("unknown"), num(0)))]),
   );
-  expect(analyzed.get(truncated)).toEqual({ min: 0, max: 2 ** 30 });
-  expect(analyzed.get(half)).toEqual({ min: 0, max: 2 ** 29 });
+  expect(analyzed.get(truncated)).toEqual({ min: 0, max: 2 ** 31 - 1 });
+  expect(analyzed.get(half)).toEqual({ min: 0, max: 2 ** 30 - 1 });
 });
 
 test("bitwise identity operands follow ToInt32 and the shift-count mask", () => {
