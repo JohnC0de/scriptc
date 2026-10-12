@@ -16,7 +16,8 @@ function attempt(label: string, f: () => void): void {
 }
 
 // Private construction: plain field stores, a compound assignment (whose
-// receiver is a temporary alias of `this`), and a self reference.
+// receiver is a temporary alias of `this`), then a self reference (which
+// ends the private part: later reads of the field would hand `this` out).
 class Plain {
   flags = 1;
   name: string;

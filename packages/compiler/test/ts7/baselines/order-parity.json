@@ -15931,6 +15931,30 @@
     "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4691-publish-constructor-self-alias.ts": {
+   "order": [
+    "<repo>/tests/corpus/4691-publish-constructor-self-alias.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4692-borrowed-result-mutating-callees.ts": {
+   "order": [
+    "<repo>/tests/corpus/4692-borrowed-result-mutating-callees.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/switch-integer-dispatch.ts": {
+   "order": [
+    "<repo>/tests/corpus/switch-integer-dispatch.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4651-map-string-get-entry.ts": {
+   "order": [
+    "<repo>/tests/corpus/4651-map-string-get-entry.ts"
+   ],
+   "diags": []
   }
  }
 }

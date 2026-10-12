@@ -78,9 +78,10 @@ export function computeImmutableFields(mod: IrModule): ImmutableFields | null {
  *   `this` escape, and the store lies in a top-level statement before the
  *   first one in which this constructor lets it escape
  *   (cycle-mutability's constructorEscapePoint: `this`, or a constant alias
- *   of it, may only be a field-store target, a field-read receiver, the
- *   direct base constructor's receiver, or stored into one of its own
- *   fields; closures and class references capturing it count as escapes).
+ *   of it, may only be a field-store target, a field-read receiver or the
+ *   direct base constructor's receiver; storing it anywhere, including
+ *   into one of its own fields whose later reads would hand it out again,
+ *   and closures and class references capturing it count as escapes).
  *   A subclass constructor's code only runs after this body returns.
  *
  * Library builds keep every guard: their constructors can be invoked by an
@@ -153,9 +154,7 @@ export function computeConstructionFacts(mod: IrModule): ConstructionFacts {
     const point =
       fn === undefined || thisId === null || classes.get(name)?.runtime === true
         ? 0
-        : constructorEscapePoint(fn, thisId, base !== undefined ? `%${base}.constructor` : null, {
-            selfStores: true,
-          });
+        : constructorEscapePoint(fn, thisId, base !== undefined ? `%${base}.constructor` : null);
     points.set(name, point);
     return point;
   };

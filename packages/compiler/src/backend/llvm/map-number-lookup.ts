@@ -7,6 +7,9 @@
  * scr_map_entry_f64 otherwise. The generated code then reads the entry's
  * value slot itself and retains a reference value with the value type's own
  * retain, which is the adapter the collection was constructed with.
+ * String-keyed reference reads use the same entry contract through
+ * scr_map_entry_str, so their retain is inline rather than the runtime's
+ * indirect adapter call.
  */
 import type { IrType } from "../../ir/ir.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
@@ -31,6 +34,16 @@ export function emitNumberMapSlot(host: LlvmEmitterContext, entry: string, type:
   return value;
 }
 
+export const STRING_MAP_ENTRY_DECL = "declare ptr @scr_map_entry_str(ptr, ptr)";
+
+/** The entry for a string `key`, or null when absent. Valid until the next mutation. */
+export function emitStringMapEntry(host: LlvmEmitterContext, map: string, key: string): string {
+  host.declare(STRING_MAP_ENTRY_DECL);
+  const entry = host.B.tmp();
+  host.B.line(`${entry} = call ptr @scr_map_entry_str(ptr ${map}, ptr ${key})`);
+  return entry;
+}
+
 /** Map.get of a reference value: a +1 value, or null when absent — the
  * contract of scr_map_get_f64_ref. */
 export function emitNumberMapGetRef(
@@ -39,8 +52,24 @@ export function emitNumberMapGetRef(
   key: string,
   value: IrType,
 ): string {
+  return emitMapEntryGetRef(host, emitNumberMapEntry(host, map, key), value);
+}
+
+/** Map.get of a reference value under a string key, with scr_map_get_str_ref's
+ * contract. The value type's own retain replaces the collection's adapter, so
+ * the retain is inline instead of an indirect call in the runtime. */
+export function emitStringMapGetRef(
+  host: LlvmEmitterContext,
+  map: string,
+  key: string,
+  value: IrType,
+): string {
+  return emitMapEntryGetRef(host, emitStringMapEntry(host, map, key), value);
+}
+
+/** The +1 value of a found entry, or null for a missing (null) entry. */
+function emitMapEntryGetRef(host: LlvmEmitterContext, entry: string, value: IrType): string {
   const B = host.B;
-  const entry = emitNumberMapEntry(host, map, key);
   const found = B.tmp();
   B.line(`${found} = icmp ne ptr ${entry}, null`);
   const hit = B.newLabel("mapn.hit"),

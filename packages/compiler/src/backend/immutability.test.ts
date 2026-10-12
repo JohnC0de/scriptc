@@ -78,13 +78,15 @@ test("constructor stores before this escapes are private", () => {
   expect(privateFields(mod, "P")).toEqual(["a"]);
 });
 
-test("storing this into its own field does not expose it", () => {
+test("storing this into its own field ends private construction", () => {
+  // A later read of the field yields `this` again, so any use of it
+  // (publishing it, handing it to a worker) would expose the object.
   const self: IrStmt = { ...setThis("P", "self"), value: thisRef("P") } as IrStmt;
   const mod = module(
-    [{ name: "P", fields: [...fields("a"), { name: "self", type: obj("P") }], loc }],
-    [ctor("P", [self, setThis("P", "a")])],
+    [{ name: "P", fields: [...fields("a", "b"), { name: "self", type: obj("P") }], loc }],
+    [ctor("P", [setThis("P", "a"), self, setThis("P", "b")])],
   );
-  expect(privateFields(mod, "P")).toEqual(["self", "a"]);
+  expect(privateFields(mod, "P")).toEqual(["a"]);
 });
 
 test("a base constructor's escape makes every subclass store public", () => {

@@ -159,7 +159,7 @@ import {
   type MapReadLifetimes,
 } from "./map-read-lifetimes.js";
 import { emitBorrowedFieldSequence, guardedValue } from "./borrowed-receivers.js";
-import { emitBorrowedInput } from "./borrowed-inputs.js";
+import { borrowableInputs, emitBorrowedInput } from "./borrowed-inputs.js";
 import { analyzeWalks, findWalkBorrows, type WalkBorrowHost } from "./walk-borrows.js";
 import { findReboundParameters } from "./rebound-parameters.js";
 import { ReferenceEffects } from "./reference-effects.js";
@@ -303,7 +303,7 @@ import { LlWalkers } from "./walkers.js";
 import { isObjectArm, NULLABLE_ABSENT, NULLABLE_NULL, NullableUnions } from "./nullable-unions.js";
 import { emitNullablePresent, emitUnionPeek, emitUnionTag } from "./union-repr.js";
 import { literalCapWord, literalCapWord32 } from "./string-key-hash.js";
-import { NUMBER_MAP_ENTRY_DECL } from "./map-number-lookup.js";
+import { NUMBER_MAP_ENTRY_DECL, STRING_MAP_ENTRY_DECL } from "./map-number-lookup.js";
 import { STRING_READ_HELPERS } from "./string-reads.js";
 import {
   emitConcatInputs,
@@ -1930,8 +1930,12 @@ export class LlEmitter {
       ...(this.decls.has(NUMBER_MAP_ENTRY_DECL)
         ? [
             `%ScrMapIx = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ptr, ptr, ${this.sizeType} }`,
-            `%ScrMapEntry = type { i64, i64, i64 }`,
           ]
+        : []),
+      // String-keyed reference reads load the value slot of the entry
+      // scr_map_entry_str returns (map-number-lookup.ts).
+      ...(this.decls.has(NUMBER_MAP_ENTRY_DECL) || this.decls.has(STRING_MAP_ENTRY_DECL)
+        ? [`%ScrMapEntry = type { i64, i64, i64 }`]
         : []),
       // The runtime error prefix { rc, vt, name, message, code, cause } and the
       // class-object shape { rc, pre, post, ctor, name } — field reads on
@@ -5433,7 +5437,13 @@ export class LlEmitter {
     // Lifted functions receive their closure first (the callValue ABI).
     if (fn.captures !== undefined) params.unshift("ptr %sc_env");
     const ret = this.llType(fn.returnType);
-    const attrs = coro !== null ? "#1" : FN_ATTRS;
+    let attrs = coro !== null ? "#1" : FN_ATTRS;
+    // The shared indexed-read helper (lowerSafeIndexRead) is a dense bounds
+    // test, a state test and a load behind cold runtime fallbacks, called
+    // from every `a[i]` of one element type. Without the hint LLVM keeps the
+    // hot instances out of line once they have many callers: every read pays
+    // a call, and an integer index converts to a double and back across it.
+    if (fn.name.startsWith("%arr.idxOr.")) attrs = `inlinehint ${attrs}`;
     const debug = this.debugScope === null ? "" : ` !dbg ${this.debugScope}`;
     const symbol = borrowed ? mangleBorrowedFunction(fn.name) : mangleFunction(fn.name);
     const body = `define internal ${ret} @${symbol}(${params.join(", ")}) ${attrs}${debug} { ; ${fn.name}\n${B.render()}\n}`;
@@ -7149,7 +7159,7 @@ export class LlEmitter {
     const caseLabels = s.cases.map(() => B.newLabel("sw.c"));
     const defaultIdx = s.cases.findIndex((c) => c.test === null);
     const fallback = defaultIdx >= 0 ? caseLabels[defaultIdx]! : end;
-    if (!emitLiteralSwitch(this, disc, s.cases, caseLabels, fallback)) {
+    if (!emitLiteralSwitch(this, disc, s.disc, s.cases, caseLabels, fallback)) {
       s.cases.forEach((c, i) => {
         if (c.test === null) return;
         // Lazy source-order test evaluation (a test after the match never
@@ -8037,17 +8047,21 @@ export class LlEmitter {
         const wrap = this.borrowableNullableWrap(e);
         return wrap === "unit" || (wrap === "ref" && this.canBorrowReceiver(e.value));
       }
-      // A borrowed-return callee preserves edges, so its result stays
-      // reachable from borrowable arguments until the consumer runs.
-      case "call":
-        return (
-          this.borrowedReturns.has(e.callee) &&
-          e.args.every(
-            (arg) =>
-              (!isRefCounted(arg.type) || this.canBorrowReceiver(arg)) &&
-              this.referenceEffects.preserves(arg),
-          )
-        );
+      // A borrowed-return result stays reachable from its borrowed
+      // arguments until the consumer runs. Each argument is lent without a
+      // snapshot, so neither the callee nor a later argument may replace
+      // what it was read from: a callee that preserves every edge cannot,
+      // and any other one must leave the argument's locations unwritten.
+      case "call": {
+        if (!this.borrowedReturns.has(e.callee)) return false;
+        if (!e.args.every((arg) => this.referenceEffects.preserves(arg))) return false;
+        const preserving = this.referenceEffects.functions.has(e.callee);
+        if (preserving)
+          return e.args.every((arg) => !isRefCounted(arg.type) || this.canBorrowReceiver(arg));
+        if (this.referenceWrites === null) return false;
+        const lent = borrowableInputs(this, e.args, false, this.referenceWrites.summary(e.callee));
+        return e.args.every((arg, i) => !isRefCounted(arg.type) || lent[i] === true);
+      }
       // A required element read: the (borrowed) array owns the element
       // while an edge-preserving index computes.
       case "arrayGet":
