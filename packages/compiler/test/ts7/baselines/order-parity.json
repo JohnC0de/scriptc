@@ -15901,6 +15901,12 @@
     "<repo>/tests/corpus/switch-integer-dispatch.ts"
    ],
    "diags": []
+  },
+  "<repo>/tests/corpus/4651-map-string-get-entry.ts": {
+   "order": [
+    "<repo>/tests/corpus/4651-map-string-get-entry.ts"
+   ],
+   "diags": []
   }
  }
 }
