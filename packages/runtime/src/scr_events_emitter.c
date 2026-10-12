@@ -791,9 +791,11 @@ ScrArr *scr_emitter_event_names(ScrEmitter *em) {
  * The once wrapper is runtime-internal here, so BOTH forms answer the
  * original listeners (SEMANTICS.md documents the rawListeners
  * divergence). */
+static const ScrArrOps scr_ee_closure_arr_ops = { &scr_closure_retain_v, &scr_closure_release_v,
+                                                  &scr_closure_trace_v };
+
 ScrArr *scr_emitter_listeners(ScrEmitter *em, ScrStr *name) {
-  ScrArr *out = scr_arr_new_ref(&scr_closure_retain_v, &scr_closure_release_v,
-                                 &scr_closure_trace_v, 0);
+  ScrArr *out = scr_arr_new_ops(&scr_ee_closure_arr_ops, 0);
   ScrEeBucket *b = em->reg ? scr_ee_bucket_find(em->reg, name->data, name->len) : NULL;
   if (b) {
     for (size_t i = 0; i < b->n; i++) {

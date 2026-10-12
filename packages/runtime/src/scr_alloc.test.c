@@ -121,20 +121,24 @@ static void vm_flags(const void *p, char *out, size_t cap) {
 }
 #endif
 
-/* A class slice carves contiguously from its start, across the point where
+/* A class slice carves contiguously from its start, across the points where
  * its limit is raised; on Linux the slices are huge-page aligned, the first
- * 8 MiB of a slice stay on small pages and the rest may use huge pages. */
+ * 8 MiB of a slice stay on small pages and the rest may use huge pages, and
+ * a helper thread faults in memory ahead of the limit. Every fresh block
+ * still reads as zero, wherever the limit steps and whoever faulted it. */
 static void check_slice_growth(void) {
-  enum { SZ = 496, AFTER = 8 << 20 };
+  enum { SZ = 496, AFTER = 8 << 20, PAST = 3 * (2 << 20) + (1 << 20) };
   unsigned char *first = scr_mem_alloc(SZ), *prev = first;
   assert(owned(first));
   uintptr_t start = scr_sa.base + ((uintptr_t)((SZ - 1) / SCR_SA_STEP) << scr_sa.shift);
   assert((uintptr_t)first == start); /* a class nothing else has touched */
-  size_t blocks = AFTER / SZ + 64;
+  size_t blocks = (AFTER + PAST) / SZ;
   for (size_t i = 1; i < blocks; i++) {
     unsigned char *p = scr_mem_alloc(SZ);
     assert(p == prev + SZ);
+    for (size_t k = 0; k < SZ; k += 16) assert(p[k] == 0);
     p[0] = (unsigned char)i; /* commit the pages */
+    p[SZ - 1] = (unsigned char)i;
     prev = p;
   }
 #ifdef __linux__
@@ -154,6 +158,40 @@ static void check_slice_growth(void) {
   assert(scr_mem_alloc(SZ) == first);
   scr_mem_free(first);
 }
+
+#if defined(__linux__) && defined(__GLIBC__)
+#include <unistd.h>
+/* Blocks above SCR_SA_MAX come from glibc; once its brk heap has grown past
+ * 32 MiB, the heap is advised huge pages where THP is in madvise mode. */
+static void check_heap_huge_pages(void) {
+  enum { N = 1024, SZ = 64 << 10 };
+  static unsigned char *block[N];
+  uintptr_t start = (uintptr_t)sbrk(0);
+  for (size_t i = 0; i < N; i++) {
+    block[i] = scr_mem_alloc(SZ);
+    assert(block[i] && !owned(block[i]));
+    block[i][0] = (unsigned char)i;
+  }
+  uintptr_t top = (uintptr_t)sbrk(0);
+  char mode[96] = {0};
+  FILE *thp = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+  if (thp) {
+    size_t n = fread(mode, 1, sizeof mode - 1, thp);
+    mode[n] = '\0';
+    fclose(thp);
+  }
+  /* Only where glibc's heap served them (a sanitizer may replace malloc). */
+  if (top - start >= ((size_t)48 << 20) && strstr(mode, "[madvise]")) {
+    char flags[256];
+    vm_flags(block[N - 1], flags, sizeof flags);
+    assert(strstr(flags, " hg"));
+  }
+  for (size_t i = 0; i < N; i++) {
+    assert(block[i][0] == (unsigned char)i);
+    scr_mem_free(block[i]);
+  }
+}
+#endif
 #endif
 
 #if defined(SCR_WORKERS) && SCR_SMALL_ALLOC
@@ -310,6 +348,9 @@ int main(void) {
   check_realloc();
   check_system_pointers();
   check_churn();
+#if SCR_SMALL_ALLOC && defined(__linux__) && defined(__GLIBC__)
+  check_heap_huge_pages();
+#endif
 #if defined(SCR_WORKERS) && SCR_SMALL_ALLOC
   check_threads();
 #ifdef __linux__

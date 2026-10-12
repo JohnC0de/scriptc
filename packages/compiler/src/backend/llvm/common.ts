@@ -9,6 +9,20 @@ import type {
 } from "../../ir/ir.js";
 import type { LlvmEmitterContext } from "./expr-context.js";
 
+/** Field numbers of %ScrArr, which mirrors scr_runtime.h's ScrArr field for
+ * field (its static assertions pin `cyc` and `data`). */
+export const SCR_ARR_FIELD = {
+  rc: 0,
+  len: 1,
+  cap: 2,
+  elem: 3,
+  cyc: 4,
+  ops: 5,
+  data: 6,
+  present: 7,
+  ext: 8,
+} as const;
+
 /** Lines that decide whether the double `index` is an integer in
  * `[0, length)`, where `length` is an unsigned `sizeType` count, and give
  * that integer as an i64. `%{ok}` is the answer; `%{wide}` is meaningful

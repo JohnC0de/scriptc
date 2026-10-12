@@ -12,7 +12,7 @@ import { everyStmtList } from "../../ir/traverse.js";
 import { analyzeCallLifetimes, type CallLifetimes } from "./call-lifetimes.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import { ReferenceEffects } from "./reference-effects.js";
-import { exactIndexLines } from "./common.js";
+import { SCR_ARR_FIELD, exactIndexLines } from "./common.js";
 
 export interface LocalArrayRead {
   type: IrType;
@@ -513,7 +513,9 @@ function emitDenseReferenceArrayRead(
     statePtr = B.tmp(),
     denseState = B.tmp(),
     densePresent = B.tmp();
-  B.line(`${statesPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 8`);
+  B.line(
+    `${statesPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.present}`,
+  );
   host.markMemoryPointer(statesPtr, "array:header");
   B.line(`${states} = load ptr, ptr ${statesPtr}${host.fieldAliasAttachment(statesPtr)}`);
   B.line(`${statePtr} = getelementptr inbounds i8, ptr ${states}, ${host.sizeType} ${offset}`);
@@ -526,7 +528,9 @@ function emitDenseReferenceArrayRead(
     data = B.tmp(),
     valuePtr = B.tmp(),
     raw = B.tmp();
-  B.line(`${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 7`);
+  B.line(
+    `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array.name}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
+  );
   host.markMemoryPointer(dataPtr, "array:header");
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
   B.line(`${valuePtr} = getelementptr inbounds i64, ptr ${data}, ${host.sizeType} ${offset}`);
