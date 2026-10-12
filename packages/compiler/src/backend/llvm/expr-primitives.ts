@@ -11,7 +11,13 @@ import { BYTES_ELEM_NUM, closureIdentityEqual, f64Lit } from "./common.js";
 import { emitStringInputs } from "./string-lifetimes.js";
 import { emitStringParts, numberPart, stringParts } from "./string-construction.js";
 import { emitBorrowedInputs } from "./borrowed-inputs.js";
-import { exactInteger, widenInteger, integerNumber } from "./integer-values.js";
+import {
+  exactInteger,
+  int32Number,
+  integerNumber,
+  narrowInteger,
+  widenInteger,
+} from "./integer-values.js";
 import {
   bitwiseIdentityOperand,
   integerArithmeticRange,
@@ -233,9 +239,20 @@ export function emitOperatorExpr(
         const li = exactInteger(host, l, e.left),
           ri = exactInteger(host, r, e.right);
         if (li && ri) {
+          const range = e.op === "%" ? null : integerArithmeticRange(e.op, li.range, ri.range);
+          if (range && withinInt32(range) && withinInt32(li.range) && withinInt32(ri.range)) {
+            // Int32 operands and result: 32-bit arithmetic that cannot
+            // overflow. The nsw flag survives where a truncated 64-bit
+            // result would lose it, so LLVM can widen loop counters such
+            // as `i = (i + 1) | 0` into 64-bit address arithmetic.
+            const result = B.tmp();
+            B.line(
+              `${result} = ${e.op === "+" ? "add" : e.op === "-" ? "sub" : "mul"} nsw i32 ${narrowInteger(host, li)}, ${narrowInteger(host, ri)}`,
+            );
+            return int32Number(host, result, range, e.type);
+          }
           const left = widenInteger(host, li),
             right = widenInteger(host, ri);
-          const range = e.op === "%" ? null : integerArithmeticRange(e.op, li.range, ri.range);
           if (range) {
             const result = B.tmp();
             B.line(

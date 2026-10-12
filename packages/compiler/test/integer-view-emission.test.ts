@@ -46,7 +46,7 @@ console.log(mix(-0, new Uint32Array(3)), floating(1.75, false), observedAfter(1.
       const mix = body(ll, "mix");
       expect(mix).toContain("integer view state");
       // The original input is converted once, before entering the loop.
-      expect(mix.match(/^uint32\.coerce\.slow\.[^\n]*:/gm)).toHaveLength(1);
+      expect(mix.match(/^uint32\.coerce\.slow\d+:/gm)).toHaveLength(1);
       const loopStart = mix.search(/\nloop\.b[._\d]/);
       expect(loopStart).toBeGreaterThan(0);
       const loop = mix.slice(loopStart);

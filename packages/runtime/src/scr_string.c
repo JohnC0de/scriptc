@@ -1081,18 +1081,60 @@ static void scr_sidx_ascii_run(const ScrStr *s, ScrSidx *e) {
   e->ascii_end = end;
 }
 
+/* How far past its end a forward access may grow the cached ASCII run, and
+ * how far beyond the access the growth looks ahead. */
+#define SCR_SIDX_ASCII_REACH ((size_t)4096)
+#define SCR_SIDX_ASCII_AHEAD ((size_t)256)
+
+/* Grow the cached ASCII run forward until it covers byte `want` (plus a
+ * lookahead) or meets a non-ASCII byte. The run stays one contiguous ASCII
+ * span starting at the unit/byte pair (ascii_cu, ascii_cb), so a scan that
+ * reads a mostly ASCII text front to back (a scanner taking substrings at
+ * increasing offsets) tests each byte once instead of walking from the
+ * cursor and re-centring the run every 128 bytes. Only accesses up to
+ * SCR_SIDX_ASCII_REACH past the run try: the walk below bounds the rest. */
+static bool scr_sidx_ascii_grow(const ScrStr *s, ScrSidx *e, size_t want) {
+  size_t end = e->ascii_end;
+  if (want < end || want >= s->len || want - end > SCR_SIDX_ASCII_REACH) return false;
+  size_t limit = s->len - want > SCR_SIDX_ASCII_AHEAD ? want + SCR_SIDX_ASCII_AHEAD : s->len;
+  while (limit - end >= 8) {
+    uint64_t word;
+    memcpy(&word, s->data + end, 8);
+    if (word & UINT64_C(0x8080808080808080)) break;
+    end += 8;
+  }
+  while (end < limit && (unsigned char)s->data[end] < 0x80) end++;
+  e->ascii_end = end;
+  return want < end;
+}
+
+static size_t scr_u16_to_byte_walk(const ScrStr *s, ScrSidx *e, size_t u16,
+                                   bool *mid);
+
 /* Convert a UTF-16 index to a byte offset from the closest sparse anchor or
  * hot cursor. If u16 addresses the second (low-surrogate) unit of
  * an astral char, *mid is set and the returned offset is the START of that
  * 4-byte sequence. u16 at or past the end returns s->len with *mid false.
- * Same contract as a from-scratch scan. */
-static size_t scr_u16_to_byte_c(const ScrStr *s, ScrSidx *e, size_t u16,
-                                 bool *mid) {
+ * Same contract as a from-scratch scan. The identity and ASCII-run cases
+ * inline into callers; everything else is out of line. */
+static inline size_t scr_u16_to_byte_c(const ScrStr *s, ScrSidx *e, size_t u16,
+                                        bool *mid) {
   if (s->ascii || e->u16len == s->len) { /* all ASCII: identity mapping */
     *mid = false;
     return u16 < s->len ? u16 : s->len;
   }
   if (u16 >= e->ascii_cu && u16 - e->ascii_cu < e->ascii_end - e->ascii_cb) {
+    e->cb = e->ascii_cb + (u16 - e->ascii_cu);
+    e->cu = u16;
+    *mid = false;
+    return e->cb;
+  }
+  return scr_u16_to_byte_walk(s, e, u16, mid);
+}
+
+static __attribute__((noinline)) size_t scr_u16_to_byte_walk(const ScrStr *s, ScrSidx *e,
+                                                             size_t u16, bool *mid) {
+  if (u16 >= e->ascii_cu && scr_sidx_ascii_grow(s, e, e->ascii_cb + (u16 - e->ascii_cu))) {
     e->cb = e->ascii_cb + (u16 - e->ascii_cu);
     e->cu = u16;
     *mid = false;
@@ -1151,12 +1193,25 @@ static size_t scr_u16_to_byte_c(const ScrStr *s, ScrSidx *e, size_t u16,
   return cb;
 }
 
+static size_t scr_byte_to_u16_walk(const ScrStr *s, ScrSidx *e, size_t byte_off);
+
 /* Convert a byte offset (must be a char boundary) to a UTF-16 index from
- * the closest sparse anchor or hot cursor. */
-static size_t scr_byte_to_u16_c(const ScrStr *s, ScrSidx *e,
-                                 size_t byte_off) {
+ * the closest sparse anchor or hot cursor. As above, the identity and
+ * ASCII-run cases inline into callers. */
+static inline size_t scr_byte_to_u16_c(const ScrStr *s, ScrSidx *e,
+                                        size_t byte_off) {
   if (s->ascii || e->u16len == s->len) return byte_off; /* all ASCII */
   if (byte_off >= e->ascii_cb && byte_off < e->ascii_end) {
+    e->cu = e->ascii_cu + (byte_off - e->ascii_cb);
+    e->cb = byte_off;
+    return e->cu;
+  }
+  return scr_byte_to_u16_walk(s, e, byte_off);
+}
+
+static __attribute__((noinline)) size_t scr_byte_to_u16_walk(const ScrStr *s, ScrSidx *e,
+                                                             size_t byte_off) {
+  if (byte_off >= e->ascii_cb && scr_sidx_ascii_grow(s, e, byte_off)) {
     e->cu = e->ascii_cu + (byte_off - e->ascii_cb);
     e->cb = byte_off;
     return e->cu;

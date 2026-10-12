@@ -37,8 +37,11 @@ console.log(safe(0.5));
         new RegExp(`define internal [^\\n]+ @sc_f_${name}\\([^\\n]*\\) #0 \\{([\\s\\S]*?)\\n\\}`),
       )![1]!;
     expect(llBody("safe")).toContain(" = add nsw i64 ");
-    // Only the arbitrary input's slow ToUint32 path still adds doubles.
-    expect(llBody("safe").match(/ = fadd double /g)).toHaveLength(1);
+    // The arbitrary input's slow ToUint32 path is integer arithmetic: no
+    // double additions and no `frem` (an `fmod` call LLVM could hoist).
+    expect(llBody("safe")).toContain("uint32.coerce.slow");
+    expect(llBody("safe")).not.toContain(" = fadd double ");
+    expect(llBody("safe")).not.toContain("frem");
     expect(llBody("unknown")).toContain("uint32.coerce.slow");
     expect(llBody("unknown")).toContain(" = fadd double ");
     expect(llBody("negativeZero")).toContain(" = fadd double ");

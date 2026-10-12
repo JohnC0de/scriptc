@@ -2738,6 +2738,32 @@ double scr_bytes_write_str(ScrBytes *b, const ScrStr *s, const ScrStr *enc,
     size_t i = 0, written = 0, width = utf16 ? 2 : 1;
     const uint64_t high = UINT64_C(0x8080808080808080);
     while (i < s->len && budget - written >= width) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+      /* utf16le of an ASCII run: zero-extend each byte to a little-endian
+       * unit, eight per step with two word stores (the generic loop below
+       * stores byte by byte, because the source and destination may alias
+       * as far as the compiler knows). */
+      if (utf16) {
+        uint8_t *d = b->data + o + written;
+        size_t n = 0, room = (budget - written) / 16, left = (s->len - i) / 8;
+        size_t steps = room < left ? room : left;
+        for (; n < steps; n++) {
+          uint64_t w;
+          memcpy(&w, s->data + i + 8 * n, 8);
+          if (w & high) break;
+          uint64_t lo = w & UINT64_C(0xffffffff), hi = w >> 32;
+          lo = (lo | (lo << 16)) & UINT64_C(0x0000ffff0000ffff);
+          lo = (lo | (lo << 8)) & UINT64_C(0x00ff00ff00ff00ff);
+          hi = (hi | (hi << 16)) & UINT64_C(0x0000ffff0000ffff);
+          hi = (hi | (hi << 8)) & UINT64_C(0x00ff00ff00ff00ff);
+          memcpy(d + 16 * n, &lo, 8);
+          memcpy(d + 16 * n + 8, &hi, 8);
+        }
+        i += 8 * n;
+        written += 16 * n;
+        if (n != 0) continue;
+      }
+#endif
       /* ASCII runs encode byte-for-unit: widen (or copy) eight bytes per
        * step while the budget holds them all, else one code point below. */
       if (s->len - i >= 8 && budget - written >= 8 * width) {

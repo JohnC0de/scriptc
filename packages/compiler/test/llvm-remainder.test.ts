@@ -35,8 +35,9 @@ console.log(remainder(5, 2.5), signed(-7.5), maybeZero(7.5, 2.5));
     const fn = (name: string): string =>
       new RegExp(`^define internal [^\\n]*@sc_[bf]+_${name}\\([^]*?^}`, "m").exec(ll)![0];
     // Four source remainders keep a floating fallback behind a runtime
-    // integer check; three ToUint32 coercion fallbacks stay floating.
-    expect(ll.match(/ = frem double /g)).toHaveLength(7);
+    // integer check; ToUint32 coercion fallbacks use integer arithmetic.
+    expect(ll.match(/ = frem double /g)).toHaveLength(4);
+    expect(ll).toContain("uint32.coerce.slow");
     expect(ll.match(/ = srem i64 /g)).toHaveLength(5);
     expect(ll).toMatch(/ = select i1 [^\n]+double [^\n]+double /);
     // Unproven operands: both round-trip checks, the 2^53 dividend bound,
