@@ -27,9 +27,7 @@ export function executableSectionEliminationFlags(platform: string): {
 } {
   switch (platform) {
     case "darwin":
-      // ld64's symbol subsections make this sufficient for ordinary C/LLVM
-      // objects. Do not attach it only to --dynamic: static programs have the
-      // same unreachable runtime sections.
+      // ld64's symbol subsections let dead_strip remove unreachable runtime code.
       return { compile: [], link: ["-Wl,-dead_strip"] };
     case "linux":
       return {
@@ -51,51 +49,6 @@ export function executableSectionEliminationFlags(platform: string): {
   }
 }
 
-/* ── alternate C compiler (SCRIPTC_CC) and cross target (SCRIPTC_TARGET) ──────────
- * SCRIPTC_CC=zigcc swaps the compiler driver to `zig cc` (clang underneath, with
- * zig's bundled sysroots — the door to cross-compiling). Unset or
- * SCRIPTC_CC=clang is the default. Host Linux adds the two glibc requirements
- * that macOS does not need: -D_GNU_SOURCE while compiling, and -lm after all
- * link inputs. Other hosts keep the historical bare-clang command line.
- *
- * SCRIPTC_TARGET=<triple> (zigcc only — plain clang has no cross sysroots here)
- * adds `-target <triple>` to every compile. Linux triples also add
- * -D_GNU_SOURCE: glibc hides POSIX/GNU declarations (kill, realpath, stpcpy,
- * arc4random_buf, posix_spawn_file_actions_addchdir_np, ...) under plain
- * -std=c11, where macOS exposes everything by default. Musl triples additionally
- * carry SCR_MUSL because musl deliberately exposes no libc-identification macro;
- * the runtime uses it only for the narrow libc shim in scr_musl.c. Pin the glibc
- * minor in GNU triples (e.g. aarch64-linux-gnu.2.36) so the binary runs on the
- * differential container's distro (see tests/harness/linux-differential.test.ts).
- *
- * Fetch is NATIVE everywhere (scr_fetch.c over the socket units — no
- * libcurl), so it cross-compiles wherever net/http/tls do, win32
- * included. The retired curl reference (SCRIPTC_FETCH_CURL=1) keeps the
- * historical host -lcurl link and the linux-gnu import-STUB arm (soname
- * libcurl.so.4 — see ensureCurlStub). The event-loop units
- * (net/http/dgram/watch) cross-compile to Linux: the readiness poller is
- * the scr_platform.h contract with kqueue and epoll backends; libregexp,
- * zlib, mbedTLS, and the engine archive (--dynamic) build per target
- * (ensureLreObjects / ensureZlibObjects / ensureTlsArchive /
- * buildEngineArchiveDirect — default host-clang zlib builds still link the
- * system libz, byte-identically; Zig builds use vendored zlib objects).
- * Windows triples (x86_64-windows-gnu, mingw-w64 headers and CRT via zig)
- * have no gates left: events, net/http, fetch, watch, zlib, dgram/dns,
- * tls, and the engine archive (--dynamic) all build per target through
- * their win32 arms (mbedTLS compiles unchanged for the triple — its own _WIN32
- * port covers entropy and timing; the TLS link adds bcrypt for
- * BCryptGenRandom, while the CA-store unit adds crypt32 for the Windows
- * system certificate stores).
- * They additionally compile
- * scr_win.c, the win32 libc shim TU (stpcpy, arc4random_buf — see the
- * _WIN32 block in scr_runtime.h), linking -ladvapi32 for its CSPRNG
- * (RtlGenRandom) and GetUserNameA. Native zigcc builds (no SCRIPTC_TARGET)
- * support everything: same platform, same archives, just a different
- * driver binary.
- * Mobile triples (aarch64-apple-ios, aarch64-apple-ios-simulator,
- * aarch64-linux-android — see the mobile-targets block below) are
- * LIBRARY-MODE targets: compileLibArchive accepts them, compile()/compileC
- * refuse the executable lane with the pointer to --lib. */
 export interface CcDriver {
   /** The compiler argv prefix: ["clang"] (default) or ["zig", "cc"]. */
   argv: string[];

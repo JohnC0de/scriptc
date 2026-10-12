@@ -763,7 +763,7 @@ describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
     ]);
     // The package resolves at runtime (Node would load it) but ships no
     // types: the library answer is the bar's, not SC1010's "nothing
-    // installed resolves it" nor SC2013's --dynamic teaching.
+
     expect(diags.map((d) => d.code)).toEqual(["SC4020"]);
     expect(diags[0]!.message).toContain("'untyped'");
     expect(diags[0]!.message).toContain("no own .d.ts");

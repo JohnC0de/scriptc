@@ -70,7 +70,6 @@ export const DYN_KIND = {
   FUNC: 8,
   HANDLE: 9,
   PROMISE: 10,
-  JSVAL: 11 /* SCR_DYN_JSVAL — island values held by reference */,
   TYPED_REF: 12 /* SCR_DYN_TYPED_REF — static Web-stream transit capsule */,
   PROXY: 13,
   BIGINT: 14,
@@ -83,6 +82,8 @@ export interface DynHost extends WalkerHost {
   unitInstanceRef(unionId: string, tag: number): string;
   /** See ClassHost.virtualEntry. */
   virtualEntry?(implFn: string): string;
+  /** See ClassHost.programLifetime. */
+  readonly programLifetime?: ReadonlySet<string>;
   /** The immortal ABSENT field-slot state of an undefined-armed union. */
   absentInstanceRef(unionId: string): string;
   /** The shared adapter record: live array capsules read its `arrayOps`, so a
@@ -2619,7 +2620,6 @@ export class LlDyn {
         DYN_KIND.FUNC,
         DYN_KIND.HANDLE,
         DYN_KIND.PROMISE,
-        DYN_KIND.JSVAL,
         DYN_KIND.TYPED_REF,
         DYN_KIND.PROXY,
         DYN_KIND.BIGINT,
@@ -2634,14 +2634,6 @@ export class LlDyn {
       host.declare(`declare void @scr_dyn_proxy_unsupported(ptr)`);
       B.line(`call void @scr_dyn_proxy_unsupported(ptr ${host.cstr("string conversion")})`);
       B.br(done);
-      B.startBlock(labels.get(DYN_KIND.JSVAL)!);
-      {
-        // Island-held: the engine's own ToString (a bridged failure
-        // leaves the exception pending and appends nothing).
-        host.declare(`declare void @scr_dyn_isl_tostr_buf(ptr, ptr)`);
-        B.line(`call void @scr_dyn_isl_tostr_buf(ptr %b, ptr %d)`);
-        B.br(done);
-      }
       B.startBlock(labels.get(DYN_KIND.TYPED_REF)!);
       {
         host.declare(`declare ptr @scr_dyn_typed_ref_materialize(ptr)`);
@@ -3207,9 +3199,7 @@ export class LlDyn {
       B.terminate(`ret ptr ${r}`);
       B.startBlock(lNext);
     }
-    // ISLAND-held receivers: o[k] reads the REAL engine property (getters
-    // included, throws bridged catchably) and the result wraps back
-    // scalar-normalized — the routed keyed read that retired the fence.
+
     {
       const isProxy = B.tmp();
       B.line(`${isProxy} = icmp eq i32 ${kd}, ${DYN_KIND.PROXY}`);
@@ -3223,19 +3213,7 @@ export class LlDyn {
       B.terminate(`ret ptr ${r}`);
       B.startBlock(lNext);
     }
-    {
-      const isJv = B.tmp();
-      B.line(`${isJv} = icmp eq i32 ${kd}, ${DYN_KIND.JSVAL}`);
-      const lJv = B.newLabel("kg.jv");
-      const lNext = B.newLabel("kg.n");
-      B.condBr(isJv, lJv, lNext);
-      B.startBlock(lJv);
-      host.declare(`declare ptr @scr_dyn_isl_key_get(ptr, ptr)`);
-      const r = B.tmp();
-      B.line(`${r} = call ptr @scr_dyn_isl_key_get(ptr %d, ptr %k)`);
-      B.terminate(`ret ptr ${r}`);
-      B.startBlock(lNext);
-    }
+
     // OBJ: the own member or the inherited builtin Error constructor.
     {
       const isObj = B.tmp();
@@ -3605,23 +3583,7 @@ export class LlDyn {
       B.terminate(`ret ptr ${out}`);
       B.startBlock(lNext);
     }
-    // Island-held sources keep the engine's iterator and IteratorClose
-    // behavior while returning checked values for the destructuring slots.
-    {
-      const isJv = B.tmp();
-      B.line(`${isJv} = icmp eq i32 ${kd}, ${DYN_KIND.JSVAL}`);
-      const lJv = B.newLabel("din.jv");
-      const lNotJv = B.newLabel("din.njv");
-      B.condBr(isJv, lJv, lNotJv);
-      B.startBlock(lJv);
-      host.declare(`declare ptr @scr_dyn_jsval_iter_n(ptr, double)`);
-      const count = B.tmp();
-      const out = B.tmp();
-      B.line(`${count} = sitofp ${host.sizeType} %n to double`);
-      B.line(`${out} = call ptr @scr_dyn_jsval_iter_n(ptr %d, double ${count})`);
-      B.terminate(`ret ptr ${out}`);
-      B.startBlock(lNotJv);
-    }
+
     const okA = B.tmp();
     const okS = B.tmp();
     const okB = B.tmp();
@@ -3859,14 +3821,7 @@ export class LlDyn {
       B.line(`${r} = call ptr @${box}(ptr ${expr}, ptr null)`);
       return r;
     }
-    if (t.kind === "jsval") {
-      // An island value wraps by reference (scalar-normalizing) — the
-      // jsval-returning callback shape of the routed-dispatch lane.
-      this.host.declare(`declare ptr @scr_dyn_from_jsval(ptr)`);
-      const r = B.tmp();
-      B.line(`${r} = call ptr @scr_dyn_from_jsval(ptr ${expr})`);
-      return r;
-    }
+
     const r = B.tmp();
     B.line(`${r} = call ptr @${this.toDynHelper(t)}(${this.valTy(t)} ${expr})`);
     return r;
@@ -3962,26 +3917,6 @@ export class LlDyn {
       B.line(`${ad} = load ptr, ptr ${adSlot}`);
       if (p.kind === "dyn") {
         argNames.push(this.retainDyn(B, ad));
-      } else if (p.kind === "jsval") {
-        // A checker-'any' param: the dyn argument enters the island —
-        // wrapped cells unwrap by reference, data deep-copies, boxed
-        // functions cross through the host shim; a kind with no crossing
-        // throws the catchable TypeError (null + pending).
-        host.declare(`declare ptr @scr_jsval_from_dyn(ptr)`);
-        const a = B.tmp();
-        B.line(`${a} = call ptr @scr_jsval_from_dyn(ptr ${ad})`);
-        const isNull = B.tmp();
-        B.line(`${isNull} = icmp eq ptr ${a}, null`);
-        const lFail = B.newLabel("dfk.jf");
-        const lOk = B.newLabel("dfk.jo");
-        B.condBr(isNull, lFail, lOk);
-        B.startBlock(lFail);
-        t.params.slice(0, i).forEach((q, j) => {
-          if (isRefCounted(q)) B.line(`call void ${releaseSym(host, q)}(ptr ${argNames[j]})`);
-        });
-        B.terminate(`ret ptr null`);
-        B.startBlock(lOk);
-        argNames.push(a);
       } else {
         const pathSlot = B.slot();
         B.entryAllocas.push(`${pathSlot} = alloca %ScrDynPath`);

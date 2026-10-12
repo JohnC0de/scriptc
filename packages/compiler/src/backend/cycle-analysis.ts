@@ -110,6 +110,13 @@ function analyzeCycles(
     return cur;
   };
   const unitOfClass = (name: string): string => `object:${rootOf(name)}`;
+  // ProgramLifetime hierarchies (contract types) are never freed: the
+  // collector never walks them, and a garbage cycle cannot
+  // pass through an object that is never freed. They are leaves: no edges
+  // into them, none out of them.
+  const lifetimeRoots = new Set(mod.contracts?.programLifetime ?? []);
+  const programLifetime = (className: string): boolean =>
+    lifetimeRoots.size > 0 && lifetimeRoots.has(rootOf(className));
   const mutability = computeCycleMutability(mod, unitOfClass);
   const shapeDefs = [
     ...classes.map((c) => ({
@@ -219,6 +226,7 @@ function analyzeCycles(
       case "object":
       case "record":
       case "union": {
+        if (t.kind === "object" && programLifetime(t.className)) break;
         const dependency =
           t.kind === "union"
             ? unions.get(t.unionId)
@@ -251,6 +259,7 @@ function analyzeCycles(
     }
   };
   for (const s of shapeDefs) {
+    if (s.key.startsWith("object:") && programLifetime(s.key.slice("object:".length))) continue;
     const unitMutable = mutability.all || mutability.units.has(s.unit);
     for (const field of s.fields) {
       if (mutability.emptyPropertyBags && field.name === DYN_CLASS_PROPERTIES) continue;

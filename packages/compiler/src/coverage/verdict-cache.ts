@@ -20,7 +20,7 @@ import {
   type FrontendInputSnapshot,
 } from "../frontend/input-tracker.js";
 
-const SCHEMA = "scriptc.coverage-verdict.v1";
+const SCHEMA = "scriptc.coverage-verdict.v2";
 
 /** Key-value storage for verdict entries (best effort: failures miss). */
 export interface VerdictStore {
@@ -29,11 +29,9 @@ export interface VerdictStore {
 }
 
 /** The cacheable part of a coverage analysis: JSON-shaped fields only. An
- * analysis that carries anything else (npm builtin tables, provenance)
- * is not cached. */
+ * analysis that carries anything else (provenance) is not cached. */
 export interface CachedCoverage {
   file: string;
-  dynamic: boolean;
   stats: LowerStats;
   diagnostics: ScrDiagnostic[];
   runtimeFences?: ScrDiagnostic[];
@@ -118,7 +116,6 @@ export function verdictKey(
       cache.platform,
       process.env["SCRIPTC_TARGET"] ?? "",
       entry,
-      opts.dynamic === true ? "dynamic" : "static",
       npmStatic,
       opts.ffiProfilePath ?? "",
       ffi,
@@ -131,14 +128,11 @@ function cacheable(coverage: AnalyzeResult["coverage"]): CachedCoverage | null {
   if (
     coverage.provenance !== undefined ||
     coverage.statsByFile !== undefined ||
-    coverage.provenanceElided !== undefined ||
-    coverage.npmBuiltins !== undefined ||
-    coverage.npmLazyTraps !== undefined
+    coverage.provenanceElided !== undefined
   )
     return null;
   const out: CachedCoverage = {
     file: coverage.file,
-    dynamic: coverage.dynamic ?? false,
     stats: coverage.stats,
     diagnostics: coverage.diagnostics,
     preflightFailed: coverage.preflightFailed,
@@ -155,7 +149,6 @@ function restore(cached: CachedCoverage, sources: CachedSource[]): AnalyzeResult
   for (const source of sources) sourceTexts.set(source.path, source.text);
   const coverage: AnalyzeResult["coverage"] = {
     file: cached.file,
-    dynamic: cached.dynamic,
     stats: cached.stats,
     diagnostics: cached.diagnostics,
     preflightFailed: cached.preflightFailed,

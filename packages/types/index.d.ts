@@ -54,3 +54,14 @@ export type Acyclic<T extends object = AcyclicObject> = T;
  * only this package declares, so the clause adds no members and refers to
  * nothing else in the program. */
 export interface AcyclicObject {}
+
+/** Class marker: `class Node implements ProgramLifetime { ... }`. Instances
+ * of the class and of every subclass live until the process exits: scriptc
+ * never reference counts them, never walks them for cycles and never frees
+ * them. This changes memory use only; Node.js behavior is unchanged. Use it
+ * for objects a program keeps until it exits anyway (syntax trees, symbol
+ * tables, interned types): discarded instances are never reclaimed. scriptc
+ * accepts it only on the root class of a hierarchy, outside library builds.
+ * Instances can be published to other threads (`@scriptc/threads`) like any
+ * other class instance. */
+export interface ProgramLifetime {}

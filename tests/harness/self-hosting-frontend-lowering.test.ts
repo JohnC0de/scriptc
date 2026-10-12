@@ -34,7 +34,7 @@ test("the complete production frontend lowers with zero rejected statements", as
        if (preflight.length) throw new Error(JSON.stringify(preflight));
        if (load.startupCrash) throw new Error(JSON.stringify(load.startupCrash));
        const result = lowerToIr(load.program, load.entry, load.moduleOrder, {
-         dynamic: false, frontendServices: load.services, ffiImports: ffi.profile.functions,
+         frontendServices: load.services, ffiImports: ffi.profile.functions,
        });
        console.log(JSON.stringify({ stats: result.stats, diagnostics: result.diagnostics, runtimeFences: result.runtimeFences,
          functions: result.module?.functions.length ?? 0,
@@ -54,7 +54,6 @@ test("the complete production frontend lowers with zero rejected statements", as
   expect(result.runtimeFences).toEqual([]);
   expect(result.stats.statementsTotal).toBeGreaterThan(50_000);
   expect(result.stats.statementsFailed).toBe(0);
-  expect(result.stats.statementsIsland).toBe(0);
   expect(result.stats.functionsSkipped).toBe(0);
   expect(result.functions).toBeGreaterThan(1_000);
   expect(result.validation).toEqual([]);

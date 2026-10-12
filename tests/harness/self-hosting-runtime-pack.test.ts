@@ -14,13 +14,11 @@ import type { RuntimePackManifest } from "../../packages/compiler/src/backend/ru
 const root = join(import.meta.dirname, "../..");
 const entry = join(root, "tests/fixtures/self-hosting/runtime-pack.ts");
 const base: NativeLinkFeatures = {
-  dynamic: false,
   regex: false,
   copying: false,
   textDecoderLegacy: false,
   fileHandle: false,
   fetch: false,
-  netIsland: false,
   zlib: false,
   assert: false,
   inspect: false,
@@ -47,11 +45,10 @@ const base: NativeLinkFeatures = {
 };
 
 test("runtime manifest validation and selection are entirely static", async () => {
-  const coverage = await analyzeInChild(entry, { dynamic: false });
+  const coverage = await analyzeInChild(entry, {});
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(50);
   expect(coverage.stats.statementsFailed).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -65,7 +62,6 @@ for (const backend of ["llvm"] as const) {
         outDir: directory,
         outPath: join(directory, "selection" + (process.platform === "win32" ? ".exe" : "")),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });

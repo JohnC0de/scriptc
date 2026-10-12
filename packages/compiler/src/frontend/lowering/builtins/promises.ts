@@ -1,6 +1,6 @@
 import { checkedPromiseAll } from "../checked-promise-all.js";
 import * as ts from "../../ts7/adapter.js";
-import { type Lowerer, PoisonError } from "../lowerer.js";
+import { type Lowerer } from "../lowerer.js";
 import { isJsSourceFile, locOf } from "../../program.js";
 import {
   DYN,
@@ -8,7 +8,6 @@ import {
   type IrFunction,
   type IrStmt,
   type IrType,
-  JSVAL,
   VOID,
   arrayOf,
   isUnitType,
@@ -138,41 +137,8 @@ export function lowerPromiseStaticCall(
         };
         return { kind: "intrinsic", name: "promise.all", args: [entriesArr], type: resultT, loc };
       }
-      // MIXED entries where some entry is already an ISLAND value (the
-      // withPlugins shape: Promise.all([loadBuiltinPlugins(),
-      // loadPlugins(plugins)]) with an 'any'-typed loader): the
-      // ENGINE's own Promise.all runs — island entries pass through,
-      // STATIC promises cross as real engine thenables (the reverse
-      // bridge, payload-domain gated), plain values marshal per the
-      // boundary — and the combined result stays an island value
-      // (awaiting it rides the island→static promise bridge; element
-      // reads are the routed keyed ops). All-static tuples keep the
-      // typed fence hint below. --dynamic only by construction: jsval
-      // entries exist only there.
-      if (lowerer.dynamic && elems.some((e) => e.type.kind === "jsval" || e.type.kind === "dyn")) {
-        const diagsBefore = lowerer.diags.length;
-        try {
-          const marshaled = argNode.elements.map((el, i) => lowerer.jsvalIn(elems[i]!, el));
-          return {
-            kind: "jsOp",
-            op: "callMethod",
-            name: "all",
-            args: [
-              { kind: "jsOp", op: "globalGet", name: "Promise", args: [], type: JSVAL, loc },
-              { kind: "jsOp", op: "arrLit", args: marshaled, type: JSVAL, loc },
-            ],
-            type: JSVAL,
-            loc,
-          };
-        } catch (err) {
-          // An entry outside every crossing domain: drop the boundary
-          // diagnostics and let the shape fence below name the fix.
-          if (!(err instanceof PoisonError)) throw err;
-          lowerer.diags.splice(diagsBefore);
-        }
-      }
+
       if (
-        !lowerer.dynamic &&
         isJsSourceFile(call.getSourceFile()) &&
         elems.every((entry) => lowerer.dynConvertible(entry.type))
       ) {
@@ -194,38 +160,13 @@ export function lowerPromiseStaticCall(
       );
     }
     const entries = lowerer.lowerExpr(argNode);
-    if (!lowerer.dynamic && isJsSourceFile(call.getSourceFile()) && entries.type.kind === "dyn")
+    if (isJsSourceFile(call.getSourceFile()) && entries.type.kind === "dyn")
       return checkedPromiseAll(lowerer, entries, loc);
-    // A NON-literal island argument (`Promise.all(plugins.map((p) =>
+
     // loadPlugin(p)))` — the loadPlugins shape, where the checker
     // spells `any[]`): the ENGINE's own Promise.all runs over the
     // marshaled array (an 'any' value passes through; an `any[]` value
-    // lifts per element by reference), the result staying an island
-    // value the static side awaits through the island→static bridge.
-    if (
-      entries.type.kind === "jsval" ||
-      (lowerer.dynamic && entries.type.kind === "dyn") ||
-      (entries.type.kind === "array" && entries.type.elem.kind === "jsval")
-    ) {
-      const diagsBefore = lowerer.diags.length;
-      try {
-        const arg = lowerer.jsvalIn(entries, argNode);
-        return {
-          kind: "jsOp",
-          op: "callMethod",
-          name: "all",
-          args: [
-            { kind: "jsOp", op: "globalGet", name: "Promise", args: [], type: JSVAL, loc },
-            arg,
-          ],
-          type: JSVAL,
-          loc,
-        };
-      } catch (err) {
-        if (!(err instanceof PoisonError)) throw err;
-        lowerer.diags.splice(diagsBefore);
-      }
-    }
+
     if (entries.type.kind !== "array" || entries.type.elem.kind !== "promise") {
       // The heterogeneous-literal case: the checker's tuple overload
       // types the literal as a TUPLE of promises (a tuple-flagged record

@@ -59,12 +59,7 @@ function supportsPair(lowerer: Lowerer, left: IrType, right: IrType): boolean {
   }
   if (isUnitType(left) || isUnitType(right)) {
     const other = isUnitType(left) ? right : left;
-    return (
-      other.kind !== "dyn" &&
-      other.kind !== "jsval" &&
-      other.kind !== "caught" &&
-      other.kind !== "void"
-    );
+    return other.kind !== "dyn" && other.kind !== "caught" && other.kind !== "void";
   }
 
   if (PRIMITIVE_KINDS.has(left.kind) && PRIMITIVE_KINDS.has(right.kind)) return true;

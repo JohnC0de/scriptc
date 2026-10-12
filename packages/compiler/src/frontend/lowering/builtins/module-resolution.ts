@@ -17,7 +17,7 @@ import {
 import {
   invalidJsonModuleDiag,
   nativeAddonDiag,
-  requiresDynamicImportDiag,
+  unsupportedPackageImportDiag,
 } from "../../../diagnostics/diagnostic.js";
 import { NODE_BUILTIN_MODULES_V24 } from "../surfaces.js";
 import {
@@ -25,7 +25,6 @@ import {
   DYN,
   type IrExpr,
   type IrType,
-  JSVAL,
   NULL_T,
   STRING,
   type SrcLoc,
@@ -81,11 +80,7 @@ export function lowerNodeModuleCall(
   const argumentNode = expr.arguments[0]!;
   const argument = lowerer.lowerExpr(argumentNode);
   if (argument.type.kind !== "string") {
-    if (
-      argument.type.kind === "dyn" ||
-      argument.type.kind === "jsval" ||
-      argument.type.kind === "union"
-    ) {
+    if (argument.type.kind === "dyn" || argument.type.kind === "union") {
       lowerer.noLowering(
         "module.isBuiltin with a runtime-polymorphic argument",
         argumentNode,
@@ -138,21 +133,6 @@ export function lowerNodeModuleCall(
   };
 }
 
-/** `require("spec")` through a createRequire binding — the erasure per
- * target. Builtins are reached here only OUTSIDE the const-namespace-
- * binding shape (that declaration erases; member uses resolve through
- * the namespace tables) and fence toward it. A relative .json document
- * bakes: the file's text validates as JSON at compile time and the
- * call lowers to json.parse over the baked literal — JSON.parse's
- * checked-dynamic `unknown` stance, and exactly Node's value (require
- * of JSON IS JSON.parse of the file; the per-call re-parse forgoes
- * Node's module-cache identity, unobservable without mutation). A bare
- * specifier NOTHING installed resolves compiles to Node's catchable
- * MODULE_NOT_FOUND throw (the optional-dependency try/require
- * pattern); an installed package loads through the island's
- * require-condition entry under --dynamic (collectCreateRequires
- * embedded it) and reports the requires-dynamic diagnostic in a static
- * build. Null when the callee is not a createRequire require. */
 export function lowerCreateRequireCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -260,31 +240,10 @@ export function lowerCreateRequireCall(
     // pending check's unwind).
     return nodeThrowExpr(0, "MODULE_NOT_FOUND", refusal.message, DYN, loc);
   }
-  if (!lowerer.dynamic) {
-    lowerer.pushDiag(requiresDynamicImportDiag(pkgName, loc));
+  {
+    lowerer.pushDiag(unsupportedPackageImportDiag(pkgName, loc));
     throw new PoisonError();
   }
-  const res = lowerer.createRequireImports.get(`${cr.baseFile.fileName}\u0000${spec}`);
-  if (res === undefined) {
-    // Collection never saw the site (a shape this walk and that walk
-    // disagree on) — fence rather than mis-embed.
-    lowerer.noLowering(`createRequire's require of '${spec}'`, call, undefined);
-  }
-  if (res === "") throw new PoisonError(); // reported at collection
-  // A CJS facade's default IS module.exports (Node's require answer);
-  // an ESM-resolved entry answers its namespace (Node's require(esm)).
-  const exportName = res.format === "esm" ? "*" : "default";
-  return {
-    kind: "libCall",
-    fn: "island.import",
-    args: [
-      { kind: "strLit", value: res.entryKey, type: STRING, loc },
-      { kind: "strLit", value: exportName, type: STRING, loc },
-      { kind: "strLit", value: spec, type: STRING, loc },
-    ],
-    type: JSVAL,
-    loc,
-  };
 }
 
 function staticString(node: ts.Expression | undefined): string | null {

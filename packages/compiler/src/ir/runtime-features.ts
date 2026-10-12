@@ -74,12 +74,12 @@ function scanRuntimeFeatures(mod: IrModule, stopAt?: keyof RuntimeFeatures): Run
     copying: false,
     legacyTextDecoder: false,
     fileHandle: false,
-    fetch: mod.embedded?.modules.some((m) => m.usesFetch === true) ?? false,
+    fetch: false,
     processEvents: false,
     emitter:
       mod.workers === true || (mod.classes ?? []).some((c) => c.name === RUNTIME_EMITTER_CLASS),
     stream: (mod.classes ?? []).some((c) => RUNTIME_STREAM_CLASSES.has(c.name)),
-    zlib: mod.embedded?.edges.some((e) => e.to === "node:zlib") ?? false,
+    zlib: false,
     dc: false,
     assert: false,
     dynInvoke: mod.workers === true,
@@ -230,9 +230,6 @@ function scanRuntimeFeatures(mod: IrModule, stopAt?: keyof RuntimeFeatures): Run
           )
             features.copying = true;
           break;
-        case "jsOp":
-          if (node.op === "globalGet" && node.name === "fetch") features.fetch = true;
-          break;
         case "dynInvoke":
           features.dynInvoke = true;
           break;
@@ -341,13 +338,9 @@ export function moduleUsesFileHandle(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "fileHandle").fileHandle;
 }
 
-/** True when user code lowers static fetch or the embedded npm graph
- * reaches the engine's global fetch — the link switch that pulls scr_fetch.c +
- * its socket/tls/zlib dependencies into the binary (native-toolchain.ts) and has the
- * emitted main call scr_fetch_install. The npm graph records the embedded
- * source fact with a parser + binder, so comments, strings, property names,
- * and local `fetch` bindings do not change the link or target capability.
- * Fetch-free graphs keep their exact historical link lines. */
+/** True when native fetch operations survive lowering. This links
+ * scr_fetch.c and its socket/tls/zlib dependencies and makes the emitted
+ * main call scr_fetch_install. Fetch-free graphs keep their link lines. */
 export function moduleUsesFetch(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "fetch").fetch;
 }
@@ -405,39 +398,8 @@ export function moduleUsesStream(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "stream").stream;
 }
 
-/** True when the embedded npm graph has an edge into `builtin` — the
- * island shim needs the corresponding native bridge linked (zlib's is
- * the first; the emitted main installs it before any island entry). */
-export function moduleEmbedsBuiltin(mod: IrModule, builtin: string): boolean {
-  return mod.embedded !== undefined && mod.embedded.edges.some((e) => e.to === builtin);
-}
-
-/** Embedded module texts at least this long are DEFLATE-compressed into
- * the emitted LLVM (island.ts; each stays plain when deflate does not
- * shrink it) and inflated lazily by the island's module loader at first
- * load. Below it the zlib round trip cannot pay for itself. */
 export const NPM_COMPRESS_MIN = 1024;
 
-/** True when the emitted npm tables will carry compressed module text —
- * the SAME candidate test island.ts compresses by, so index.ts's
- * zlib link switch and emitter.ts's inflater installation stay in
- * lockstep with the emission (a candidate whose deflate happens not to
- * shrink stays plain; the installed inflater is then just unused). */
-export function moduleEmbedsCompressedNpm(mod: IrModule): boolean {
-  return (
-    mod.embedded !== undefined &&
-    mod.embedded.modules.some(
-      (m) => m.source.length >= NPM_COMPRESS_MIN || (m.esm ?? "").length >= NPM_COMPRESS_MIN,
-    )
-  );
-}
-
-/** True when the module contains any zlib libCall (the static lowering)
- * OR the embedded npm graph imports node:zlib (the island shim) — the
- * link switch that pulls scr_zlib.c + the system libz into the binary
- * (native-toolchain.ts); zlib-free programs keep their exact link line. Same
- * generic-walk shape as moduleUsesRegex: `kind`/`fn` discriminants live
- * only on IR objects. */
 export function moduleUsesZlib(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "zlib").zlib;
 }
@@ -545,9 +507,6 @@ export function moduleUsesQs(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "qs").qs;
 }
 
-/** True when the module uses native util parsing, comparison, or styling.
- * The utility units also follow their required symbol, inspection, and
- * warning features, independently of the island's node:util shim. */
 export function moduleUsesParseArgs(mod: IrModule): boolean {
   return scanRuntimeFeatures(mod, "parseArgs").parseArgs;
 }

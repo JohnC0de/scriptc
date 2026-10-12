@@ -149,8 +149,6 @@ export function positionNumber(
       return numLit(0, loc);
     case "undefinedT":
       return defaultValue;
-    case "jsval":
-      return { kind: "jsExit", value, type: F64, loc };
     case "union": {
       const unionId = value.type.unionId;
       const arms = lowerer.unions.get(unionId)!.arms;

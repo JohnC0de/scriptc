@@ -2,25 +2,7 @@ import { emitLlvmLayouts } from "./layouts.js";
 import { FIRST_EMITTED_CYC_KIND, inlineAllocSupported } from "./alloc.js";
 import { llvmBytes as llBytes } from "../literals.js";
 import { InternalCompilerError } from "../../errors.js";
-/** Lower typed IR to LLVM, using the runtime's C ABI.
- *
- * Reference-counted temporaries own one reference. Declarations, assignments,
- * returns and arguments move that ownership; frame and scope exits release
- * everything remaining. Slot-backed entries release the slot's current value.
- *
- * Exceptions use a pending flag and explicit cleanup edges. Throwing calls
- * test scr_exc_pending before consuming results, release the scopes crossed,
- * and branch to the innermost handler or return to the caller. Catch bindings
- * hold ScrCaught snapshots; finally runs on normal, throwing and returning
- * paths. This keeps ownership cleanup intact without nonlocal jumps.
- *
- * Program objects are emitted by the packaged LLVM helper and linked with
- * runtime packs. Sanitizer development builds use an external LLVM driver.
- * Dynamic values and islands share the runtime ABI; embedded npm modules use
- * compressed source tables that the runtime inflates on demand.
- */
 import { createHash } from "node:crypto";
-import { deflateRawSync } from "node:zlib";
 import {
   endsWithJump,
   matchStringSelfConcat,
@@ -60,12 +42,7 @@ import {
   STRING,
   VOID,
 } from "../../ir/ir.js";
-import {
-  moduleRuntimeFeatures,
-  moduleEmbedsBuiltin,
-  moduleEmbedsCompressedNpm,
-  NPM_COMPRESS_MIN,
-} from "../../ir/runtime-features.js";
+import { moduleRuntimeFeatures } from "../../ir/runtime-features.js";
 import {
   matchIntegerArrayForLoop,
   matchIntegerBytesForLoop,
@@ -201,14 +178,8 @@ import { emitIntrinsicExpr, emitSerializationExpr, emitAsyncExpr } from "./expr-
 import { PublishWalkers } from "./publish.js";
 import { computeImmutableFields, stableGlobals, type ImmutableFields } from "../immutability.js";
 import { computePublishedTypes, type PublishedTypes } from "../publication.js";
-import { emitJsInteropExpr, emitExpr } from "./expr-dispatch.js";
-import {
-  emitJsMarshal,
-  emitJsOp,
-  emitJsExit,
-  islandAdapter,
-  islandTypedAdapter,
-} from "./expr-island.js";
+import { emitExpr } from "./expr-dispatch.js";
+
 import {
   dynKind,
   raceAdapterFor,
@@ -770,6 +741,9 @@ export class LlEmitter {
   /** Immutable module constants (contract types) whose graphs become
    * immortal once initialized: their reads need no reference counting. */
   readonly immortalGlobals: ReadonlySet<string>;
+  /** ProgramLifetime hierarchy roots (contract types): their instances are
+   * immortal from construction (classes.ts programLifetimeClass). */
+  readonly programLifetime: ReadonlySet<string>;
   private numericLocals = new Map<string, IrLocal>();
   private captureIds = new Set<string>();
   /** Active induction bindings retain their width independently of size_t. */
@@ -858,6 +832,7 @@ export class LlEmitter {
     this.initializerBindings = findInitializerBindings(mod);
     this.int32Slots = analyzeInt32Slots(mod);
     this.immortalGlobals = new Set(mod.contracts?.immortalGlobals ?? []);
+    this.programLifetime = new Set(mod.contracts?.programLifetime ?? []);
     this.finalFields = analyzeFinalFields(mod);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.ffiExtendNarrowIntegers =
@@ -1043,6 +1018,7 @@ export class LlEmitter {
       },
       pendingTestLines: (dest) => this.pendingTestLines(dest),
       virtualEntry: (implFn) => this.virtualEntry(implFn),
+      programLifetime: this.programLifetime,
     };
     this.walkers = new LlWalkers(this.shapeHost);
     this.dyn = new LlDyn(this.shapeHost);
@@ -1594,22 +1570,6 @@ export class LlEmitter {
     const hasNoInlineRecordClone = [...this.recordCloneShapes].some(
       (shapeId) => (this.recordsById.get(shapeId)?.fields.length ?? 0) >= 16,
     );
-    const embedded = this.mod.embedded;
-    const usesIsland = embedded !== undefined && embedded.modules.length > 0;
-    const storeNpmText = (text: string): { bytes: Buffer; raw: number } => {
-      const plain = Buffer.from(text, "utf8");
-      if (text.length < NPM_COMPRESS_MIN) return { bytes: plain, raw: 0 };
-      const deflated = deflateRawSync(plain, { level: 9 });
-      return deflated.length < plain.length
-        ? { bytes: deflated, raw: plain.length }
-        : { bytes: plain, raw: 0 };
-    };
-    const npmStored = usesIsland
-      ? embedded.modules.map((m) => ({
-          src: storeNpmText(m.source),
-          esm: m.esm === undefined ? null : storeNpmText(m.esm),
-        }))
-      : [];
 
     // Module globals, FIRST OCCURRENCE per id: a class-expression static
     // instantiated through several mixin applications registers one global
@@ -1677,26 +1637,14 @@ export class LlEmitter {
     const usesDgram = runtimeFeatures.dgram;
     const usesHttp2 = runtimeFeatures.http2;
     const usesHttp = runtimeFeatures.http;
-    // Fetch-referencing programs register the native fetch bridge before
-    // any island entry (the engine's lazy boot consults it) — native/executable.ts
-    // compiles scr_fetch.c on the same predicate.
+    // Fetch-referencing programs register native fetch before main.
+    // Runtime selection compiles scr_fetch.c on the same predicate.
     const usesFetch = runtimeFeatures.fetch;
-    const embedsZlib = moduleEmbedsBuiltin(this.mod, "node:zlib");
-    const embedsNet =
-      moduleEmbedsBuiltin(this.mod, "node:http") ||
-      moduleEmbedsBuiltin(this.mod, "node:https") ||
-      moduleEmbedsBuiltin(this.mod, "node:net") ||
-      moduleEmbedsBuiltin(this.mod, "node:tls");
-    const snapshotsTlsCa =
-      runtimeFeatures.tls ||
-      runtimeFeatures.tlsCa ||
-      moduleEmbedsBuiltin(this.mod, "node:https") ||
-      moduleEmbedsBuiltin(this.mod, "node:tls");
+    const snapshotsTlsCa = runtimeFeatures.tls || runtimeFeatures.tlsCa;
     // The process verdict has the same precedence as the C reference
     // emitter: node:test owns the final status when present; otherwise an
     // embedded process.exitCode owns it; ordinary programs return zero.
     const usesNodeTest = runtimeFeatures.nodeTest;
-    const programExitUsesIsland = !usesNodeTest && usesIsland;
     // Declared NOW — the extern block flushes before main assembles.
     if (usesEvents) this.declare(`declare void @scr_events_install()`);
     if (usesChildProcess) this.declare(`declare void @scr_child_dyn_install()`);
@@ -1727,21 +1675,7 @@ export class LlEmitter {
     if (usesHttp2) this.declare(`declare void @scr_http2_dyn_install()`);
     if (usesHttp) this.declare(`declare void @scr_http_dyn_install()`);
     if (usesFetch) this.declare(`declare void @scr_fetch_install()`);
-    if (embedsZlib) this.declare(`declare void @scr_zlib_island_install()`);
-    if (embedsNet) this.declare(`declare void @scr_net_island_install()`);
-    if (usesIsland) {
-      this.declare(
-        `declare void @scr_island_modules(ptr, ${this.sizeType}, ptr, ${this.sizeType})`,
-      );
-      this.declare(`declare void @scr_island_entry_module(ptr)`);
-      this.declare(`declare i32 @scr_island_exit_code()`);
-      if (moduleEmbedsCompressedNpm(this.mod)) {
-        this.declare(`declare void @scr_island_set_inflate(ptr)`);
-        this.declare(
-          `declare zeroext i1 @scr_zlib_inflate_exact(ptr, ${this.sizeType}, ptr, ${this.sizeType})`,
-        );
-      }
-    }
+
     if (usesNodeTest) this.declare(`declare i32 @scr_test_exit_code()`);
     if (snapshotsTlsCa) {
       this.declare(`declare void @scr_tls_ca_install()`);
@@ -1780,7 +1714,6 @@ export class LlEmitter {
     // async loop-exhaustion story.
     const runsLoop =
       this.usesTimers ||
-      usesIsland ||
       this.ffiHasForeignCallback ||
       this.mod.functions.some((f) => f.async === true || f.generator !== undefined);
     const uncaughtReleases = entryMayThrow && !asyncEntry ? globalReleaseLines("gu") : [];
@@ -1805,50 +1738,26 @@ export class LlEmitter {
       this.declare(`declare void @scr_promise_rethrow_top_level(ptr)`);
       this.declare(`declare void @scr_promise_release(ptr)`);
       this.declare(`declare void @scr_exit_code_note(i32)`);
-      if (programExitUsesIsland && inlineExitListeners) {
-        this.declare(`declare ${this.sizeType} @scr_island_exit_code_version()`);
-      }
     }
     const topPendingExitLines = (): string[] => {
       if (!asyncEntry) return [];
       const lines: string[] = [];
       if (usesNodeTest) {
         lines.push(`  %tla_program_exit = call i32 @scr_test_exit_code()`);
-      } else if (usesIsland) {
-        lines.push(`  %tla_program_exit = call i32 @scr_island_exit_code()`);
       }
-      if (usesNodeTest || usesIsland) {
+      if (usesNodeTest) {
         lines.push(
           `  %tla_program_exit_zero = icmp eq i32 %tla_program_exit, 0`,
           `  %tla_exit_status = select i1 %tla_program_exit_zero, i32 %tla_status, i32 %tla_program_exit`,
         );
       }
-      const exitStatus = usesNodeTest || usesIsland ? "%tla_exit_status" : "%tla_status";
-      const tracksIslandExit = programExitUsesIsland && inlineExitListeners;
-      if (tracksIslandExit) {
-        lines.push(`  %tla_exit_version = call ${this.sizeType} @scr_island_exit_code_version()`);
-      }
+      const exitStatus = usesNodeTest ? "%tla_exit_status" : "%tla_status";
       // finish_top_level initially notes 13. Replace that hint before exit
       // listeners run when a higher-priority verdict was already selected.
       lines.push(`  call void @scr_exit_code_note(i32 ${exitStatus})`);
       for (const line of exitListenerLines("xp")) lines.push(line);
-      if (tracksIslandExit) {
-        lines.push(
-          `  %tla_exit_version_after = call ${this.sizeType} @scr_island_exit_code_version()`,
-          `  %tla_exit_changed = icmp ne ${this.sizeType} %tla_exit_version_after, %tla_exit_version`,
-          `  br i1 %tla_exit_changed, label %tla_exit_updated, label %tla_exit_unchanged`,
-          `tla_exit_updated:`,
-          `  %tla_listener_exit = call i32 @scr_island_exit_code()`,
-          `  call void @scr_exit_code_note(i32 %tla_listener_exit)`,
-          `  br label %tla_exit_done`,
-          `tla_exit_unchanged:`,
-          `  br label %tla_exit_done`,
-          `tla_exit_done:`,
-          `  %tla_final_exit = phi i32 [ %tla_listener_exit, %tla_exit_updated ], [ ${exitStatus}, %tla_exit_unchanged ]`,
-        );
-      }
       for (const line of topPendingReleases) lines.push(line);
-      lines.push(`  ret i32 ${tracksIslandExit ? "%tla_final_exit" : exitStatus}`);
+      lines.push(`  ret i32 ${exitStatus}`);
       return lines;
     };
     // LIBRARY mode: the runtime entry points the generated library
@@ -2117,68 +2026,12 @@ export class LlEmitter {
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);
-    const islandEntryPath = usesIsland ? this.cstr(this.mod.sourceFile) : null;
     for (const [text, c] of this.cstrs) {
       // NUL-terminated byte-array constants for scr_jb_puts and indentation.
       out.push(`@${c.sym} = internal constant [${c.len + 1} x i8] c"${llStrBytes(text)}"`);
     }
     if (this.cstrs.size > 0) out.push(``);
-    if (usesIsland) {
-      const fmt = { esm: 0, cjs: 1, json: 2 } as const;
-      const edgeKind = { any: 0, import: 1, require: 2 } as const;
-      embedded.modules.forEach((m, i) => {
-        const stored = npmStored[i]!;
-        const key = Buffer.from(m.key, "utf8");
-        out.push(
-          `@sc_npm_key_${i} = internal constant [${key.length + 1} x i8] c"${llBytes(key)}"`,
-          `@sc_npm_src_${i} = internal constant [${stored.src.bytes.length + 1} x i8] c"${llBytes(stored.src.bytes)}"`,
-        );
-        if (stored.esm !== null) {
-          out.push(
-            `@sc_npm_esm_${i} = internal constant [${stored.esm.bytes.length + 1} x i8] c"${llBytes(stored.esm.bytes)}"`,
-          );
-        }
-      });
-      const moduleRows = embedded.modules.map((m, i) => {
-        const stored = npmStored[i]!;
-        const esm =
-          stored.esm === null
-            ? `ptr null, ${this.sizeType} 0, ${this.sizeType} 0`
-            : `ptr @sc_npm_esm_${i}, ${this.sizeType} ${stored.esm.bytes.length}, ${this.sizeType} ${stored.esm.raw}`;
-        return (
-          `%ScrIslandModule { ptr @sc_npm_key_${i}, ptr @sc_npm_src_${i}, ` +
-          `${this.sizeType} ${stored.src.bytes.length}, ${this.sizeType} ${stored.src.raw}, ` +
-          `i32 ${fmt[m.format]}, ${esm} }`
-        );
-      });
-      out.push(
-        `@sc_npm_modules = internal constant [${moduleRows.length} x %ScrIslandModule] [ ${moduleRows.join(", ")} ]`,
-      );
-      embedded.edges.forEach((edge, i) => {
-        const parts: [string, string][] = [
-          ["from", edge.from],
-          ["spec", edge.specifier],
-          ["to", edge.to],
-        ];
-        for (const [part, text] of parts) {
-          const bytes = Buffer.from(text, "utf8");
-          out.push(
-            `@sc_npm_edge_${i}_${part} = internal constant [${bytes.length + 1} x i8] c"${llBytes(bytes)}"`,
-          );
-        }
-      });
-      if (embedded.edges.length > 0) {
-        const edgeRows = embedded.edges.map(
-          (edge, i) =>
-            `%ScrIslandEdge { ptr @sc_npm_edge_${i}_from, ptr @sc_npm_edge_${i}_spec, ` +
-            `ptr @sc_npm_edge_${i}_to, i32 ${edgeKind[edge.kind]} }`,
-        );
-        out.push(
-          `@sc_npm_edges = internal constant [${edgeRows.length} x %ScrIslandEdge] [ ${edgeRows.join(", ")} ]`,
-        );
-      }
-      out.push(``);
-    }
+
     for (const line of ffiCallbacks.globals) out.push(line);
     if (ffiCallbacks.globals.length > 0) out.push(``);
     for (const g of globals) {
@@ -2300,24 +2153,12 @@ export class LlEmitter {
       ...(this.ffiHasForeignCallback ? [`  call void @scr_ffi_install()`] : []),
       ...(snapshotsTlsCa ? [`  call void @scr_tls_ca_install()`] : []),
       ...(usesFetch ? [`  call void @scr_fetch_install()`] : []),
-      ...(embedsZlib ? [`  call void @scr_zlib_island_install()`] : []),
-      ...(embedsNet ? [`  call void @scr_net_island_install()`] : []),
       ...(usesNet ? [`  call void @scr_net_install()`, `  call void @scr_net_dyn_install()`] : []),
       ...(usesHttp ? [`  call void @scr_http_dyn_install()`] : []),
       ...(usesDgram ? [`  call void @scr_dgram_install()`] : []),
       ...(usesHttp2 ? [`  call void @scr_http2_dyn_install()`] : []),
       ...(usesStream ? [`  call void @scr_stream_install()`] : []),
       `  call void @scr_lib_init(i32 %argc, ptr %argv)`,
-      ...(usesIsland
-        ? [
-            `  call void @scr_island_entry_module(ptr ${islandEntryPath})`,
-            ...(moduleEmbedsCompressedNpm(this.mod)
-              ? [`  call void @scr_island_set_inflate(ptr @scr_zlib_inflate_exact)`]
-              : []),
-            `  call void @scr_island_modules(ptr @sc_npm_modules, ${this.sizeType} ${embedded.modules.length}, ` +
-              `ptr ${embedded.edges.length > 0 ? "@sc_npm_edges" : "null"}, ${this.sizeType} ${embedded.edges.length})`,
-          ]
-        : []),
       ...(asyncEntry
         ? [`  %top = call ptr @${mangleAsyncSpawn(this.mod.entry)}()`]
         : [`  call void @${mangleFunction(this.mod.entry)}()`]),
@@ -2408,9 +2249,7 @@ export class LlEmitter {
       ...globalReleases,
       ...(usesNodeTest
         ? [`  %test_exit = call i32 @scr_test_exit_code()`, `  ret i32 %test_exit`]
-        : usesIsland
-          ? [`  %island_exit = call i32 @scr_island_exit_code()`, `  ret i32 %island_exit`]
-          : [`  %native_exit = call i32 @scr_exit_code_hint_get()`, `  ret i32 %native_exit`]),
+        : [`  %native_exit = call i32 @scr_exit_code_hint_get()`, `  ret i32 %native_exit`]),
       `}`,
       ``,
       ...this.inlineRcTail(flushedDecls),
@@ -3178,8 +3017,8 @@ export class LlEmitter {
    * mentions (transitively), contains no suspension entry point. Such a
    * body always completes before the call returns, which is exactly the
    * behavior of a fiber that never suspends. Excluded conservatively:
-   * wasm32 (its coroutine lowering owns async bodies), programs embedding
-   * the dynamic engine, module-evaluation bodies (their promise caches),
+   * wasm32 (its coroutine lowering owns async bodies), module-evaluation
+   * bodies (their promise caches),
    * `dyn` results (resolution may adopt a thenable), and every program
    * that uses node:test subtests — `t.test()` runs a subtest inline and
    * awaits it on the CURRENT fiber even from synchronous code. Worker
@@ -3191,8 +3030,6 @@ export class LlEmitter {
   private fiberlessAsyncFunctions(): Set<string> {
     const eligible = new Set<string>();
     if (this.wasi || this.mod.workers === true) return eligible;
-    const embedded = this.mod.embedded;
-    if (embedded !== undefined && embedded.modules.length > 0) return eligible;
     const suspends =
       /@scr_(?:await_|module_await\b|promise_await_settled\b|test_sub\b|gen_yield_|async_gen_|fiber_)/;
     for (const decl of this.decls) if (/@scr_test_sub\b/.test(decl)) return eligible;
@@ -4259,16 +4096,6 @@ export class LlEmitter {
     } else if (t.kind === "dyn") {
       this.declare(`declare void @scr_dyn_throw(ptr)`);
       B.line(`call void @scr_dyn_throw(ptr ${v.name})`);
-    } else if (t.kind === "jsval") {
-      const rc = vAdapters(this.shapeHost, t);
-      const test = "scr_jsval_is_object";
-      this.declare(`declare zeroext i1 @${test}(ptr)`);
-      this.declare(`declare void @scr_throw_ref_classified(ptr, ptr, ptr, ptr, i1 zeroext)`);
-      const object = B.tmp();
-      B.line(`${object} = call zeroext i1 @${test}(ptr ${v.name})`);
-      B.line(
-        `call void @scr_throw_ref_classified(ptr ${v.name}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${traceArg(this.shapeHost, t)}, i1 zeroext ${object})`,
-      );
     } else {
       const rc = vAdapters(this.shapeHost, t);
       this.declare(`declare void @scr_throw_ref(ptr, ptr, ptr, ptr)`);
@@ -4307,7 +4134,7 @@ export class LlEmitter {
           valueName = this.unionGetBool(v.name);
         } else if (arm.kind === "string") {
           valueName = this.unionPeek(v.name, unionId);
-        } else if (arm.kind === "bigint" || arm.kind === "dyn" || arm.kind === "jsval") {
+        } else if (arm.kind === "bigint" || arm.kind === "dyn") {
           valueName = this.unionPeek(v.name, unionId);
         }
         const truthy = this.truthyOf(arm.kind, valueName, true);
@@ -4399,14 +4226,6 @@ export class LlEmitter {
         this.declare(`declare zeroext i1 @scr_dyn_truthy(ptr)`);
         const truthy = B.tmp();
         B.line(`${truthy} = call zeroext i1 @scr_dyn_truthy(ptr ${valueName})`);
-        return truthy;
-      }
-      case "jsval": {
-        this.declare(`declare i32 @scr_jsval_truthy(ptr)`);
-        const raw = B.tmp();
-        const truthy = B.tmp();
-        B.line(`${raw} = call i32 @scr_jsval_truthy(ptr ${valueName})`);
-        B.line(`${truthy} = icmp ne i32 ${raw}, 0`);
         return truthy;
       }
       default:
@@ -7541,7 +7360,6 @@ export class LlEmitter {
   emitDynamicExpr(
     e: ExprOf<
       | "dynFrom"
-      | "dynFromJsval"
       | "dynCall"
       | "dynInvoke"
       | "dynArrLit"
@@ -7750,10 +7568,6 @@ export class LlEmitter {
     >,
   ): LlValue {
     return emitAsyncExpr(this, e);
-  }
-
-  emitJsInteropExpr(e: ExprOf<"jsMarshal" | "jsOp" | "jsExit" | "jsBridgePromise">): LlValue {
-    return emitJsInteropExpr(this, e);
   }
 
   /** Read a receiver whose value is consumed immediately by a field or tag
@@ -8259,26 +8073,6 @@ export class LlEmitter {
 
   emitExpr(e: IrExpr): LlValue {
     return emitExpr(this, e);
-  }
-
-  emitJsMarshal(e: IrExpr & { kind: "jsMarshal" }): LlValue {
-    return emitJsMarshal(this, e);
-  }
-
-  emitJsOp(e: IrExpr & { kind: "jsOp" }): LlValue {
-    return emitJsOp(this, e);
-  }
-
-  emitJsExit(e: IrExpr & { kind: "jsExit" }): LlValue {
-    return emitJsExit(this, e);
-  }
-
-  islandAdapter(arity: number, retKind: "void" | "jsval" | "f64" | "bool" | "string"): string {
-    return islandAdapter(this, arity, retKind);
-  }
-
-  islandTypedAdapter(fn: IrType & { kind: "func" }): string {
-    return islandTypedAdapter(this, fn);
   }
 
   dynKind(d: string): string {

@@ -19,12 +19,15 @@ import {
   npmStaticOffenders,
   npmStaticPackageOfPath,
 } from "./npm-static.js";
-import { clearResolveCaches, resolveBareModule } from "./resolve.js";
+import { clearResolveCaches, resolveBareModule, resolveWorkspaceSourceModule } from "./resolve.js";
+import { provenanceEntryFor } from "./provenance-registry.js";
 import { isJsSourceFileName } from "./tsc-codes.js";
 import { isRelativeSpecifier, packageNameOfSpecifier } from "./workspace-registry.js";
 import { lowerToIr, type LowerOptions, type LowerResult } from "./lowering/lowerer.js";
 import type { FrontendServices } from "./services.js";
 import { isImportDeclaration, isExportDeclaration, isStringLiteral } from "./ts7/adapter.js";
+import { CONTRACT_TYPES_MODULE } from "./contract-types.js";
+import { THREADS_MODULE } from "./threads-import.js";
 
 export interface ProgramLoadOptions {
   npmStatic?: readonly string[];
@@ -63,11 +66,10 @@ export interface Frontend {
   entryContract: () => ContractFacts;
   sourceTexts: () => Map<string, string>;
   lower: (opts: LowerOptions) => LowerResult;
-  /** --npm-static: each requested (or auto-detected) package's outcome —
-   * compiled statically, or fallen back with the first refusal reason. */
+  /** Each requested or detected package's native compilation outcome,
+   * including the first refusal reason for ineligible packages. */
   npmStatic: NpmStaticStatus[];
-  /** Library mode only (empty otherwise): each judged npm package's first
-   * import site, the anchor for the SC4020 static-or-refuse teaching. */
+  /** Each judged npm package's first import site, used to anchor refusals. */
   npmImportSites: ReadonlyMap<string, SrcLoc>;
   /** Releases the frontend's resources (the spawned tsgo server). Call
    * exactly once, after the last lower(). */
@@ -82,24 +84,6 @@ export type FrontendFactory = (
   libraryNpmStatic?: readonly string[],
 ) => Frontend;
 
-/** --npm-static=auto (and library mode's mandatory twin): one throwaway
- * load finds every bare npm import the program's own modules make, then
- * the eligibility heuristics (npm-static.ts) pick the packages whose
- * shipped JS is worth attempting. Rejected candidates report their reason
- * so the coverage output says why auto skipped them.
- *
- * "lib" widens the scan to the STATIC-OR-REFUSE posture (a fallback
- * status is a build-stopping SC4020 there, never an island note):
- *   - opted-in packages' OWN files are scanned too — import statements
- *     and top-level requires alike — so runFrontend's fixpoint loop
- *     judges every bare edge the growing graph exposes (the executable
- *     lane leaves a package's deps to the island; the library lane has
- *     no island);
- *   - a bare specifier no TYPES resolution answers but whose runtime JS
- *     resolves (a package with no own .d.ts) is judged instead of
- *     skipped — it fails the bar by name, not as a generic import fence;
- *   - `judged` dedups across fixpoint iterations and `sites` records
- *     each package's first import site, the SC4020 anchor. */
 function detectAutoPackages(
   load: LoadResult,
   statuses: NpmStaticStatus[],
@@ -130,6 +114,15 @@ function detectAutoPackages(
       }
     }
     for (const { spec, loc } of edges) {
+      if (load.externalTypes?.has(spec)) continue;
+      // scriptc's own packages are not npm dependencies: contract types are
+      // declarations only, and @scriptc/threads exports lower to intrinsics
+      // at their use sites (threads-import.ts), typed by its declarations.
+      if (spec === CONTRACT_TYPES_MODULE || spec === THREADS_MODULE) continue;
+      // Attested entries already resolve to program sources, so the
+      // published package's declaration eligibility does not apply.
+      if (provenanceEntryFor(spec) !== null) continue;
+      if (resolveWorkspaceSourceModule(sf.fileName, spec) !== null) continue;
       if (isRelativeSpecifier(spec) || spec.startsWith("node:") || spec.startsWith("#")) continue;
       // Bare builtin names ("fs", "path") are the builtin machinery's
       // business (and the SC4005 async_free gate's, in library mode) —
@@ -149,7 +142,7 @@ function detectAutoPackages(
         sites!.set(js.packageName, loc);
         statuses.push({
           package: js.packageName,
-          status: "fallback",
+          status: "refused",
           detail: "it ships no own .d.ts declaration surface",
         });
         continue;
@@ -174,7 +167,7 @@ function detectAutoPackages(
     else
       statuses.push({
         package: pkg,
-        status: "fallback",
+        status: "refused",
         detail: mode === "lib" ? reason : `auto: ${reason}`,
       });
   }
@@ -199,13 +192,6 @@ function packagesNamedByDiag(message: string, optedIn: ReadonlySet<string>): Set
   return hits;
 }
 
-/** The one frontend, three npm postures: `undefined`/explicit package
- * lists and `"auto"` are the executable lane's (--npm-static; fallback =
- * island). `"lib"` is library mode's mandatory auto twin — the same
- * eligibility bar and the same opt-in machinery, but every fallback
- * status the shared loops record becomes compileLibrary's SC4020
- * static-or-refuse teaching, and the detection closes over the opted-in
- * packages' own bare edges (no island exists to serve a dep from). */
 export function runFrontend(
   entryPath: string,
   loadProgram: ProgramLoader,
@@ -231,7 +217,13 @@ export function runFrontend(
     };
   };
   try {
-    return loadFrontend(entryPath, trackedLoader, npmStatic, externalTypes, libraryNpmStatic);
+    // Every executable and library closes over its dependencies. Explicit
+    // selections bypass eligibility heuristics, but never compilation checks.
+    const explicit: readonly string[] =
+      npmStatic !== undefined && typeof npmStatic !== "string" ? npmStatic : [];
+    return loadFrontend(entryPath, trackedLoader, "lib", externalTypes, [
+      ...new Set([...libraryNpmStatic, ...explicit]),
+    ]);
   } catch (error) {
     for (const load of active) {
       // Preserve the original failure and attempt every remaining cleanup.
@@ -293,7 +285,7 @@ function loadFrontend(
   // One exact --external-types mapping makes the containing package an
   // external host boundary, which cannot simultaneously be compiled as a
   // package-wide --npm-static program graph. External wins; retain the
-  // ordinary npm-static fallback record so explicit and auto requests both
+  // npm-static refusal record so explicit and auto requests both
   // explain why the package did not compile statically.
   if (requested.length > 0 && externalTypes !== undefined) {
     const externalSpecifiersByPackage = new Map<string, string[]>();
@@ -308,40 +300,25 @@ function loadFrontend(
       if (specs === undefined) return true;
       statuses.push({
         package: pkg,
-        status: "fallback",
+        status: "refused",
         detail: `mapped as an external host module by --external-types (${specs.map((s) => JSON.stringify(s)).join(", ")})`,
       });
       return false;
     });
   }
 
-  // The all-or-nothing fallback loop: a preflight diagnostic ANCHORED in
-  // an opted-in package's files (an unsupported require form, a builtin
-  // fence) — or an offender the resolution itself reported — drops that
-  // package from the set and the whole frontend reloads without it, so
-  // its import takes the ordinary island path. Static compilation of a
-  // package must never turn a working --dynamic build into a build
-  // failure.
-  //
-  // CONSUMER-anchored attribution (the second source): an opted-in
-  // package whose inferred export surface breaks the typecheck reports at
-  // its IMPORT SITES — errors in program files no path-shaped attribution
-  // reaches, but whose MESSAGES name the package ("Module '"pkg"' has no
-  // exported member", "typeof import("…/pkg/dist/index")"). Bundle-shaped
-  // dists carry surfaces inference can only partly reach (type-only
-  // re-exports have no JS value to chase), and the ratified behavior is
-  // graceful PER-PACKAGE degradation: the named package drops to the
-  // island with a note, never a failed gate. Explicit opt-ins degrade
-  // exactly like auto's — "the user asked for these packages" buys the
-  // attempt, not a broken build.
+  // Package-anchored preflight failures and attributable consumer errors
+  // remove that package from the active source graph. Reloading restores
+  // its declarations for analysis; the recorded refusal stops executable
+  // and library builds with a package-specific diagnostic.
   let load = reusableScout ?? loadProgram(entryPath, { npmStatic: requested, externalTypes });
   let preflight = reusablePreflight ?? checkPreflight(load);
   // Library mode's fixpoint: the opted-in packages' files joined the
   // program just now, and THEIR bare edges (import statements and
   // top-level requires) name packages the scout could not see. Judge each
   // by the same bar — eligible ones join the set and the frontend
-  // reloads; ineligible ones record the fallback status compileLibrary
-  // refuses on. Bounded by the dependency count (every iteration settles
+  // reloads; ineligible ones record a refusal. Bounded by the dependency
+  // count (every iteration settles
   // at least one new package for good).
   if (npmStatic === "lib") {
     for (;;) {
@@ -371,7 +348,7 @@ function loadFrontend(
       for (const [pkg, count] of named) {
         reasons.set(
           pkg,
-          `its inferred export surface breaks ${count} import site${count === 1 ? "" : "s"} in program files${npmStatic === "lib" ? "" : " — the package serves from the island instead"} (bundler-emitted surfaces type only as far as inference reaches)`,
+          `its inferred export surface breaks ${count} import site${count === 1 ? "" : "s"} in program files (bundler-emitted surfaces type only as far as inference reaches)`,
         );
       }
     }
@@ -379,7 +356,7 @@ function loadFrontend(
     if (dropping.length === 0) break;
     for (const p of dropping) {
       effective.delete(p);
-      statuses.push({ package: p, status: "fallback", detail: reasons.get(p)! });
+      statuses.push({ package: p, status: "refused", detail: reasons.get(p)! });
     }
     load.dispose();
     load = loadProgram(entryPath, { npmStatic: [...effective], externalTypes });
@@ -403,13 +380,13 @@ function loadFrontend(
       effective.delete(p);
       statuses.push({
         package: p,
-        status: "fallback",
+        status: "refused",
         detail:
           npmStatic === "auto"
             ? "auto: the program does not typecheck against its inferred surface"
             : npmStatic === "lib"
               ? "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase)"
-              : "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase) — the package serves from the island instead",
+              : "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase)",
       });
     };
     // Attribute per package by probing each SOLO (culprits are almost

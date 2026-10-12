@@ -6,7 +6,6 @@ import {
   type IrExpr,
   type IrStmt,
   type IrType,
-  JSVAL,
   isIntegerBytesElem,
   type SrcLoc,
   UNDEFINED_T,
@@ -35,7 +34,7 @@ export function currentArrayIndexPresent(arrType: IrType, loc: SrcLoc): IrExpr {
 
 /** The value yielded by a JavaScript array read, independent of its slot's storage type. */
 export function arrayValueType(lowerer: Lowerer, elem: IrType): IrType {
-  if (elem.kind === "jsval" || elem.kind === "dyn") return elem;
+  if (elem.kind === "dyn") return elem;
   return elem.kind === "union"
     ? (lowerer.withUndefinedArmOf(elem) ?? elem)
     : lowerer.withUndefinedArm(elem);
@@ -52,11 +51,7 @@ export function arrayValueRead(
   const type = arrayValueType(lowerer, elem);
   const read: IrExpr = { kind: "arrayGet", arr, index, type: elem, loc };
   const missing: IrExpr =
-    type.kind === "jsval"
-      ? { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }
-      : type.kind === "dyn"
-        ? dynUndefinedExpr(loc)
-        : lowerer.wrappedUndefined(type, loc)!;
+    type.kind === "dyn" ? dynUndefinedExpr(loc) : lowerer.wrappedUndefined(type, loc)!;
   return {
     kind: "ternary",
     cond: {
@@ -100,13 +95,7 @@ export function unionArrayValueRead(
   if (
     joined.length > 1 &&
     (!unionContainerArmsOk(joined) ||
-      joined.some(
-        (arm) =>
-          arm.kind === "dyn" ||
-          arm.kind === "jsval" ||
-          arm.kind === "generator" ||
-          arm.kind === "caught",
-      ))
+      joined.some((arm) => arm.kind === "dyn" || arm.kind === "generator" || arm.kind === "caught"))
   )
     return null;
   const type: IrType =

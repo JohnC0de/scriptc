@@ -28,13 +28,11 @@ afterEach(async () => {
 
 const native: EarlyExecutableNativeFeatures = {
   backend: "llvm",
-  dynamic: false,
   regex: false,
   copying: false,
   textDecoderLegacy: false,
   fileHandle: false,
   fetch: true,
-  netIsland: false,
   zlib: false,
   assert: false,
   inspect: false,
@@ -90,7 +88,6 @@ async function fixture(): Promise<{
       outPath: join(dir, "entry"),
       emitIr: true,
       sanitize: false,
-      dynamic: false,
       backend: "llvm",
       npmStatic: null,
       ffiProfile: null,
@@ -214,7 +211,6 @@ test("early executable keys isolate compile modes, paths, implementation, and FF
   const variants: EarlyExecutableCacheOptions[] = [
     { ...f.options, emitIr: false },
     { ...f.options, sanitize: true },
-    { ...f.options, dynamic: true },
     { ...f.options, optimization: "dev" },
     { ...f.options, optimization: "speed" },
     { ...f.options, detachedExit: true },

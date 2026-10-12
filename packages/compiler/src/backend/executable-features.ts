@@ -1,29 +1,19 @@
 /** Runtime requirements derived from the lowered program, shared by compiler hosts. */
 import { type IrModule } from "../ir/ir.js";
-import {
-  moduleEmbedsBuiltin,
-  moduleEmbedsCompressedNpm,
-  moduleRuntimeFeatures,
-} from "../ir/runtime-features.js";
+import { moduleRuntimeFeatures } from "../ir/runtime-features.js";
 import { hasForeignFfiCallback } from "./ffi-callbacks.js";
 import type { NativeLinkFeatures } from "./native-link-info.js";
 
-export function executableLinkFeatures(mod: IrModule, dynamic: boolean): NativeLinkFeatures {
+export function executableLinkFeatures(mod: IrModule): NativeLinkFeatures {
   const features = moduleRuntimeFeatures(mod);
   return {
     ...(mod.workers ? { workers: true } : {}),
-    dynamic,
     regex: features.regex,
     copying: features.copying,
     textDecoderLegacy: features.legacyTextDecoder,
     fileHandle: features.fileHandle,
     fetch: features.fetch,
-    netIsland:
-      moduleEmbedsBuiltin(mod, "node:http") ||
-      moduleEmbedsBuiltin(mod, "node:https") ||
-      moduleEmbedsBuiltin(mod, "node:net") ||
-      moduleEmbedsBuiltin(mod, "node:tls"),
-    zlib: features.zlib || moduleEmbedsCompressedNpm(mod),
+    zlib: features.zlib,
     assert: features.assert,
     inspect: features.inspect,
     dynInvoke: features.dynInvoke,

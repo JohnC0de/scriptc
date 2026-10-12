@@ -19,7 +19,7 @@ test.each([
     `class Value { constructor() { this.x = 1; } } const value = new Value(); ${operation}`,
   );
   try {
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(
       [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])].some(
         (d) => d.code === "SC2020" && d.message.includes("Object.define"),
@@ -44,7 +44,6 @@ console.log(new Base().copy());
 `);
   try {
     const result = await compile(entry, {
-      dynamic: false,
       outDir: dir,
       outPath: join(dir, "program"),
       sanitize: process.env["SCRIPTC_SAN"] === "1",
@@ -84,7 +83,6 @@ console.log(value.clone().x);
 `);
   try {
     const result = await compile(entry, {
-      dynamic: false,
       outDir: dir,
       outPath: join(dir, "program"),
       sanitize: process.env["SCRIPTC_SAN"] === "1",

@@ -82,7 +82,6 @@ test.for(cases)(
         outDir: dir,
         outPath: join(dir, wasm ? `${fixture}.wasm` : fixture),
         backend: "llvm",
-        dynamic: false,
         npmStatic: ["three"],
         optimization: sanitize ? "dev" : (requestedMode ?? "release"),
         sanitize,

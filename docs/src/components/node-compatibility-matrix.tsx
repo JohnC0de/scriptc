@@ -41,7 +41,6 @@ type Row = {
   anchor: string;
   nodeStability: NodeStability;
   static: Tier;
-  dynamic: Tier;
 };
 type Chapter = { slug: string; title: string; entries: number; apiEntries: number };
 type Snapshot = { nodeVersion: string; verificationBases: Record<VerificationBasis, Verification>; chapters: Chapter[]; rows: Row[] };
@@ -111,7 +110,7 @@ function StabilityBadge({ stability }: { stability: NodeStability }) {
   );
 }
 
-function statusCounts(rows: Row[], tier: "static" | "dynamic") {
+function statusCounts(rows: Row[], tier: "static") {
   return rows.reduce<Record<Status, number>>(
     (counts, row) => {
       if (row.scope !== "api" || row.depth === 0) return counts;
@@ -198,7 +197,6 @@ export function NodeCompatibilityMatrix() {
   const [loadError, setLoadError] = useState(false);
   const [query, setQuery] = useState("");
   const [staticFilter, setStaticFilter] = useState<"all" | Status>("all");
-  const [dynamicFilter, setDynamicFilter] = useState<"all" | Status>("all");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   const rows = snapshot?.rows ?? [];
@@ -208,8 +206,7 @@ export function NodeCompatibilityMatrix() {
   const chapterTitles = useMemo(() => new Map(chapters.map((item) => [item.slug, item.title])), [chapters]);
   const base = `https://nodejs.org/docs/v${snapshot?.nodeVersion ?? "24.15.0"}/api/`;
   const staticCounts = useMemo(() => statusCounts(rows, "static"), [rows]);
-  const dynamicCounts = useMemo(() => statusCounts(rows, "dynamic"), [rows]);
-  const visibleStatuses = useMemo(() => statuses.filter((status) => staticCounts[status] > 0 || dynamicCounts[status] > 0), [dynamicCounts, staticCounts]);
+  const visibleStatuses = useMemo(() => statuses.filter((status) => staticCounts[status] > 0), [staticCounts]);
   const tree = useMemo(() => buildTree(rows), [rows]);
 
   useEffect(() => {
@@ -232,12 +229,11 @@ export function NodeCompatibilityMatrix() {
   }, []);
 
   const needle = query.trim().toLocaleLowerCase();
-  const hasResultFilter = needle !== "" || staticFilter !== "all" || dynamicFilter !== "all";
+  const hasResultFilter = needle !== "" || staticFilter !== "all";
   const rowMatches = (row: Row) => {
     if (staticFilter !== "all" && row.static.status !== staticFilter) return false;
-    if (dynamicFilter !== "all" && row.dynamic.status !== dynamicFilter) return false;
     if (!needle) return true;
-    return [chapterTitles.get(row.chapter), row.kind, row.name, row.signature, row.apiSymbol, row.static.detail, row.dynamic.detail]
+    return [chapterTitles.get(row.chapter), row.kind, row.name, row.signature, row.apiSymbol, row.static.detail]
       .join(" ")
       .toLocaleLowerCase()
       .includes(needle);
@@ -247,7 +243,7 @@ export function NodeCompatibilityMatrix() {
     () => hasResultFilter ? filterTree(tree, rowMatches) : tree,
     // rowMatches closes over these filter values.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [dynamicFilter, hasResultFilter, needle, staticFilter, tree],
+    [hasResultFilter, needle, staticFilter, tree],
   );
   const visible = useMemo(
     () => flattenTree(resultTree, expanded, hasResultFilter),
@@ -260,14 +256,13 @@ export function NodeCompatibilityMatrix() {
     }, 0) : nodeCount(tree),
     // rowMatches closes over these filter values.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [dynamicFilter, hasResultFilter, needle, staticFilter, tree],
+    [hasResultFilter, needle, staticFilter, tree],
   );
 
   const changeQuery = (value: string) => setQuery(value);
   const resetFilters = () => {
     setQuery("");
     setStaticFilter("all");
-    setDynamicFilter("all");
     setExpanded(new Set());
   };
   const toggle = (id: string) => setExpanded((current) => {
@@ -280,8 +275,7 @@ export function NodeCompatibilityMatrix() {
   useEffect(() => {
     if (!snapshot) return;
     if (staticFilter !== "all" && staticCounts[staticFilter] === 0) setStaticFilter("all");
-    if (dynamicFilter !== "all" && dynamicCounts[dynamicFilter] === 0) setDynamicFilter("all");
-  }, [dynamicCounts, dynamicFilter, snapshot, staticCounts, staticFilter]);
+  }, [snapshot, staticCounts, staticFilter]);
 
   if (loadError) {
     return <div className="flex h-full items-center justify-center p-6"><div className="rounded-xl border border-red-500/40 bg-red-100 p-4 text-sm text-red-900">The compatibility dataset could not be loaded.</div></div>;
@@ -296,9 +290,9 @@ export function NodeCompatibilityMatrix() {
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
           <div className="min-w-fit">
             <h1 id="compatibility-title" className="text-lg font-semibold leading-6 text-gray-1000">Node.js 24 Compatibility</h1>
-            <p className="text-xs text-gray-800">Static native and dynamic island · Node {snapshot.nodeVersion}</p>
+            <p className="text-xs text-gray-800">Native compilation · Node {snapshot.nodeVersion}</p>
           </div>
-          <div className="grid min-w-0 flex-1 gap-2 md:grid-cols-[minmax(240px,1fr)_auto_auto]">
+          <div className="grid min-w-0 flex-1 gap-2 md:grid-cols-[minmax(240px,1fr)_auto]">
         <label className="relative block">
           <span className="sr-only">Search the Node.js API inventory</span>
           <svg aria-hidden="true" viewBox="0 0 16 16" className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-800" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -313,13 +307,7 @@ export function NodeCompatibilityMatrix() {
             {statuses.filter((status) => staticCounts[status] > 0).map((status) => <option key={status} value={status}>{labels[status]} ({staticCounts[status]})</option>)}
           </select>
         </label>
-        <label className="flex items-center gap-2 text-xs text-gray-900">
-          <span>Dynamic</span>
-          <select value={dynamicFilter} onChange={(event) => setDynamicFilter(event.target.value as "all" | Status)} className="h-9 rounded-md border border-gray-alpha-500 bg-background-100 px-2 text-xs text-gray-1000">
-            <option value="all">All</option>
-            {statuses.filter((status) => dynamicCounts[status] > 0).map((status) => <option key={status} value={status}>{labels[status]} ({dynamicCounts[status]})</option>)}
-          </select>
-        </label>
+
           </div>
           <div className="flex shrink-0 items-center gap-3 text-xs text-gray-900">
             <span aria-live="polite">{visible.length.toLocaleString()} visible · {matchedCount.toLocaleString()} {hasResultFilter ? "matching" : "API"} rows</span>
@@ -339,7 +327,7 @@ export function NodeCompatibilityMatrix() {
       <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-background-100">
         <table role="treegrid" aria-label="Node.js 24 compatibility hierarchy" className="compatibility-table min-w-[900px]">
           <thead className="sticky top-0 z-10 bg-background-200/95 backdrop-blur-sm">
-            <tr><th className="w-[40%]">Node.js API hierarchy</th><th className="w-[10%] text-center">Node stability</th><th className="w-[25%]">Static native</th><th className="w-[25%]">Dynamic island</th></tr>
+            <tr><th className="w-[55%]">Node.js API hierarchy</th><th className="w-[15%] text-center">Node stability</th><th className="w-[30%]">Native support</th></tr>
           </thead>
           <tbody>
             {visible.map(({ node, level }) => {
@@ -370,7 +358,6 @@ export function NodeCompatibilityMatrix() {
                   </td>
                   <td className="text-center"><StabilityBadge stability={row.nodeStability} /></td>
                   <td><StatusBadge status={row.static.status} detail={row.static.detail} verification={verificationBases?.[row.static.verification]} /></td>
-                  <td><StatusBadge status={row.dynamic.status} detail={row.dynamic.detail} verification={verificationBases?.[row.dynamic.verification]} /></td>
                 </tr>
               );
             })}

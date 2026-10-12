@@ -156,19 +156,6 @@ export function lowerBuiltinOptionalDefault(
   }
   return lowerer.coerceInto(node, value, expected);
 }
-/* ── node:module — createRequire's static erasure ─────────────────────
- * The config/version-reading pattern real CLIs ship:
- *   import { createRequire } from "node:module";
-
- *   const require = createRequire(import.meta.url);
- *   const pkg = require("../package.json");
- * A compiled program's module graph is fixed at build time, so the
- * indirection ERASES where the required specifier is a static string
- * literal naming something the compiler already handles: a builtin (the
- * binding is a namespace import in const clothing), a relative .json
- * document (the file bakes and parses like JSON.parse of its text), or
- * an installed npm package (the island's require-condition entry under
- * --dynamic). Dynamic specifiers and other targets fence by name. */
 
 /** Strips the type-only wrappers the require pattern rides in typed
  * code (`require("node:os") as typeof import("node:os")` — the

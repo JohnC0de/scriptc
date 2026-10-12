@@ -28,7 +28,6 @@ console.log(String(map.delete(key)), String(map.has(key)), String(set.delete(oth
       );
       const result = await compile(entry, {
         backend,
-        dynamic: true,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
         outDir,
         outPath: join(outDir, "program"),
@@ -85,7 +84,6 @@ console.log("after");
       );
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
         outDir,
         outPath: join(outDir, "program"),

@@ -121,14 +121,12 @@ function lowerEnumMemberRead(
     // An ambient enum's OBJECT is never defined — Node's transform emits
     // nothing for `declare enum` AND `declare const enum` alike (it does
     // NOT inline ambient const members the way tsc's emit would; Node is
-    // the oracle, measured). Two worlds where the object IS defined stand
-    // aside: stdlib/@types/node declarations describe real runtime values
-    // (the SC2020-family member fences own those), and npm-declared enums
-    // under --dynamic live in the embedded engine (the island paths own
-    // them). What remains is the user's own `declare enum` — the
+    // the oracle, measured). Stdlib/@types/node declarations describe real
+    // runtime values, so SC2020-family member fences own those. A user's
+    // `declare enum` follows the
     // `declare const __VERSION__` stance: ReferenceError at the access.
     const sf = enumDecl.getSourceFile();
-    if (lowerer.isStdlibFile(sf) || (lowerer.dynamic && lowerer.isNpmFile(sf))) return null;
+    if (lowerer.isStdlibFile(sf)) return null;
     const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
     if (!declared || declared.kind === "void") return null;
     return {
@@ -169,13 +167,7 @@ function lowerEnumReverseRead(
   const enumName = recvSym.name;
   // Ambient: no object exists — the member-read stance.
   if (decls.every((d) => isAmbientEnumDecl(d))) {
-    if (
-      decls.some(
-        (d) =>
-          lowerer.isStdlibFile(d.getSourceFile()) ||
-          (lowerer.dynamic && lowerer.isNpmFile(d.getSourceFile())),
-      )
-    ) {
+    if (decls.some((d) => lowerer.isStdlibFile(d.getSourceFile()))) {
       return null;
     }
     return {

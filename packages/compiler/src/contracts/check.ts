@@ -18,6 +18,9 @@
  *   Immutable slot, values stored into Immutable slots are fresh (nothing
  *   else references them), and such values never escape to code the IR
  *   cannot see. Module constants built from fresh literals become immortal.
+ * - ProgramLifetime (class marker): the class is a hierarchy root in an
+ *   executable; its hierarchy is then never freed and takes no reference
+ *   counts (classes.ts programLifetimeClass).
  *
  * Verified facts land on the IR as `contracts` (IrContracts). */
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
@@ -245,6 +248,7 @@ class ContractChecker {
   }
 
   run(): ContractCheckResult {
+    this.checkProgramLifetime();
     this.checkNoThrow();
     this.checkAcyclic();
     const int32 = new Int32Contracts(this);
@@ -261,6 +265,53 @@ class ContractChecker {
     if (list.length === 0) return;
     this.contracts[field] = list;
     this.recorded = true;
+  }
+
+  /* ── ProgramLifetime ── */
+
+  /** `class C implements ProgramLifetime`: a memory-only promise, so no
+   * program behavior depends on it except that instances are never freed.
+   * Checked: the class is the root of its hierarchy (every subclass, and so
+   * every value of any static type in the hierarchy, is then program-
+   * lifetime, which is what lets the backend elide reference counting on
+   * those static types); and the build is an executable (library hosts own
+   * the lifetimes of the objects they receive). Publication to other
+   * threads needs no check: an instance carries a reference count of its
+   * own until publication marks it like any other object it reaches
+   * (classes.ts programLifetimeRc). Static code has no WeakRef or
+   * FinalizationRegistry; weak collections stay correct because an entry
+   * keyed by an object that is never freed is never observable as removed. */
+  private checkProgramLifetime(): void {
+    if (this.notes.classes.size === 0) return;
+    const roots: string[] = [];
+    for (const [key, note] of this.notes.classes)
+      for (const cls of this.classesAt(key)) {
+        if (cls.base !== undefined) {
+          const base = this.classes.get(cls.base);
+          const baseName = base?.jsName ?? cls.base.replace(/^%(m\d+\.)?/, "");
+          this.report(
+            "SC7008",
+            note.loc,
+            `'${note.name}' is declared ProgramLifetime but extends '${baseName}'`,
+            base === undefined || base.runtime === true
+              ? "ProgramLifetime applies to classes the program owns end to end; built-in bases (errors, emitters, streams) keep runtime state that is released with the object"
+              : `declare ProgramLifetime on the root class '${baseName}' instead; it applies to every subclass`,
+          );
+          continue;
+        }
+        if (this.mod.lib !== undefined) {
+          this.report(
+            "SC7008",
+            note.loc,
+            `'${note.name}' is declared ProgramLifetime in a library build`,
+            "a library's host decides when the objects it receives are released; ProgramLifetime is checked in executables only",
+          );
+          continue;
+        }
+        roots.push(cls.name);
+      }
+    if (roots.length === 0) return;
+    this.record("programLifetime", roots);
   }
 
   /* ── Acyclic ── */
@@ -717,7 +768,7 @@ class Int32Contracts {
         else if (dynamic.has(family))
           this.refuse(
             note,
-            "instances of the class reach dynamic code (any, unknown casts, islands) where a store to the field is not checked",
+            "instances of the class reach dynamic code (any or unknown casts) where a store to the field is not checked",
             "keep instances of this class out of any-typed values, or remove Int32",
           );
       }
@@ -1465,7 +1516,7 @@ class ImmutableContracts {
           if (PASS_THROUGH.has(e.kind) || OBSERVE.has(e.kind)) return;
           if (e.kind === "fieldGet" || e.kind === "recordGet" || e.kind === "arrayGet") return;
           // Any other parent: a derived child goes somewhere this pass does
-          // not follow (dynamic conversions, islands, runtime helpers).
+          // not follow (dynamic conversions, runtime helpers).
           everyExprChild(
             e,
             (child) => {
@@ -1708,10 +1759,6 @@ function describeSink(e: IrExpr): string {
     case "dynObjLit":
     case "dynArrLit":
       return "dynamic (any or unknown) code";
-    case "jsOp":
-    case "jsMarshal":
-    case "jsExit":
-      return "the JavaScript island";
     case "intrinsic":
       return `the runtime (${e.name})`;
     default:

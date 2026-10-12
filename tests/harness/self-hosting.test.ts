@@ -17,11 +17,10 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 
 test("the complete IR validator lowers statically without skipped functions", () => {
   const entry = join(root, "tests/fixtures/self-hosting/validate.ts");
-  const { coverage } = analyze(entry, { dynamic: false });
+  const { coverage } = analyze(entry, {});
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(0);
   expect(coverage.stats.statementsFailed).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -57,7 +56,6 @@ for (const component of [
           outDir,
           outPath: join(outDir, process.platform === "win32" ? "program.exe" : "program"),
           backend,
-          dynamic: false,
           sanitize: process.env["SCRIPTC_SAN"] === "1",
         });
         if (!built.ok)
@@ -100,7 +98,6 @@ for (const [fixture, backend] of ["ir-build", "contextual-ir", "coercion-builder
         outDir,
         outPath: exe("builder"),
         backend,
-        dynamic: false,
         sanitize,
         optimization: "dev",
       });

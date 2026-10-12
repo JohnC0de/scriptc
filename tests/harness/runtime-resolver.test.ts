@@ -425,16 +425,14 @@ for (const backend of ["llvm"] as const) {
       const requests = makeCases(directory);
       const input = join(directory, "requests.json");
       writeFileSync(input, JSON.stringify(requests));
-      const { coverage } = analyze(entry, { dynamic: false });
+      const { coverage } = analyze(entry, {});
       expect(coverage.preflightFailed).toBe(false);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.stats.functionsSkipped).toBe(0);
       const built = await compile(entry, {
         outDir: directory,
         outPath: join(directory, process.platform === "win32" ? "resolver.exe" : "resolver"),
         backend,
-        dynamic: false,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });
       if (!built.ok)

@@ -305,13 +305,42 @@ export interface ClassHost extends ShapeHost {
    * entry point unless the slot's calling convention borrows; see
    * LlEmitter.virtualEntry). */
   virtualEntry?(implFn: string): string;
+  /** Roots of the hierarchies declared `implements ProgramLifetime`
+   * (IrContracts.programLifetime). Absent: none. */
+  readonly programLifetime?: ReadonlySet<string>;
 }
 
-/** The newFn initialization stores for fields whose type ADMITS undefined
- * (undefFieldInitLineC's LLVM twin): undefined-armed union fields start
- * at the interned unit instance; dyn fields start at native undefined;
- * jsval fields (an `any` class field under --dynamic) start at the engine's
- * undefined cell. */
+/** Whether `meta`'s instances live until the process exits (a
+ * ProgramLifetime hierarchy, contracts/check.ts): `new` allocates them
+ * without a collector header and with the reference count
+ * programLifetimeRc, nothing frees them, and the class's retain and release
+ * entry points are empty, so reference counting on any static type of the
+ * hierarchy folds away. The cycle analysis leaves the hierarchy untraced, so
+ * no trace adapter ever visits an instance (as for every untraced class). */
+export function programLifetimeClass(host: ClassHost, meta: LlClassMeta): boolean {
+  return host.programLifetime?.has(meta.root.def.name) === true && meta.root.def.runtime !== true;
+}
+
+/** The reference count a program-lifetime instance is created with: the
+ * midpoint of the size_t range (2^63, or 2^31 on 32-bit targets).
+ *
+ * SIZE_MAX would also keep the object alive, but every runtime contract
+ * reads rc == SIZE_MAX as "published": immutable (the frozen-object guards
+ * throw on stores), shareable by pointer (postMessage and workerData deliver
+ * it without a clone) and already walked (publication stops there). A
+ * program-lifetime object is none of these until the program publishes it;
+ * it is mutable and owned by the thread that made it. Publication then marks
+ * it SIZE_MAX like any other object it reaches (and restores this count when
+ * a refusal undoes the publish), so the count doubles as the published and
+ * visited mark without a header or an extra word.
+ *
+ * Only the class's empty helpers count references on these types, so any
+ * count away from 0, 1 and SIZE_MAX would do; the midpoint keeps even an
+ * unpaired generic retain or release from ever reaching either end. */
+export function programLifetimeRc(sizeType: "i32" | "i64"): string {
+  return sizeType === "i32" ? "-2147483648" : "-9223372036854775808";
+}
+
 function undefFieldInits(
   host: ClassHost,
   meta: LlClassMeta,
@@ -325,11 +354,10 @@ function undefFieldInits(
     // A nullable-pointer field's zeroed slot already is its unit arm.
     if (nullable?.get(meta.def.name, f.name)) return;
     const { index } = classFieldIndex(meta, f.name);
-    if (f.type.kind === "jsval" || f.type.kind === "dyn") {
-      const undefinedFn = f.type.kind === "dyn" ? "scr_dyn_undefined" : "scr_jsval_undefined";
-      host.declare(`declare ptr @${undefinedFn}()`);
+    if (f.type.kind === "dyn") {
+      host.declare("declare ptr @scr_dyn_undefined()");
       out.push(
-        `  %ufv${i} = call ptr @${undefinedFn}()`,
+        `  %ufv${i} = call ptr @scr_dyn_undefined()`,
         `  %uf${i} = getelementptr inbounds %${mangleClassStruct(meta.def.name)}, ptr %o, i64 0, i32 ${index}`,
         `  store ptr %ufv${i}, ptr %uf${i} ; ${llvmCommentText(f.name)} starts undefined`,
       );
@@ -432,6 +460,7 @@ export function emitClassShapes(
   for (const cls of emitted) {
     const meta = metaMap.get(cls.name)!;
     const struct = mangleClassStruct(cls.name);
+    const lifetime = programLifetimeClass(host, meta);
     const traced = host.tracedShapes.has(`object:${cls.name}`);
     const isEmitterRooted = emitterRooted(meta);
     const isStreamRooted = streamRooted(meta);
@@ -476,7 +505,7 @@ export function emitClassShapes(
 
     // retain: NULL-tolerant, immortal-skip — layout-generic (rc at 0), so
     // hierarchy members need no dispatch.
-    defs.push(...retainBody(host, mangleClassRetain(cls.name), `retain ${cls.name}`), ``);
+    defs.push(...retainBody(host, mangleClassRetain(cls.name), `retain ${cls.name}`, lifetime), ``);
 
     // The field-releasing teardown body shared by both release shapes
     // (the public one on standalone classes, the DIRECT one on hierarchy
@@ -515,6 +544,7 @@ export function emitClassShapes(
             dispatchName,
             traced,
             `release ${cls.name}`,
+            lifetime,
           ),
           ``,
         );
@@ -579,6 +609,7 @@ export function emitClassShapes(
           freeBody,
           `release ${cls.name}`,
           bounded,
+          lifetime,
         ),
         ``,
       );
@@ -603,10 +634,25 @@ export function emitClassShapes(
         ),
         ``,
       );
+    // A program-lifetime instance is never freed: no collector header
+    // (nothing walks or frees it) and the program-lifetime count, which
+    // publication turns into SIZE_MAX (programLifetimeRc).
     nw.push(
-      ...emitObjectAlloc(host, sizeOf, traced ? { type: cycType } : null, meta.hierarchy ? 16 : 8),
+      ...emitObjectAlloc(
+        host,
+        sizeOf,
+        traced && !lifetime ? { type: cycType } : null,
+        meta.hierarchy ? 16 : 8,
+      ),
     );
-    nw.push(`  store ${host.sizeType} 1, ptr %o`);
+    nw.push(`  store ${host.sizeType} ${lifetime ? programLifetimeRc(host.sizeType) : 1}, ptr %o`);
+    if (lifetime && audit) {
+      // --sanitize builds: the RC audit skips its leak report when the
+      // program keeps program-lifetime objects (scr_console.c), and
+      // LeakSanitizer scans them as roots (scr_object.c).
+      host.declare(`declare void @scr_obj_lifetime_note(ptr)`);
+      nw.push(`  call void @scr_obj_lifetime_note(ptr %o)`);
+    }
     if (meta.hierarchy) {
       nw.push(
         `  %vtp = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 1`,

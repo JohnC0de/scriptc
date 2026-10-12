@@ -653,7 +653,7 @@ static bool scr_fs_callback_times(const ScrDyn *atime, const ScrDyn *mtime, bool
 }
 
 static ScrArr *scr_fs_cb_vectors(const ScrDyn *buffers) {
-  ScrDyn *snapshot = buffers->kind == SCR_DYN_TYPED_REF && scr_dyn_isl_is_array(buffers)
+  ScrDyn *snapshot = buffers->kind == SCR_DYN_TYPED_REF && scr_dyn_ref_is_array(buffers)
     ? scr_dyn_typed_ref_materialize(buffers) : NULL;
   const ScrDyn *array = snapshot ? snapshot : buffers;
   if (array->kind != SCR_DYN_ARR) {
@@ -1057,7 +1057,7 @@ ScrBytes *scr_buffer_from_dyn(const ScrDyn *value, const ScrStr *encoding) {
       return out;
     }
   }
-  if (value->kind == SCR_DYN_TYPED_REF || value->kind == SCR_DYN_HANDLE || value->kind == SCR_DYN_JSVAL) {
+  if (value->kind == SCR_DYN_TYPED_REF || value->kind == SCR_DYN_HANDLE) {
     return scr_buffer_from_refusal("with an opaque reference");
   }
   char detail[64];

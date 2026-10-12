@@ -5,7 +5,7 @@
  * Node owns the denominator: the pinned index.md names every API chapter and all.json
  * supplies the structured API tree (classes, methods, properties, events,
  * globals, overloads, and conceptual sections). scriptc owns the projection:
- * the compiler surface/dedicated manifests and the runtime island manifest.
+ * the compiler surface and dedicated native compatibility manifests.
  * Anything those sources do not prove is either "not-implemented" (when a
  * known implementation surface has no matching implementation) or
  * "unreviewed" (when no compatibility subsystem owns the classification).
@@ -27,7 +27,6 @@ const publicOutputPath = `${root}docs/src/generated/node-v24-compatibility.json`
 const publicMetaOutputPath = `${root}docs/src/generated/node-v24-compatibility-meta.json`;
 const compilerManifestPath = `${root}packages/compiler/surface-manifest.json`;
 const compilerCompatPath = `${packageRoot}static-support.json`;
-const islandManifestPath = `${packageRoot}dynamic-support.json`;
 const pinPath = `${packageRoot}node-v24.json`;
 const pin = JSON.parse(readFileSync(pinPath, "utf8"));
 const NODE_BASE = pin.markdownBaseUrl;
@@ -297,46 +296,14 @@ function scopeOf(row) {
 
 function classificationContext() {
   const compilerCompat = JSON.parse(readFileSync(compilerCompatPath, "utf8"));
-  const island = JSON.parse(readFileSync(islandManifestPath, "utf8"));
   for (const [chapter, status] of Object.entries(compilerCompat.chapterPolicies)) {
     validateStatus(status, `static chapter policy '${chapter}'`);
   }
-  for (const [chapter, status] of Object.entries(island.chapterPolicies)) {
-    validateStatus(status, `dynamic chapter policy '${chapter}'`);
-  }
-  for (const [module, entry] of Object.entries(island.modules)) {
-    const exports = new Set(entry.exports);
-    for (const name of entry.refused ?? []) {
-      if (!exports.has(name))
-        throw new Error(`island module '${module}' marks non-export '${name}' refused`);
-    }
-    const members = new Set(entry.members ?? []);
-    for (const name of entry.refusedMembers ?? []) {
-      if (members.has(name))
-        throw new Error(
-          `island module '${module}' marks member '${name}' both supported and refused`,
-        );
-    }
-    validateEvidence(entry.evidence, `island module '${module}'`);
-  }
-  const supportedGlobals = new Set(island.globals.supported);
-  const npmSupportedGlobals = new Set(island.globals.npmSupported ?? []);
-  for (const name of npmSupportedGlobals) {
-    if (supportedGlobals.has(name))
-      throw new Error(`island global '${name}' is both always-supported and npm-supported`);
-  }
-  for (const name of island.globals.absent) {
-    if (supportedGlobals.has(name) || npmSupportedGlobals.has(name))
-      throw new Error(`island global '${name}' is both supported and absent`);
-  }
-  validateEvidence(island.globals.evidence, "island globals");
   return {
     manifest: manifestIndex(),
     compilerCompat,
     dedicated: dedicatedIndex(compilerCompat),
     staticFeatures: featureEntries(compilerCompat),
-    dynamicFeatures: featureEntries(island),
-    island,
   };
 }
 
@@ -387,78 +354,6 @@ function classifyStatic(row, chapter, ctx, parentSignature) {
   return tier("unreviewed", "");
 }
 
-function classifyDynamic(row, chapter, ctx, parentSignature) {
-  if (row.depth === 0) return tier("unreviewed", "", { source: "chapter-summary" });
-  if (row.scope === "documentation" || row.scope === "configuration")
-    return tier("not-applicable", "", { source: row.scope });
-  const feature = featureOf(row, ctx.dynamicFeatures, parentSignature);
-  if (feature)
-    return tier(feature.status, "", {
-      source: `island-feature:${row.chapter}.${row.apiSymbol}`,
-      tests: feature.evidence,
-    });
-
-  if (row.chapter === "globals") {
-    if (ctx.island.globals.supported.includes(row.name)) {
-      return tier("partial", "", {
-        source: `island-global:${row.name}`,
-        tests: ctx.island.globals.evidence,
-      });
-    }
-    if (ctx.island.globals.npmSupported?.includes(row.name)) {
-      return tier("partial", "", {
-        source: `island-npm-global:${row.name}`,
-        tests: ctx.island.globals.evidence,
-      });
-    }
-    if (ctx.island.globals.absent.includes(row.name)) {
-      return tier("not-implemented", "", {
-        source: `island-global-absent:${row.name}`,
-        tests: ctx.island.globals.evidence,
-      });
-    }
-  }
-
-  const modules = pin.chapterModules[row.chapter] ?? [];
-  for (const module of modules) {
-    const moduleEntry = ctx.island.modules[module];
-    const direct = directExportName(row, module);
-    if (!moduleEntry) continue;
-    if (moduleEntry.refusedMembers?.includes(row.apiSymbol)) {
-      return tier("refused", "", { source: `island-member-stub:node:${module}.${row.apiSymbol}` });
-    }
-    if (moduleEntry.members?.includes(row.apiSymbol)) {
-      return tier("partial", "", {
-        source: `island-member:node:${module}.${row.apiSymbol}`,
-        tests: moduleEntry.evidence,
-      });
-    }
-    if (direct && moduleEntry.refused?.includes(direct)) {
-      return tier("refused", "", { source: `island-stub:node:${module}.${direct}` });
-    }
-    if (direct && moduleEntry.exports.includes(direct)) {
-      return tier("partial", "", {
-        source: `island-export:node:${module}.${direct}`,
-        tests: moduleEntry.evidence,
-      });
-    }
-  }
-
-  const policy = ctx.island.chapterPolicies[row.chapter];
-  if (policy && policy !== "unreviewed") {
-    return tier(policy, "", { source: `island-chapter-policy:${row.chapter}` });
-  }
-  if (modules.length > 0 && modules.every((module) => ctx.island.modules[module] === undefined)) {
-    return tier("not-implemented", "", {
-      source: `unshimmed:${modules.map((module) => `node:${module}`).join(",")}`,
-    });
-  }
-  if (modules.length > 0 || row.chapter === "globals" || row.chapter === "errors") {
-    return tier("not-implemented", "", { source: `island-unmatched:${row.chapter}` });
-  }
-  return tier("unreviewed", "");
-}
-
 function treeSize(node) {
   let size = 1;
   for (const field of CHILD_FIELDS) for (const child of node[field] ?? []) size += treeSize(child);
@@ -502,7 +397,6 @@ function flattenChapter(rootNode, chapter, ctx) {
     row.scope = scopeOf(row);
     const parentSignature = parents.at(-1)?.textRaw ?? parents.at(-1)?.name;
     row.static = classifyStatic(row, chapter, ctx, parentSignature);
-    row.dynamic = classifyDynamic(row, chapter, ctx, parentSignature);
     rows.push(row);
     for (const field of CHILD_FIELDS) {
       for (const child of node[field] ?? []) walk(child, [...parents, node], depth + 1, stability);
@@ -530,7 +424,7 @@ function summarizeTier(rows, key, chapterPolicy) {
   const tests = [...new Set(descendants.flatMap((tier) => tier.tests ?? []))].sort();
   if (statuses.size === 0 && chapterPolicy) {
     return tier(chapterPolicy, "", {
-      source: `${key === "static" ? "compiler" : "island"}-chapter-policy:${rows[0].chapter}`,
+      source: `compiler-chapter-policy:${rows[0].chapter}`,
     });
   }
   if (statuses.size === 1)
@@ -618,18 +512,12 @@ function buildSnapshot({ allJson, indexMarkdown, allSha256, indexSha256 }) {
       "static",
       ctx.compilerCompat.chapterPolicies[link.slug],
     );
-    chapterRows[0].dynamic = summarizeTier(
-      chapterRows,
-      "dynamic",
-      ctx.island.chapterPolicies[link.slug],
-    );
     chapters.push({
       slug: link.slug,
       title: link.title,
       entries: chapterRows.length,
       apiEntries: chapterRows.filter((row) => row.scope === "api").length,
       static: statusCounts(chapterRows, "static"),
-      dynamic: statusCounts(chapterRows, "dynamic"),
     });
     rows.push(...chapterRows);
   }
@@ -640,7 +528,7 @@ function buildSnapshot({ allJson, indexMarkdown, allSha256, indexSha256 }) {
     ids.add(row.id);
   }
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     nodeVersion: pin.version,
     nodeTag: pin.tag,
     nodeCommit: pin.commit,
@@ -652,7 +540,6 @@ function buildSnapshot({ allJson, indexMarkdown, allSha256, indexSha256 }) {
     supportManifests: {
       compilerSurface: "packages/compiler/surface-manifest.json",
       compilerDedicated: "internal/compatibility/static-support.json",
-      dynamicIsland: "internal/compatibility/dynamic-support.json",
     },
     chapters,
     rows,
@@ -669,8 +556,6 @@ function publicDetail(tier) {
   if (tier.status === "unreviewed") return "Not yet classified; tracked as open parity work.";
   if (source.startsWith("surface-manifest:unsupported:"))
     return "Explicitly rejected by a named compiler diagnostic.";
-  if (source.startsWith("surface-manifest:dynamic-only:"))
-    return "Explicitly refused in static code; this form requires the dynamic island.";
   if (
     /^surface-manifest:node-builtin\.fs\.(?:statfsSync|promises\.statfs)$/.test(source) ||
     source === "compiler-feature:fs.fs.statfs"
@@ -818,97 +703,6 @@ function publicDetail(tier) {
   }
   if (source.startsWith("compiler-unmatched:"))
     return "No static compiler lowering is registered for this API yet.";
-  if (source.startsWith("island-export:"))
-    return "Available through the embedded Node compatibility shim; exact member and overload coverage may be narrower.";
-  if (source.startsWith("island-member:"))
-    return "Implemented by the embedded Node compatibility shim.";
-  if (source.startsWith("island-member-stub:"))
-    return "Exposed only as an explicit throwing or rejecting compatibility stub.";
-  if (source.startsWith("island-stub:"))
-    return "Exposed only as an explicit throwing or rejecting compatibility stub.";
-  if (source.startsWith("island-global:"))
-    return "Provided by the embedded engine's web/global compatibility layer.";
-  if (source.startsWith("island-npm-global:"))
-    return "Provided when the embedded npm module bootstrap runs; absent from standalone dynamic islands.";
-  if (source.startsWith("island-global-absent:"))
-    return "Verified absent from the embedded engine's web/global compatibility layer.";
-  if (source.startsWith("unshimmed:"))
-    return "No dynamic-island shim exists for this Node module yet.";
-  if (source.startsWith("island-chapter-policy:")) {
-    if (tier.status === "by-design")
-      return "Intentionally outside the dynamic-island execution model.";
-    if (tier.status === "not-applicable")
-      return "This Node executable or embedding feature does not map to dynamic-island code.";
-    return "No dynamic-island implementation exists for this Node API family yet.";
-  }
-  if (source.startsWith("island-feature:")) {
-    if (/^island-feature:assert\.assert\.doesNot(?:Throw|Reject)$/.test(source)) {
-      return "Supports no-error assertions over callbacks, promises, and promise-like objects, with Error classes, regular expressions, validation functions, and Node-compatible failure metadata for the tested forms.";
-    }
-    if (source.startsWith("island-feature:util.util.types."))
-      return "Checks embedded engine brands without invoking getters or proxy traps, including spoofed tags and prototypes, subclasses, generators, iterators, and revoked proxies.";
-    if (source === "island-feature:util.util.styleText")
-      return "Applies standard styles and aliases with nested ANSI resets, stream validation, color environment settings, and tested option and conversion hooks; terminal metadata and warnings follow the embedded runtime.";
-    if (source === "island-feature:util.util.stripVTControlCharacters")
-      return "Removes ANSI control sequences with the Node matcher and validates non-string arguments.";
-    if (source === "island-feature:util.util.toUSVString")
-      return "Replaces unpaired surrogate code units and preserves Node string coercion, custom conversion hooks, and conversion errors.";
-    if (source.startsWith("island-feature:diagnostics_channel."))
-      return "Publishes synchronous, promise, and callback tracing lifecycle events with result/error identity, subscriber management, and store bindings. Bound stores follow the embedded engine's synchronous AsyncLocalStorage model and do not propagate across awaits.";
-    if (source.startsWith("island-feature:timers.timersPromises."))
-      return "Provides cancellable promise timers, buffered interval iteration, scheduler waits and yields, and ref options over the native event loop; delay warnings remain outside this subset.";
-    if (source.startsWith("island-feature:timers."))
-      return "Provides timer and immediate handles with reference control, refresh, cancellation, and disposal over the native event loop.";
-    if (source === "island-feature:events.events.once")
-      return "Waits for EventEmitter or EventTarget events with AbortSignal cancellation, Node abort errors, and listener cleanup.";
-    if (source === "island-feature:events.events.on")
-      return "Iterates EventEmitter or EventTarget events with buffered delivery, close events, cancellation, watermark backpressure, and listener cleanup.";
-    if (source === "island-feature:events.events.addAbortListener")
-      return "Registers disposable abort listeners that run even when ordinary propagation is stopped; already-aborted signals schedule the callback in a microtask.";
-    if (source.startsWith("island-feature:events.")) {
-      return "Implements EventEmitter listener lifecycle, symbol event names, filtered listener counts, and error monitoring; rejection capture and listener warnings remain outside this subset.";
-    }
-    if (/^island-feature:util\.util\.(?:promisify|callbackify)$/.test(source)) {
-      return "Adapts callbacks and promises with receiver preservation, custom promisify hooks, function metadata, and Node-compatible argument and rejection handling; scheduling follows the island microtask queue.";
-    }
-    if (/^island-feature:util\.(?:util\.)?parseArgs$/.test(source)) {
-      return "Parses command-line options, positionals, defaults, and tokens with Node-compatible configuration validation.";
-    }
-    if (/^island-feature:buffer\.buffer\.(?:isAscii|isUtf8)$/.test(source)) {
-      return "Validates bytes in ArrayBuffer and typed-array views with Node-compatible argument errors.";
-    }
-    if (source === "island-feature:buffer.buffer.transcode") {
-      return "Converts Buffer and Uint8Array inputs among ASCII, Latin-1, UTF-8, and UTF-16LE, including encoding aliases and conversion errors.";
-    }
-    if (source === "island-feature:util.util.getSystemErrorMap") {
-      return "Returns a fresh mutable Map of platform-specific error codes, names, and messages.";
-    }
-    if (source === "island-feature:util.util.isDeepStrictEqual") {
-      return "Compares tested object, collection, cycle, byte-view, and builtin-value families with Node 24 prototype skipping; some exotic object brands remain unsupported.";
-    }
-    if (/^island-feature:util\.util\.getSystemError(?:Name|Message)$/.test(source)) {
-      return "Converts platform-specific negative error codes to names or messages, with Node-compatible validation for common argument forms.";
-    }
-    if (source === "island-feature:url.url.fileURLToPathBuffer") {
-      return "Converts file URLs to raw path bytes with POSIX or Windows options, preserving invalid UTF-8 and malformed escapes; internationalized hostnames remain unsupported.";
-    }
-    if (/^island-feature:url\.url\.(?:fileURLToPath|pathToFileURL)$/.test(source)) {
-      return "Supports file-path conversion with POSIX or Windows options for the tested string and URL forms; internationalized hostnames remain unsupported.";
-    }
-    if (source === "island-feature:util.textEncoder.encodeInto") {
-      return "Writes complete UTF-8 characters into island-owned Uint8Array or Buffer views; byte arrays received from native code are copied.";
-    }
-    if (/^island-feature:util\.(?:encoding|fatal|ignoreBOM)$/.test(source)) {
-      return "Codec properties expose UTF-8 and decoder flags; other decoder encodings remain unsupported in the island.";
-    }
-    if (tier.status === "not-applicable")
-      return "Node configuration or documentation that does not map to an island runtime API.";
-    if (tier.status === "not-implemented")
-      return "Not implemented in the embedded module-loader subset yet.";
-    return "Implemented for the documented embedded module-loader subset.";
-  }
-  if (source.startsWith("island-unmatched:"))
-    return "This API is not implemented by the dynamic-island shim.";
   if (source === "documentation") return "Documentation section; not a runtime API.";
   if (source === "configuration")
     return "Node command-line or configuration entry; not a runtime API.";
@@ -930,7 +724,7 @@ const PUBLIC_VERIFICATION = {
   },
   "explicit-refusal": {
     label: "Explicit refusal",
-    detail: "Backed by a named compiler refusal or an explicit dynamic throwing or rejecting stub.",
+    detail: "Backed by a named compiler refusal.",
   },
   "verified-absence": {
     label: "Verified absence",
@@ -972,16 +766,12 @@ function verificationBasis(tier) {
   if (source === "derived:descendants") basis = "derived";
   else if (tier.status === "supported" || tier.status === "partial") basis = "test-backed";
   else if (tier.status === "refused") basis = "explicit-refusal";
-  else if (source.startsWith("island-global-absent:")) basis = "verified-absence";
   else if (tier.status === "by-design") basis = "architectural-policy";
   else if (tier.status === "not-applicable") basis = "not-applicable";
   else if (tier.status === "unreviewed") basis = "unreviewed";
   else if (
     tier.status === "not-implemented" &&
-    (source.startsWith("compiler-chapter-policy:") ||
-      source.startsWith("compiler-feature:") ||
-      source.startsWith("island-chapter-policy:") ||
-      source.startsWith("island-feature:"))
+    (source.startsWith("compiler-chapter-policy:") || source.startsWith("compiler-feature:"))
   )
     basis = "declared-gap";
   else if (tier.status === "not-implemented") basis = "registry-gap";
@@ -1026,12 +816,12 @@ function backlogAction(tier) {
 
 function buildBacklog(snapshot) {
   const tasks = [];
-  const tierItems = { static: {}, dynamic: {} };
+  const tierItems = { static: {} };
   const priorities = { high: 0, normal: 0, low: 0 };
   for (const row of snapshot.rows) {
     if (row.depth === 0 || row.scope !== "api") continue;
     const tiers = {};
-    for (const key of ["static", "dynamic"]) {
+    for (const key of ["static"]) {
       const action = backlogAction(row[key]);
       if (action === null) continue;
       tierItems[key][action] = (tierItems[key][action] ?? 0) + 1;
@@ -1065,9 +855,7 @@ function buildBacklog(snapshot) {
     nodeCommit: snapshot.nodeCommit,
     summary: {
       taskCount: tasks.length,
-      tierItemCount:
-        Object.values(tierItems.static).reduce((sum, count) => sum + count, 0) +
-        Object.values(tierItems.dynamic).reduce((sum, count) => sum + count, 0),
+      tierItemCount: Object.values(tierItems.static).reduce((sum, count) => sum + count, 0),
       tiers: tierItems,
       priorities,
     },
@@ -1080,8 +868,7 @@ function publicExclusion(row) {
   if (row.scope === "metadata") return "metadata";
   if (row.scope === "configuration") return "configuration";
   if (row.scope !== "api") return "non-api";
-  if (row.static.status === "not-applicable" && row.dynamic.status === "not-applicable")
-    return "not-applicable";
+  if (row.static.status === "not-applicable") return "not-applicable";
   return null;
 }
 
@@ -1118,14 +905,12 @@ function projectPublicMatrix(snapshot) {
       continue;
     }
     root.static = summarizeTier(chapterRows, "static");
-    root.dynamic = summarizeTier(chapterRows, "dynamic");
     chapters.push({
       slug: chapter.slug,
       title: chapter.title,
       entries: chapterRows.length,
       apiEntries: chapterRows.length,
       static: statusCounts(chapterRows, "static"),
-      dynamic: statusCounts(chapterRows, "dynamic"),
     });
     rows.push(...chapterRows);
   }
@@ -1170,11 +955,6 @@ function publicSnapshot(snapshot) {
         detail: publicDetail(row.static),
         verification: verificationBasis(row.static),
       },
-      dynamic: {
-        status: row.dynamic.status,
-        detail: publicDetail(row.dynamic),
-        verification: verificationBasis(row.dynamic),
-      },
     })),
   };
 }
@@ -1210,12 +990,8 @@ function checkLocal() {
     const chapter = snapshot.chapters.find((item) => item.slug === row.chapter);
     const parentSignature = ancestors[row.depth - 1]?.signature;
     const expectedStatic = classifyStatic(row, chapter, ctx, parentSignature);
-    const expectedDynamic = classifyDynamic(row, chapter, ctx, parentSignature);
     ancestors[row.depth] = row;
-    if (
-      JSON.stringify(row.static) !== JSON.stringify(expectedStatic) ||
-      JSON.stringify(row.dynamic) !== JSON.stringify(expectedDynamic)
-    ) {
+    if (JSON.stringify(row.static) !== JSON.stringify(expectedStatic)) {
       throw new Error(
         `generated classification is stale at ${row.id} (${row.signature}); run 'pnpm node-compat'`,
       );
@@ -1238,12 +1014,8 @@ function checkLocal() {
   for (const row of publicRows) {
     if (row.depth > 0 && row.scope !== "api")
       throw new Error(`${row.id} exposes a non-API row in the public matrix`);
-    if (
-      row.depth > 0 &&
-      row.static.status === "not-applicable" &&
-      row.dynamic.status === "not-applicable"
-    ) {
-      throw new Error(`${row.id} exposes a row that is not applicable to either compiler tier`);
+    if (row.depth > 0 && row.static.status === "not-applicable") {
+      throw new Error(`${row.id} exposes a row that is not applicable to native compilation`);
     }
   }
   if (readFileSync(backlogOutputPath, "utf8") !== render(buildBacklog(snapshot))) {
@@ -1256,7 +1028,7 @@ function checkLocal() {
     throw new Error("the docs compatibility metadata is stale; run 'pnpm node-compat'");
   }
   for (const row of snapshot.rows) {
-    for (const key of ["static", "dynamic"]) {
+    for (const key of ["static"]) {
       if (
         (row[key].status === "supported" || row[key].status === "partial") &&
         (row[key].tests?.length ?? 0) === 0
@@ -1265,11 +1037,7 @@ function checkLocal() {
       }
       if (row[key].status === "refused") {
         const source = row[key].evidence ?? "";
-        const explicit =
-          key === "static"
-            ? source.startsWith("surface-manifest:unsupported:") ||
-              source.startsWith("surface-manifest:dynamic-only:")
-            : source.startsWith("island-stub:") || source.startsWith("island-member-stub:");
+        const explicit = source.startsWith("surface-manifest:unsupported:");
         if (!explicit && source !== "derived:descendants") {
           throw new Error(`${row.id} claims ${key} refused without an explicit refusal source`);
         }

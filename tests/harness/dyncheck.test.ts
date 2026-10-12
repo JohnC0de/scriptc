@@ -42,12 +42,11 @@ async function compileAndRun(
   name: string,
   source: string,
   ext: "ts" | "cjs" = "ts",
-  dynamic = false,
+  compareNode = false,
 ): Promise<RunResult> {
   const key = createHash("sha256")
     .update(source)
     .update(sanitize ? "san" : "plain")
-    .update(dynamic ? "dyn" : "")
     .digest("hex")
     .slice(0, 16);
   const outDir = join(cacheDir, `dyncheck-${key}`);
@@ -62,7 +61,6 @@ async function compileAndRun(
     outDir,
     sanitize,
     backend: "llvm",
-    dynamic,
   });
   if (!result.ok) {
     throw new Error(
@@ -70,14 +68,31 @@ async function compileAndRun(
         result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
     );
   }
-  try {
-    const { stdout, stderr } = await execFileAsync(result.binaryPath, [], { encoding: "utf8" });
-    return { stdout, stderr, exitCode: 0 };
-  } catch (err) {
-    const e = err as { code?: unknown; stdout?: string; stderr?: string };
-    if (typeof e.code !== "number") throw err;
-    return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", exitCode: e.code };
+  const run = async (executable: string, args: string[]): Promise<RunResult> => {
+    try {
+      const { stdout, stderr } = await execFileAsync(executable, args, { encoding: "utf8" });
+      return { stdout, stderr, exitCode: 0 };
+    } catch (err) {
+      const e = err as { code?: unknown; stdout?: string; stderr?: string };
+      if (typeof e.code !== "number") throw err;
+      return { stdout: e.stdout ?? "", stderr: e.stderr ?? "", exitCode: e.code };
+    }
+  };
+  const actual = await run(result.binaryPath, []);
+  if (compareNode) {
+    const expected = await run(
+      process.execPath,
+      ext === "ts" ? ["--input-type=module-typescript", "--eval", source] : [file],
+    );
+    const stderr = sanitize
+      ? actual.stderr.replace(
+          /^==\d+==WARNING: ASan doesn't fully support makecontext\/swapcontext functions and may produce false positives in some cases!\n/gm,
+          "",
+        )
+      : actual.stderr;
+    expect({ ...actual, stderr }).toEqual(expected);
   }
+  return actual;
 }
 
 describe(`dynamic-boundary checks (scriptc-only${sanitize ? ", sanitized" : ""})`, () => {
@@ -919,28 +934,14 @@ console.log("unreachable", req.url);
     );
   });
 
-  /* ── the jsval→dyn crossing's honesty ladder (SCR_DYN_JSVAL) ────────
-   * The armed rows (typeof/truthiness/String()/===, the narrowing tests,
-   * the identity round trip; the routed-ops lane's keyed read/write,
-   * calls, method dispatch, Object statics, JSON.stringify) are
-   * corpus-tested differentially (2578, 2579, 2582-2585, npm
-   * jsval-into-dyn). These pin the LOUD fences of every dyn walk still
-   * un-armed over an island-held value — the retired fence box answered
-   * typeof "function" and .length 0 SILENTLY here; a wrong answer is
-   * never acceptable, a named refusal is. All --dynamic. */
-
-  // A JS-lane `any` producer: JSDoc-`any` returns are ISLAND values under
-  // --dynamic (a bare record literal would infer a typed record and take
-  // the deep-copy path instead; a local initialized FROM an island value
-  // also stays island-world by the ratified runtime-world dispatch — the
-  // crossing needs a real dyn slot: a param, a literal member, a return).
-  const wrapPreamble = `const eng: any = { a: 1, list: [1, 2, 3] };
-const u: unknown = eng;
+  // Exercise native checked-value slots through parameters and aliases.
+  const wrapPreamble = `const value: any = { a: 1, list: [1, 2, 3] };
+const u: unknown = value;
 `;
 
-  test("a keyed read on an island-held unknown routes to the engine (the retired .length fence)", async () => {
+  test("a keyed read on a native checked value preserves property lookup", async () => {
     const r = await compileAndRun(
-      "jsval-key-read",
+      "checked-key-read",
       `/** @returns {any} */
 function mint() { return { a: 1, list: [1, 2, 3] }; }
 const eng = mint();
@@ -956,19 +957,14 @@ probe(eng);
   });
 
   test("the collapsed (string | object)[] slot compiles and the element read routes", async () => {
-    // Appendix-A repro 4's exit, one lane further along: the union-arm
-    // SC2009 fence is RETIRED — `(string | object)[]` maps to the
-    // checked-dynamic representation wholesale (every arm dyn-subsumable),
-    // the island plugins array WRAPS at the slot (dynFromJsval), and the
-    // element read rides the routed keyed-read arm: the engine answers,
-    // the scalar normalizes, and typeof prints Node's answer.
+    // Every union arm fits the checked-value representation.
     const r = await compileAndRun(
-      "jsval-collapsed-union-slot",
-      `const eng: any = ["p1", { languages: ["js"] }];
+      "checked-collapsed-union-slot",
+      `const value: any = ["p1", { languages: ["js"] }];
 function firstPlugin(ps: (string | object)[]): void {
   console.log(typeof ps[0]);
 }
-firstPlugin(eng);
+firstPlugin(value);
 `,
       "ts",
       true,
@@ -977,12 +973,9 @@ firstPlugin(eng);
     expect(r.stdout).toBe("string\n");
   });
 
-  test("a method call on an island-held unknown runs the engine's own prototype", async () => {
-    // scr_dyn_invoke's JSVAL arm routes to scr_jsval_call_method — the
-    // ENGINE's Array.prototype.slice runs (JS-exact), and the result
-    // wraps back for further routed reads.
+  test("a method call on a native checked value uses Array.prototype", async () => {
     const r = await compileAndRun(
-      "jsval-method",
+      "checked-method",
       `/** @returns {any} */
 function mint() { return [{ languages: ["js"] }]; }
 const eng = mint();
@@ -997,9 +990,9 @@ console.log(\`\${walk(eng).length}\`);
     expect(r.stdout).toBe("1\n");
   });
 
-  test("JSON.stringify of an island-held unknown is the engine's own stringify", async () => {
+  test("JSON.stringify serializes a native checked value", async () => {
     const r = await compileAndRun(
-      "jsval-stringify",
+      "checked-stringify",
       wrapPreamble +
         `console.log(JSON.stringify(u));
 `,
@@ -1010,25 +1003,23 @@ console.log(\`\${walk(eng).length}\`);
     expect(r.stdout).toBe('{"a":1,"list":[1,2,3]}\n');
   });
 
-  test("structuredClone of an island-held unknown fences loudly", async () => {
+  test("structuredClone copies a native checked value", async () => {
     const r = await compileAndRun(
-      "jsval-clone",
+      "checked-clone",
       wrapPreamble +
         `const c = structuredClone(u);
-console.log("unreachable", typeof c);
+console.log(JSON.stringify(c), c === u);
 `,
       "ts",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(
-      "structuredClone on an island value held in 'unknown' is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('{"a":1,"list":[1,2,3]} false\n');
   });
 
-  test("Object.keys over an island-held unknown walks the engine object", async () => {
+  test("Object.keys walks a native checked value", async () => {
     const r = await compileAndRun(
-      "jsval-keys",
+      "checked-keys",
       `/** @returns {any} */
 function mint() { return { a: 1, b: 2 }; }
 const eng = mint();
@@ -1043,53 +1034,43 @@ console.log(keys(eng).length, keys(eng).join(","));
     expect(r.stdout).toBe("2 a,b\n");
   });
 
-  test("deepStrictEqual over island-held values: identity passes, structure fences", async () => {
+  test("deepStrictEqual compares native checked values by identity and structure", async () => {
     const r = await compileAndRun(
-      "jsval-deepeq",
+      "checked-deepeq",
       `import assert from "node:assert";
-const eng: any = { a: 1 };
+const value: any = { a: 1 };
 const other: any = { a: 1 };
-const u1: unknown = eng;
-const u2: unknown = eng;
-assert.deepStrictEqual(u1, u2); // the same engine value: honest true
+const u1: unknown = value;
+const u2: unknown = value;
+assert.deepStrictEqual(u1, u2);
 console.log("identity ok");
 const u3: unknown = other;
-assert.deepStrictEqual(u1, u3); // distinct values: the structural walk fences
-console.log("unreachable");
+assert.deepStrictEqual(u1, u3);
+console.log("structure ok");
 `,
       "ts",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stdout).toContain("identity ok");
-    expect(r.stderr).toContain(
-      "deepStrictEqual on an island value held in 'unknown' is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("identity ok\nstructure ok\n");
   });
 
-  test("util.inspect (console.log) of an island-held unknown fences with the engine typeof", async () => {
+  test("util.inspect formats a native checked value", async () => {
     const r = await compileAndRun(
-      "jsval-inspect",
+      "checked-inspect",
       wrapPreamble +
         `console.log(u);
 `,
       "ts",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain(
-      "util.inspect of a composite 'any' value (typeof 'object') is not supported yet",
-    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("{ a: 1, list: [ 1, 2, 3 ] }\n");
   });
 
-  test("destructuring and for-of over an island-held unknown drain the engine's own iterator", async () => {
-    // The iteration arm (lane dom-jsval-long-tail): dyn.iterPack's JSVAL
-    // arm drains the ENGINE's iterator protocol — the wrapped engine
-    // array destructures and iterates with Node's answers, and a
-    // non-iterable engine value throws V8's for-of spelling instead of
-    // the retired island fence.
+  test("destructuring and for-of iterate native checked values", async () => {
     const r = await compileAndRun(
-      "jsval-iterate",
+      "checked-iterate",
       `/** @returns {any} */
 function mint() { return { list: [10, 20], num: 7 }; }
 const eng = mint();
@@ -1115,11 +1096,9 @@ walk(eng);
     expect(r.stdout).toBe("first 10\nsum 30\ncaught: bag.num is not iterable\n");
   });
 
-  test("a keyed write through an island-held unknown lands on the real engine object", async () => {
-    // Aliasing preserved: the island-side reader sees the write made
-    // through the wrapped alias (the retired setting-fence row).
+  test("a keyed write through a native checked value updates its alias", async () => {
     const r = await compileAndRun(
-      "jsval-key-write",
+      "checked-key-write",
       `/** @returns {any} */
 function mint() { return { a: 1 }; }
 const eng = mint();
@@ -1135,9 +1114,9 @@ console.log(\`\${eng.a} \${eng.fresh}\`);
     expect(r.stdout).toBe("2 x\n");
   });
 
-  test("'in' over an island-held unknown fences (never a silent false)", async () => {
+  test("'in' checks native checked-value properties", async () => {
     const r = await compileAndRun(
-      "jsval-in",
+      "checked-in",
       `/** @returns {any} */
 function mint() { return { a: 1 }; }
 const eng = mint();
@@ -1148,27 +1127,25 @@ console.log(has(eng));
       "cjs",
       true,
     );
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain("'in' on an island value held in 'unknown' is not supported yet");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("true\n");
   });
 
-  test("a wrapped island value RC-balances through catch-and-continue fences", async () => {
-    // The fence throws are catchable; the wrapped cell must release
-    // cleanly through the unwind (the SAN lane's RC audit is the check).
-    // The crossing rides a real dyn PARAM slot — a local initialized from
-    // an island value stays island-world by the runtime-world dispatch.
+  test("a checked value RC-balances through catch-and-continue", async () => {
+    // The sanitizer lane audits releases while checked values unwind.
     const r = await compileAndRun(
-      "jsval-fence-unwind",
-      `const eng: any = { a: 1 };
+      "checked-fence-unwind",
+      `const value: any = { a: 1 };
 let caught = 0;
 function probe(u: unknown): void {
   try {
-    structuredClone(u);
+    const copy = structuredClone(u);
+    if (copy !== u) throw new Error("unwind");
   } catch (e) {
     if (e instanceof Error) caught++;
   }
 }
-for (let i = 0; i < 100; i++) probe(eng);
+for (let i = 0; i < 100; i++) probe(value);
 console.log("done", caught);
 `,
       "ts",

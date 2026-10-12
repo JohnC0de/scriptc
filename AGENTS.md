@@ -78,16 +78,15 @@ The Node.js compatibility system is an implementation inventory and planning too
 - Node's official documentation defines the public API hierarchy and stability metadata. Consult Node source when the docs do not fully specify behavior.
 - Running the pinned Node release is the behavior oracle for differential tests.
 - Compiler source and `packages/compiler/surface-manifest.json`, augmented by `internal/compatibility/static-support.json`, define static-native support.
-- `internal/compatibility/dynamic-support.json` defines dynamic-island modules, exports, members, explicit stubs, globals, and policies. It also generates the runtime builtin registry.
 - Test evidence determines positive behavioral claims. Source manifests alone do not prove Node-compatible behavior.
 
-Treat static-native and dynamic-island compatibility independently. Support in one tier says nothing about the other, and `--dynamic` does not turn an unsupported typed call into a supported static call.
+Compatibility describes native compilation. There is no runtime JavaScript engine tier.
 
 ### Status contract
 
 - `supported` — broadly implemented. This requires test evidence.
 - `partial` — a useful implemented subset. This requires test evidence, but evidence may cover an API family rather than every documented overload.
-- `refused` — a named compiler diagnostic or explicit dynamic throwing or rejecting stub exists. Never infer this status from absence.
+- `refused` — a named compiler diagnostic exists. Never infer this status from absence.
 - `not-implemented` — no implementation claim. Its verification basis decides whether it is ready to implement or must first be investigated.
 - `by-design` — intentionally outside a scriptc execution model. This requires an explicit implementation-owned architectural policy.
 - `unreviewed` — no compatibility subsystem owns a reliable classification. Do not treat this as unsupported or as an implementation ticket.
@@ -107,7 +106,7 @@ Read a row's verification basis before acting:
 - `architectural-policy` — explicit intentional exclusion.
 - `unreviewed`, `not-applicable`, and `derived` retain the meanings above.
 
-`pnpm node-compat:backlog` emits tier-specific work. Its actions are:
+`pnpm node-compat:backlog` emits native compilation work. Its actions are:
 
 - `verify-gap` — investigate a registry gap first; this is not yet an implementation ticket.
 - `implement` — implement a declared or verified gap.
@@ -124,7 +123,7 @@ Useful queue filters compose:
 ```bash
 pnpm node-compat:backlog --action=implement --priority=high
 pnpm node-compat:backlog --action=verify-gap --chapter=assert
-pnpm node-compat:backlog --tier=dynamic --format=tsv
+pnpm node-compat:backlog --tier=static --format=tsv
 ```
 
 ### Generated files
@@ -136,11 +135,10 @@ Never hand-edit these files:
 - `internal/compatibility/generated/node-v24-backlog.json`
 - `docs/src/generated/node-v24-compatibility.json`
 - `docs/src/generated/node-v24-compatibility-meta.json`
-- `packages/runtime/src/scr_island_manifest.h`
 
-Change compiler decision sources or the implementation-owned compatibility manifests, then regenerate. Use `pnpm manifest` when compiler decision tables change and `pnpm node-compat` whenever the Node pin, compatibility manifests, compiler surface manifest, or dynamic registry changes.
+Change compiler decision sources or the implementation-owned compatibility manifests, then regenerate. Use `pnpm manifest` when compiler decision tables change and `pnpm node-compat` whenever the Node pin, compatibility manifests, compiler surface manifest, changes.
 
-The public docs artifact must not expose repository test paths, internal source identifiers, engineering evidence bookkeeping, documentation/metadata headings, command-line or configuration-only entries, or rows that are N/A in both tiers. Those remain in the complete internal census under `internal/compatibility/generated/`.
+The public docs artifact must not expose repository test paths, internal source identifiers, engineering evidence bookkeeping, documentation/metadata headings, command-line or configuration-only entries, or rows that are N/A in the native tier. Those remain in the complete internal census under `internal/compatibility/generated/`.
 
 ### Landing compatibility work
 
@@ -148,9 +146,9 @@ For each API family:
 
 1. Start from the backlog action and verification basis. Verify every `registry-gap` before assuming code is missing.
 2. Read the pinned Node documentation, stability metadata, relevant Node source when needed, and existing scriptc implementation paths.
-3. Decide static-native and dynamic-island scope separately.
+3. Define the native compilation scope.
 4. Implement the smallest coherent behavior family. Preserve explicit refusals for unimplemented forms rather than silently diverging.
-5. Add differential evidence that executes under Node and as a compiled binary. Cover stdout, stderr, exit status, success behavior, and important error shapes. Dynamic-island work needs island-executed differential fixtures; a load-only export check does not prove behavior.
+5. Add differential evidence that executes under Node and as a compiled binary. Cover stdout, stderr, exit status, success behavior, and important error shapes. A load-only export check does not prove behavior.
 6. Update the implementation-owned source or manifest. Positive `supported` and `partial` mappings must name existing test evidence.
 7. Run `pnpm manifest` if compiler surface tables changed, then run `pnpm node-compat`. Never patch generated JSON or headers.
 8. Inspect the internal ledger, public artifact, and backlog diff. Confirm the intended API family changed and unrelated rows did not.

@@ -9,8 +9,8 @@ import { shardSelect, shardSuffix } from "./shard.js";
 const repoRoot = join(import.meta.dirname, "../..");
 const fixture = (name: string) => join(repoRoot, "tests/coverage-fixtures", name);
 
-function report(path: string, opts: { dynamic?: boolean } = {}): string {
-  const { coverage } = analyze(path, opts);
+function report(path: string): string {
+  const { coverage } = analyze(path);
   return renderCoverage(
     { ...coverage, file: coverage.file.replace(repoRoot + "/", "") },
     { root: repoRoot },
@@ -21,21 +21,10 @@ test("mixed program: percentage and grouped blockers", async () => {
   await expect(report(fixture("mixed.ts"))).toMatchFileSnapshot("__snapshots__/coverage-mixed.txt");
 });
 
-test("dynamic-capable blockers split from static rejections", async () => {
-  // SC2010/SC2011/SC2012 sites group under "runs with --dynamic";
+test("unsupported operations appear as native compilation blockers", async () => {
   // constructs no flag fixes stay under "blockers".
   await expect(report(fixture("dynamic-mix.ts"))).toMatchFileSnapshot(
     "__snapshots__/coverage-dynamic-mix.txt",
-  );
-});
-
-test("--dynamic analysis: island sites count as compiled-dynamically", async () => {
-  // The same fixture analyzed as a --dynamic build: the island-capable
-  // sites LOWER (splitting out of "compile statically" into "compile
-  // dynamically") and only the flag-independent rejections remain
-  // blockers — this report is the "distance to a working build" view.
-  await expect(report(fixture("dynamic-mix.ts"), { dynamic: true })).toMatchFileSnapshot(
-    "__snapshots__/coverage-dynamic-mix-dynamic.txt",
   );
 });
 
@@ -124,14 +113,8 @@ test("TypeScript errors caused by scriptc's type world say so", () => {
 test("coercing parseFloat and Number.parse* calls name their argument condition", () => {
   const { coverage } = analyze(fixture("parse-coercions.ts"));
   expect(coverage.diagnostics.map((d) => [d.code, d.message])).toEqual([
-    [
-      "SC2012",
-      "'parseFloat' with a 'boolean' argument (only a string argument compiles statically) runs in the embedded dynamic engine, which this build does not include",
-    ],
-    [
-      "SC2012",
-      "'Number.parseInt' with a 'number' argument (only a string argument compiles statically) runs in the embedded dynamic engine, which this build does not include",
-    ],
+    ["SC2012", "'parseFloat' with a 'boolean' argument cannot compile statically"],
+    ["SC2012", "'Number.parseInt' with a 'number' argument cannot compile statically"],
   ]);
   for (const d of coverage.diagnostics) expect(d.hint).toContain("convert the argument explicitly");
 });
@@ -247,12 +230,11 @@ test("fully static JavaScript program reports 100%", () => {
 test.each(["3062-runtime-optional-record-guards.ts", "3063-runtime-optional-class-guards.ts"])(
   "runtime-optional guard receivers stay static: %s",
   (name) => {
-    for (const dynamic of [false, true]) {
-      const { coverage } = analyze(join(repoRoot, "tests/corpus", name), { dynamic });
+    {
+      const { coverage } = analyze(join(repoRoot, "tests/corpus", name), {});
       expect(coverage.preflightFailed).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
     }
   },
 );
@@ -274,10 +256,10 @@ test("module stream aliases remain static in separately declared functions", () 
 });
 
 test("runtime-optional refined unions report blockers without crashing", () => {
-  for (const dynamic of [false, true]) {
+  {
     const { coverage } = analyze(
       join(repoRoot, "tests/diagnostics/runtime-optional-refined-union.ts"),
-      { dynamic },
+      {},
     );
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.diagnostics.map((d) => d.code)).toEqual(["SC1090"]);
@@ -299,14 +281,11 @@ test("settled generic rest-order fences count each source statement once", () =>
   expect(coverage.stats.statementsFailed).toBe(2);
 });
 
-test("inferred JavaScript stays static with or without the island enabled", async () => {
+test("inferred JavaScript compiles natively", async () => {
   // The js-gap fixture turns noImplicitAny off. Its inferred parameter
   // uses checked native values alongside the JSDoc-typed neighbor.
   await expect(report(fixture("js-gap/gap.js"))).toMatchFileSnapshot(
     "__snapshots__/coverage-js-gap.txt",
-  );
-  await expect(report(fixture("js-gap/gap.js"), { dynamic: true })).toMatchFileSnapshot(
-    "__snapshots__/coverage-js-gap-dynamic.txt",
   );
 });
 
@@ -316,48 +295,21 @@ test("JavaScript builtin aliases keep their deferred value fence", async () => {
   );
 });
 
-test("any-typed checked-dynamic operators compile in both tiers", () => {
+test("any-typed checked-dynamic operators compile natively", () => {
   const file = join(repoRoot, "tests/corpus/2856-dynamic-any-local-operators.ts");
   const staticCoverage = analyze(file).coverage;
   expect(staticCoverage.diagnostics).toEqual([]);
   expect(staticCoverage.stats.statementsFailed).toBe(0);
-  expect(staticCoverage.stats.statementsIsland).toBe(0);
-
-  const dynamicCoverage = analyze(file, { dynamic: true }).coverage;
-  expect(dynamicCoverage.diagnostics).toEqual([]);
-  expect(dynamicCoverage.stats.statementsFailed).toBe(0);
-  expect(dynamicCoverage.stats.statementsIsland).toBeGreaterThan(0);
 });
 
-test("npm package sites attribute per package", async () => {
+test("npm packages compile by default", async () => {
   // Every site of a package-declared value groups into one SC2013 line
   // naming the package ("values from the 'mathkit' package ..."), inside
-  // the "runs with --dynamic" group — reusing the diagnostics fixture so
+
   // the two views of the same program stay in sync.
-  await expect(report(join(repoRoot, "tests/diagnostics/npm-imports/main.ts"))).toMatchFileSnapshot(
-    "__snapshots__/coverage-npm-packages.txt",
-  );
-});
-
-test("lazy edges inventory: unresolvable require()/import() targets mark as lazy traps", async () => {
-  // The lazy-traps npm fixture builds (Node's per-kind edge semantics:
-  // require fails at the call, import() at evaluation) — the coverage
-  // table lists every blocked-but-lazy specifier with the lazy-trap
-  // marker instead of reporting SC2030 blockers.
   await expect(
-    report(join(repoRoot, "tests/fixtures/npm/cases/lazy-traps/main.ts"), { dynamic: true }),
-  ).toMatchFileSnapshot("__snapshots__/coverage-npm-lazy-traps.txt");
-});
-
-test("lazy builtin edges mark in the builtins table, __require sites included", async () => {
-  // The esbuild-require fixture routes external requires through the
-  // bundle's __require helper — its literal call sites collect as require
-  // edges, so the builtins table lists node:os/node:tty (shimmed) and
-  // node:stream as a lazy trap (unshimmed, reached only by the
-  // never-called require) without failing the build.
-  await expect(
-    report(join(repoRoot, "tests/fixtures/npm/cases/esbuild-require/main.ts"), { dynamic: true }),
-  ).toMatchFileSnapshot("__snapshots__/coverage-npm-lazy-builtin.txt");
+    report(join(repoRoot, "tests/corpus/native-npm-imports/main.ts")),
+  ).toMatchFileSnapshot("__snapshots__/coverage-npm-packages.txt");
 });
 
 test("import fences no longer stop analysis: percentage plus module blockers", async () => {
@@ -413,15 +365,13 @@ test("external declaration barrels leave type-only local code fully analyzable",
   expect(coverage.stats.statementsFailed).toBe(0);
 });
 
-test("external host mappings fence dynamic imports even with the island enabled", () => {
+test("external host mappings fence dynamic imports", () => {
   const root = fixture("external-types");
   const { coverage } = analyze(join(root, "dynamic.ts"), {
-    dynamic: true,
     externalTypes: { "@native-sdk/core": join(root, "native-sdk-core.d.ts") },
   });
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.stats.statementsFailed).toBeGreaterThan(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(
     coverage.diagnostics.some(
       (d) =>
@@ -497,7 +447,7 @@ test("external host mappings take precedence over overlapping npm-static package
   expect(coverage.npmStatic).toEqual([
     {
       package: "slash",
-      status: "fallback",
+      status: "refused",
       detail: 'mapped as an external host module by --external-types ("slash")',
     },
   ]);
@@ -605,7 +555,7 @@ test("a cycle whose top level calls a builtin with a builtin function value is a
 
 test(`every corpus program is 100% static (corpus and coverage agree${shardSuffix()})`, async () => {
   // The differential corpus compiles by definition; coverage must agree.
-  // `// @dynamic` programs compile under --dynamic, so analyze them that way.
+
   // The sweep runs minutes on slow machines and each analyze() blocks the
   // worker thread — without the periodic yield, vitest's worker RPC starves
   // ("Timeout calling onTaskUpdate") even while every check passes, and the
@@ -624,7 +574,7 @@ test(`every corpus program is 100% static (corpus and coverage agree${shardSuffi
     // (the deferred-fence corpus) — it still passes the differential
     // oracle because the fences never execute.
     const deferred = /^\/\/ @deferred-fences:\s*(\d+)\s*$/.exec(firstLine);
-    const { coverage } = analyze(file, { dynamic: /^\/\/ @dynamic\s*$/.test(firstLine) });
+    const { coverage } = analyze(file, {});
     expect.soft(coverage.diagnostics, file).toEqual([]);
     // Corpus programs match Node by definition: a divergence warning on one
     // is a false positive.
