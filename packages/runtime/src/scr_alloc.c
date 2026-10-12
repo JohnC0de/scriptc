@@ -55,7 +55,9 @@ static char scr_sa_thp_mode(void) {
   size_t n = fread(buf, 1, sizeof buf - 1, f);
   fclose(f);
   buf[n] = 0;
-  return strstr(buf, "[always]") ? 'a' : strstr(buf, "[madvise]") ? 'm' : strstr(buf, "[never]") ? 'n' : 0;
+  if (strstr(buf, "[always]")) return 'a';
+  if (strstr(buf, "[madvise]")) return 'm';
+  return strstr(buf, "[never]") ? 'n' : 0;
 }
 #endif
 
@@ -144,15 +146,14 @@ static void scr_sa_pf_populate(char *lo, char *hi) {
  * SCR_SA_PF_TOP_PAD of committed memory beyond what malloc would have;
  * SCR_SA_PREFAULT_HEAP=0 keeps glibc's defaults and no polling.
  *
- * Where THP is in madvise mode none of this runs: the heap policy below moves
- * the heap to huge pages at the same 32 MiB, the owner then takes one fault
- * per 2 MiB, and faulting ahead costs more than it saves. An extension is
- * populated from its start, exactly where the owner carves, so both threads
- * clear the same huge pages and the kernel drops one copy (about a thousand
- * huge pages on a large type check); slab requests queue behind
- * multi-megabyte heap populates; the owner's brk and madvise wait for the
- * mmap lock those populates hold; and the helper's top pad would replace the
- * heap policy's larger one. */
+ * Where THP is in madvise mode none of this runs. The heap policy below
+ * moves the heap to huge pages at the same 32 MiB, so the owner takes one
+ * fault per 2 MiB and faulting ahead saves it little, while the helper's
+ * populates cost more: ranges it reaches before the owner advises them (and
+ * the partial huge pages at the ends of each extension) stay on small pages,
+ * 230-620 MB on large type checks; the owner's brk and madvise
+ * wait for the mmap lock a multi-megabyte populate holds; and the helper's
+ * top pad would replace the heap policy's larger one. */
 #if defined(__GLIBC__)
 #include <malloc.h>
 #include <time.h>
