@@ -2831,14 +2831,24 @@ export class ClassDynamicDispatch {
   }
 
   /** The bag a read looks a key up in: the receiver's own properties, or a
-   * fresh empty object (not stored) while it has none, so inherited
-   * Object.prototype members still resolve as on an empty bag. */
+   * fresh empty object (not stored) while an instance has none, so inherited
+   * Object.prototype members still resolve as on an empty bag. A non-instance
+   * is its own bag; an undefined receiver stays undefined so the read throws
+   * Node's TypeError. */
   private readPropertyBagOrEmpty(lowerer: Lowerer, receiver: IrExpr, loc: SrcLoc): IrExpr {
     const bag = this.readPropertyBag(lowerer, receiver, loc);
+    const value = receiver.type.kind === "dyn" ? receiver : lowerer.coerceToExpected(receiver, DYN);
     return {
       kind: "ternary",
       cond: { kind: "dynTest", test: "undefined", value: bag, type: BOOL, loc },
-      then: { kind: "dynObjLit", fields: [], type: DYN, loc },
+      then: {
+        kind: "ternary",
+        cond: { kind: "dynTest", test: "undefined", value, type: BOOL, loc },
+        then: dynUndefinedExpr(loc),
+        else_: { kind: "dynObjLit", fields: [], type: DYN, loc },
+        type: DYN,
+        loc,
+      },
       else_: this.readPropertyBag(lowerer, receiver, loc),
       type: DYN,
       loc,
