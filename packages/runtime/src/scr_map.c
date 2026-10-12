@@ -1324,7 +1324,8 @@ void scr_map_values_into(ScrMap *set, const ScrMap *source, bool checked) {
 }
 
 ScrArr *scr_set_to_arr_dyn(const ScrMap *map) {
-  ScrArr *out = scr_arr_new_ref(scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v, map->nlive);
+  static const ScrArrOps dyn_ops = { scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v };
+  ScrArr *out = scr_arr_new_ops(&dyn_ops, map->nlive);
   for (size_t i = 0; i < map->nentries; i++) {
     if (scr_map_iter_live(map, (double)i)) scr_arr_push_ref(out, scr_map_dyn_key(map, (double)i));
   }

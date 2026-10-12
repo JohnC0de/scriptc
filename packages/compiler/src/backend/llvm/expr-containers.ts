@@ -4,6 +4,7 @@ import { isStableReceiverOperand, undefinedArmTag } from "../../ir/analysis.js";
 import { type IrExpr, type IrType, isRefCounted, typeEquals, typeKey } from "../../ir/ir.js";
 import { mangleResolveThunk } from "../mangle.js";
 import {
+  arrOps,
   elemAccess,
   FN_ATTRS,
   mapKeyAccess,
@@ -1299,10 +1300,18 @@ export function emitMapLikeIntrinsic(
       return { name: "", type: e.type };
     case "toArray": {
       if (receiverType.kind !== "set") throw new InternalCompilerError("unreachable");
-      // Fresh +1 elem[] of the live entries in insertion order.
-      host.declare(`declare ptr @scr_set_to_arr_${kAcc}(ptr)`);
+      // Fresh +1 elem[] of the live entries in insertion order; a REF result
+      // takes its element type's array descriptor.
       const t = B.tmp();
-      B.line(`${t} = call ptr @scr_set_to_arr_${kAcc}(ptr ${r.name})`);
+      if (kAcc === "ref") {
+        host.declare(`declare ptr @scr_set_to_arr_ref(ptr, ptr)`);
+        B.line(
+          `${t} = call ptr @scr_set_to_arr_ref(ptr ${r.name}, ptr ${arrOps(host.shapeHost, receiverType.elem)})`,
+        );
+      } else {
+        host.declare(`declare ptr @scr_set_to_arr_${kAcc}(ptr)`);
+        B.line(`${t} = call ptr @scr_set_to_arr_${kAcc}(ptr ${r.name})`);
+      }
       return host.own({ name: t, type: e.type });
     }
     default: {

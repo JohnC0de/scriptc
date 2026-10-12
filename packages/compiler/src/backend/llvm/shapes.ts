@@ -27,7 +27,7 @@ import {
   mangleRecordTrace,
 } from "../mangle.js";
 import { cycTypeDescriptor, emitObjectAlloc, emitObjectFree } from "./alloc.js";
-import { llvmCommentText } from "./common.js";
+import { SCR_ARR_FIELD, llvmCommentText } from "./common.js";
 import type { NullableUnions } from "./nullable-unions.js";
 import { LlvmUnsupportedError } from "./unsupported.js";
 
@@ -197,7 +197,7 @@ export function releaseSym(host: ShapeHost, t: IrType): string {
 
 /** How a runtime family decides whether an object carries a ScrCycHdr:
  * never, always, or per object through the trace slots its C release
- * tests (`a->elem_trace`, `m->key_trace || m->val_trace`). */
+ * tests (`a->cyc`, `m->key_trace || m->val_trace`). */
 type RcCycle = "none" | "always" | "arr" | "map";
 
 interface InlineRcFamily {
@@ -318,9 +318,9 @@ export function inlineRcDecls(host: ShapeHost): string[] {
 function rcHeaderTest(cycle: "arr" | "map", yes: string, no: string): string[] {
   if (cycle === "arr") {
     return [
-      `  %tracep = getelementptr inbounds %ScrArr, ptr %o, i32 0, i32 6 ; elem_trace`,
-      `  %trace = load ptr, ptr %tracep`,
-      `  %headered = icmp ne ptr %trace, null`,
+      `  %cycp = getelementptr inbounds %ScrArr, ptr %o, i32 0, i32 ${SCR_ARR_FIELD.cyc} ; cyc`,
+      `  %cyc = load i32, ptr %cycp`,
+      `  %headered = icmp ne i32 %cyc, 0`,
       `  br i1 %headered, label %${yes}, label %${no}`,
     ];
   }
@@ -566,7 +566,7 @@ function elemKindNum(elem: IrType): number {
 /** Array construction call text: ref elements
  * (records, unions, closures — and cycle-capable inner arrays, whose
  * SCR_ELEM_ARR spelling would hide them from the outer array's trace)
- * construct through scr_arr_new_ref with the element type's `_v` RC entry
+ * construct through scr_arr_new_ops with the element type's `_v` RC entry
  * points; every other element kind keeps the plain scr_arr_new call. */
 export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): string {
   const useRef =
@@ -590,9 +590,21 @@ export function arrNewCall(host: ShapeHost, elem: IrType, capText: string): stri
     host.declare(`declare ptr @scr_arr_new(i32, ${host.sizeType})`);
     return `call ptr @scr_arr_new(i32 ${elemKindNum(elem)}, ${host.sizeType} ${capText})`;
   }
+  host.declare(`declare ptr @scr_arr_new_ops(ptr, ${host.sizeType})`);
+  return `call ptr @scr_arr_new_ops(ptr ${arrOps(host, elem)}, ${host.sizeType} ${capText})`;
+}
+
+/** The constant %ScrArrOps descriptor (retain, release, trace) of a REF
+ * element type, defined once per module and shared by all its arrays. */
+export function arrOps(host: ShapeHost, elem: IrType): string {
   const v = vAdapters(host, elem);
-  host.declare(`declare ptr @scr_arr_new_ref(ptr, ptr, ptr, ${host.sizeType})`);
-  return `call ptr @scr_arr_new_ref(ptr ${v.retain}, ptr ${v.release}, ptr ${traceArg(host, elem)}, ${host.sizeType} ${capText})`;
+  const trace = traceArg(host, elem);
+  const part = (sym: string): string => sym.replace(/^@/, "").replace(/[^A-Za-z0-9_.]/g, "_");
+  const name = `@sc_arrops.${part(v.retain)}.${part(v.release)}.${part(trace)}`;
+  host.declare(
+    `${name} = internal constant %ScrArrOps { ptr ${v.retain}, ptr ${v.release}, ptr ${trace} }`,
+  );
+  return name;
 }
 
 /* ── capture boxes ────────────────────────────────────────────────────── */

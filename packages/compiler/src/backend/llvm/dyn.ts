@@ -1,6 +1,6 @@
 import { typedRefConstructor } from "./shapes.js";
 import { bindLiveArrayOps } from "./expr-stream-bridges.js";
-import { BYTES_ELEM_NUM, f64Lit } from "./common.js";
+import { BYTES_ELEM_NUM, SCR_ARR_FIELD, f64Lit } from "./common.js";
 import { emitUnionPeek, emitUnionTag } from "./union-repr.js";
 import { InternalCompilerError } from "../../errors.js";
 /* ScrDyn helpers for the LLVM backend: per-type match predicates
@@ -1199,8 +1199,8 @@ export class LlDyn {
               : [
                   { index: 1, type: host.sizeType, name: "length" },
                   { index: 2, type: host.sizeType, name: "capacity" },
-                  { index: 7, type: "ptr" as const, name: "data" },
-                  { index: 8, type: "ptr" as const, name: "presence" },
+                  { index: SCR_ARR_FIELD.data, type: "ptr" as const, name: "data" },
+                  { index: SCR_ARR_FIELD.present, type: "ptr" as const, name: "presence" },
                 ];
           members.forEach((member) => {
             const cachedPtr = B.tmp();
