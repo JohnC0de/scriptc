@@ -222,18 +222,10 @@ static bool scr_map_key_eq(const ScrMap *m, uint64_t stored, uint64_t probe) {
  * entries. The bits come from hash bits 44..55, apart from the compact
  * fingerprint (top byte) and from the bucket index of every table small
  * enough for the filter to be selective. Deletions leave their bits (the
- * filter only has to cover the live keys); rebuilds and clears recompute
- * it from what remains. */
+ * filter only has to cover the live keys); compaction recomputes it from
+ * the survivors and clear empties it. */
 static inline uint64_t scr_map_filter_bits(uint64_t hash) {
   return (UINT64_C(1) << (hash >> 44 & 63)) | (UINT64_C(1) << (hash >> 50 & 63));
-}
-
-static void scr_map_filter_rebuild(ScrMap *m) {
-  uint64_t filter = 0;
-  for (size_t e = 0; e < m->nentries; e++) {
-    if (m->entries[e].hash) filter |= scr_map_filter_bits(m->entries[e].hash);
-  }
-  m->filter = filter;
 }
 
 /* ── lookup ────────────────────────────────────────────────────────────
@@ -478,16 +470,13 @@ static void scr_map_rebuild_buckets(ScrMap *m, size_t nbuckets) {
   m->buckets = buckets;
   m->nbuckets = nbuckets;
   size_t mask = nbuckets - 1;
-  uint64_t filter = 0;
   for (size_t e = 0; e < m->nentries; e++) {
     uint64_t hash = m->entries[e].hash;
     if (!hash) continue;
-    filter |= scr_map_filter_bits(hash);
     size_t i = hash & mask;
     while (scr_map_bucket(m, i) != SCR_MAP_EMPTY) i = (i + 1) & mask;
     scr_map_bucket_set(m, i, e, hash);
   }
-  m->filter = filter;
 }
 
 /* Point every live entry's dense slot at it (the table is zeroed first). */
@@ -579,6 +568,7 @@ static __attribute__((noinline)) void scr_map_leave_dense(ScrMap *m) {
  * passes false: it holds a slot of the current direct index. */
 static void scr_map_compact(ScrMap *m, bool reindex) {
   size_t w = 0, top = 0;
+  uint64_t filter = 0;
   bool dense = m->ndense != 0;
   for (size_t r = 0; r < m->nentries; r++) {
     if (!m->entries[r].hash) continue;
@@ -586,10 +576,11 @@ static void scr_map_compact(ScrMap *m, bool reindex) {
       size_t k = (size_t)scr_map_slot_to_f64(m->entries[r].key);
       if (k > top) top = k;
     }
+    filter |= scr_map_filter_bits(m->entries[r].hash);
     m->entries[w++] = m->entries[r];
   }
   m->nentries = w;
-  scr_map_filter_rebuild(m);
+  m->filter = filter;
   if (m->nbuckets > 0) {
     size_t want = 16;
     while (want < 2 * (w + 1)) want *= 2;

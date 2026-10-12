@@ -2011,7 +2011,7 @@ typedef struct ScrMap {
   size_t nlive;    /* live entries (Map.size) */
   /* Two bits per inserted entry hash (scr_map.c scr_map_filter_bits): a
    * lookup whose bits are not all set is absent without touching the index
-   * or the entries. Deletions leave their bits; rebuilds recompute it. */
+   * or the entries. Deletions leave their bits; compaction recomputes it. */
   uint64_t filter;
   size_t ecap;     /* entries capacity */
   ScrMapEntry *entries;
