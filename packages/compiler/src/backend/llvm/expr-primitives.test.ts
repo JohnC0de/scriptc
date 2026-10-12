@@ -135,3 +135,58 @@ test("reference identity and instanceof borrow their operands", () => {
     expect(body, name).not.toMatch(/call void @sc_release_Node/);
   }
 });
+
+test("identity bitwise forms over a proven int32 return the operand's number", () => {
+  const text: IrExpr = { kind: "varRef", localId: "text", type: STRING, loc };
+  const length: IrExpr = {
+    kind: "strIntrinsic",
+    method: "length",
+    receiver: text,
+    args: [],
+    type: F64,
+    loc,
+  };
+  const x: IrExpr = { kind: "varRef", localId: "x", type: F64, loc };
+  const zero: IrExpr = { kind: "numLit", value: 0, type: F64, loc };
+  const returning = (name: string, value: IrExpr) => ({
+    name,
+    params: [
+      { name: "text", localId: "text", type: STRING },
+      { name: "x", localId: "x", type: F64 },
+    ],
+    returnType: F64,
+    locals: [
+      { id: "text", name: "text", type: STRING, mutable: false },
+      { id: "x", name: "x", type: F64, mutable: false },
+    ],
+    loc,
+    body: [{ kind: "return" as const, loc, value }],
+  });
+  const bin = (op: "|" | ">>>" | "&", left: IrExpr, right: IrExpr): IrExpr => ({
+    kind: "bin",
+    op,
+    left,
+    right,
+    type: F64,
+    loc,
+  });
+  const mod = fixture();
+  mod.functions = [
+    { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+    returning("length_or", bin("|", length, zero)),
+    returning("length_ushr", bin(">>>", length, zero)),
+    returning("unknown_or", bin("|", x, zero)),
+    returning("length_and", bin("&", length, { kind: "numLit", value: 255, type: F64, loc })),
+  ];
+  const llvm = emitLlvmModule(mod);
+  const body = (name: string): string =>
+    new RegExp(`^define internal [^\\n]*@sc_[bf]+_${name}\\([^]*?^}`, "m").exec(llvm)![0];
+  for (const name of ["length_or", "length_ushr"]) {
+    expect(body(name)).not.toMatch(/ = (or|lshr) i32 /);
+    expect(body(name)).not.toMatch(/ = [su]itofp i32 /);
+    expect(body(name)).not.toContain("uint32.coerce");
+  }
+  // Unproven operands keep the full ToInt32; other operators still compute.
+  expect(body("unknown_or")).toContain("uint32.coerce.slow");
+  expect(body("length_and")).toMatch(/ = and i32 .*, 255$/m);
+});
