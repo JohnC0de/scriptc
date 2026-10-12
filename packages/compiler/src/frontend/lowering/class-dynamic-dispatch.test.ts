@@ -101,9 +101,12 @@ test.each([
     kind: "call",
     callee: expect.stringMatching(/^%dyn\.class\.(property|computed)\./),
   });
-  // The bag dispatch and the member helper; reads also use the read-only bag.
-  expect(liftedFns).toHaveLength(read ? 3 : 2);
-  if (read) expect(liftedFns.map((item) => item.name)).toContain("%dyn.class.readProperties");
+  // The bag dispatch and the member helper; reads also use the read-only bags.
+  expect(liftedFns).toHaveLength(read ? 4 : 2);
+  if (read)
+    expect(liftedFns.map((item) => item.name)).toEqual(
+      expect.arrayContaining(["%dyn.class.readProperties", "%dyn.class.readPropertiesOrEmpty"]),
+    );
   const transformed = target.body;
   expect(dispatch.process(lowerer, [boxed, target, ...liftedFns])).toBe(false);
   expect(target.body).toBe(transformed);

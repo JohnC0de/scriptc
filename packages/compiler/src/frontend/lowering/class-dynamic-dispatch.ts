@@ -251,15 +251,16 @@ export function classInstanceOf(
 }
 
 const READ_PROPERTIES = "%dyn.class.readProperties";
+const READ_PROPERTIES_OR_EMPTY = "%dyn.class.readPropertiesOrEmpty";
 
 function isEmptyBag(value: IrExpr): boolean {
   return value.kind === "dynObjLit" && value.fields?.length === 0;
 }
 
 /** The property-bag dispatch's class branches without their lazy stores:
- * `if (bag === undefined) bag = init` becomes nothing for an empty bag and
- * `return init` for a prototype-backed one. */
-function readOnlyBagBody(body: IrStmt[]): IrStmt[] {
+ * `if (bag === undefined) bag = init` becomes `return init` (not stored), or
+ * nothing for an empty bag unless `orEmpty` asks for a fresh empty object. */
+function readOnlyBagBody(body: IrStmt[], orEmpty = false): IrStmt[] {
   for (const branch of body) {
     if (branch.kind !== "if") continue;
     const absent = branch.then[0];
@@ -273,28 +274,10 @@ function readOnlyBagBody(body: IrStmt[]): IrStmt[] {
       store.field !== PROPERTY_BAG
     )
       continue;
-    if (isEmptyBag(store.value)) branch.then.shift();
+    if (isEmptyBag(store.value) && !orEmpty) branch.then.shift();
     else absent.then = [{ kind: "return", value: store.value, loc: store.loc }];
   }
   return body;
-}
-
-/** A key test on a read-only bag, which is undefined while the object has no
- * own dynamic properties. */
-function readBagHas(
-  fn: "dyn.hasKey" | "dyn.hasOwnComputed",
-  bag: IrExpr,
-  key: IrExpr,
-  loc: SrcLoc,
-): IrExpr {
-  return {
-    kind: "ternary",
-    cond: { kind: "dynTest", test: "undefined", value: bag, type: BOOL, loc },
-    then: { kind: "boolLit", value: false, type: BOOL, loc },
-    else_: { kind: "libCall", fn, args: [bag, key], type: BOOL, loc },
-    type: BOOL,
-    loc,
-  };
 }
 
 export function classPropertiesHelper(lowerer: Lowerer, loc: SrcLoc, readOnly = false): IrFunction {
@@ -2830,26 +2813,85 @@ export class ClassDynamicDispatch {
     };
   }
 
-  /** The bag a read looks a key up in: the receiver's own properties, or a
-   * fresh empty object (not stored) while an instance has none, so inherited
-   * Object.prototype members still resolve as on an empty bag. A non-instance
-   * is its own bag; an undefined receiver stays undefined so the read throws
-   * Node's TypeError. */
-  private readPropertyBagOrEmpty(lowerer: Lowerer, receiver: IrExpr, loc: SrcLoc): IrExpr {
-    const bag = this.readPropertyBag(lowerer, receiver, loc);
-    const value = receiver.type.kind === "dyn" ? receiver : lowerer.coerceToExpected(receiver, DYN);
-    return {
-      kind: "ternary",
-      cond: { kind: "dynTest", test: "undefined", value: bag, type: BOOL, loc },
-      then: {
-        kind: "ternary",
-        cond: { kind: "dynTest", test: "undefined", value, type: BOOL, loc },
-        then: dynUndefinedExpr(loc),
-        else_: { kind: "dynObjLit", fields: [], type: DYN, loc },
-        type: DYN,
+  /** The bag a read looks a key up in (`%dyn.class.readPropertiesOrEmpty`):
+   * the receiver's own properties, or a fresh empty object (not stored) while
+   * an instance has none, so inherited Object.prototype members still resolve
+   * as on an empty bag. A non-instance is its own bag; an undefined receiver
+   * stays undefined so the read throws Node's TypeError. */
+  /** A key test on a read-only bag, which is undefined while the object has no
+   * own dynamic properties. A shared helper evaluates the bag once and keeps
+   * each class branch as small as the storing form. */
+  private readBagHas(
+    lowerer: Lowerer,
+    fn: "dyn.hasKey" | "dyn.hasOwnComputed",
+    bag: IrExpr,
+    key: IrExpr,
+    loc: SrcLoc,
+  ): IrExpr {
+    const name = fn === "dyn.hasKey" ? "%dyn.class.bagHas" : "%dyn.class.bagHasComputed";
+    let helper = lowerer.liftedFns.find((item) => item.name === name);
+    if (!helper) {
+      const keyType = fn === "dyn.hasKey" ? STRING : DYN;
+      const value = varRef("p.0", DYN, loc);
+      helper = {
+        name,
+        params: [
+          { localId: "p.0", name: "bag", type: DYN },
+          { localId: "p.1", name: "key", type: keyType },
+        ],
+        returnType: BOOL,
+        locals: [
+          { id: "p.0", name: "bag", type: DYN, mutable: false },
+          { id: "p.1", name: "key", type: keyType, mutable: false },
+        ],
+        body: [
+          {
+            kind: "if",
+            cond: { kind: "dynTest", test: "undefined", value, type: BOOL, loc },
+            then: [
+              { kind: "return", value: { kind: "boolLit", value: false, type: BOOL, loc }, loc },
+            ],
+            else_: null,
+            loc,
+          },
+          {
+            kind: "return",
+            value: {
+              kind: "libCall",
+              fn,
+              args: [value, varRef("p.1", keyType, loc)],
+              type: BOOL,
+              loc,
+            },
+            loc,
+          },
+        ],
         loc,
-      },
-      else_: this.readPropertyBag(lowerer, receiver, loc),
+      };
+      lowerer.liftedFns.push(helper);
+    }
+    this.generated.add(helper);
+    return { kind: "call", callee: name, args: [bag, key], type: BOOL, loc };
+  }
+
+  private readPropertyBagOrEmpty(lowerer: Lowerer, receiver: IrExpr, loc: SrcLoc): IrExpr {
+    // One call per read site: large JS programs have a branch per class and
+    // property, so the absent-bag handling lives in the shared helper.
+    let helper = lowerer.liftedFns.find((fn) => fn.name === READ_PROPERTIES_OR_EMPTY);
+    if (!helper) {
+      // Settled by finalize; until then, the read-only bag's own dispatch.
+      helper = {
+        ...classPropertiesHelper(lowerer, loc, true),
+        name: READ_PROPERTIES_OR_EMPTY,
+      };
+      helper = structuredClone(helper);
+      lowerer.liftedFns.push(helper);
+    }
+    this.generated.add(helper);
+    return {
+      kind: "call",
+      callee: helper.name,
+      args: [receiver.type.kind === "dyn" ? receiver : lowerer.coerceToExpected(receiver, DYN)],
       type: DYN,
       loc,
     };
@@ -2932,10 +2974,17 @@ export class ClassDynamicDispatch {
     }
     // The untyped read-only accessor selects the receiver's class as the
     // complete property-bag dispatch does, without its lazy stores.
-    const read = lowerer?.liftedFns.find((fn) => fn.name === READ_PROPERTIES);
-    if (read && this.propertyBag) {
-      read.locals = structuredClone(this.propertyBag.locals);
-      read.body = readOnlyBagBody(structuredClone(this.propertyBag.body));
+    for (const fn of lowerer?.liftedFns ?? []) {
+      if (
+        !this.propertyBag ||
+        (fn.name !== READ_PROPERTIES && fn.name !== READ_PROPERTIES_OR_EMPTY)
+      )
+        continue;
+      fn.locals = structuredClone(this.propertyBag.locals);
+      fn.body = readOnlyBagBody(
+        structuredClone(this.propertyBag.body),
+        fn.name === READ_PROPERTIES_OR_EMPTY,
+      );
     }
   }
 
@@ -3377,7 +3426,7 @@ export class ClassDynamicDispatch {
             kind: "return",
             value: {
               kind: "ternary",
-              cond: readBagHas("dyn.hasKey", bag, key, loc),
+              cond: this.readBagHas(lowerer, "dyn.hasKey", bag, key, loc),
               then: {
                 kind: "libCall",
                 fn: "dyn.bagGet",
@@ -3453,7 +3502,13 @@ export class ClassDynamicDispatch {
             const key: IrExpr = symbol ?? { kind: "strLit", value: name, type: STRING, loc };
             body.push({
               kind: "if",
-              cond: readBagHas(symbol ? "dyn.hasOwnComputed" : "dyn.hasKey", bag, key, loc),
+              cond: this.readBagHas(
+                lowerer,
+                symbol ? "dyn.hasOwnComputed" : "dyn.hasKey",
+                bag,
+                key,
+                loc,
+              ),
               then: [
                 {
                   kind: "return",
