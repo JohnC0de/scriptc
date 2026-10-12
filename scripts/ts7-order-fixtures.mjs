@@ -19,3 +19,13 @@ export function allOrderEntries(repoRoot) {
     ...globSync(join(repoRoot, "tests/fixtures/node-types/*.ts")).sort(),
   ];
 }
+
+/* Each fixture's recorded preflight/order answer lives in its own file,
+ * named after the fixture's repository path plus ".json", so changes that
+ * add or re-record different fixtures never edit the same file. */
+export const ORDER_BASELINE_DIR = "packages/compiler/test/ts7/baselines/order-parity";
+
+/** The baseline file of `fixture`, a repository-relative "/" path. */
+export function orderBaselinePath(repoRoot, fixture) {
+  return join(repoRoot, ORDER_BASELINE_DIR, `${fixture}.json`);
+}

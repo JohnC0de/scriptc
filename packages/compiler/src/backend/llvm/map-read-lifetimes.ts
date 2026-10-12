@@ -9,7 +9,11 @@ import {
 import { everyStmtList } from "../../ir/traverse.js";
 import type { CallLifetimes } from "./call-lifetimes.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
-import { emitNumberMapGetRef, emitNumberMapGetScalar } from "./map-number-lookup.js";
+import {
+  emitNumberMapGetRef,
+  emitNumberMapGetScalar,
+  emitStringMapGetRef,
+} from "./map-number-lookup.js";
 import { mapKeyAccess, mapKeyParamType } from "./shapes.js";
 
 function hasTypedCollectionReceiver(
@@ -167,6 +171,11 @@ export function inlineNumberKey(key: { access: string; value?: string }): string
   return key.access === "f64" && key.value !== undefined ? key.value : null;
 }
 
+/** The key's string operand when a reference read can take the entry path. */
+export function entryStringKey(key: { access: string; value?: string }): string | null {
+  return key.access === "str" && key.value !== undefined ? key.value : null;
+}
+
 export interface StackMapRead {
   value: LlValue;
   owner: { slot: string; type: IrType } | null;
@@ -205,9 +214,14 @@ export function emitStackMapRead(host: LlvmEmitterContext, read: LocalMapRead): 
       B.line(`store i64 ${scalar.bits}, ptr ${payload}`);
     }
   } else if (isRefCounted(read.value)) {
-    const raw = B.tmp();
-    host.declare(`declare ptr @scr_map_get_${access}_ref(ptr, ${keyType})`);
-    B.line(`${raw} = call ptr @scr_map_get_${access}_ref(ptr ${receiver.name}, ${key.args})`);
+    const stringKey = entryStringKey(key);
+    let raw: string;
+    if (stringKey !== null) raw = emitStringMapGetRef(host, receiver.name, stringKey, read.value);
+    else {
+      raw = B.tmp();
+      host.declare(`declare ptr @scr_map_get_${access}_ref(ptr, ${keyType})`);
+      B.line(`${raw} = call ptr @scr_map_get_${access}_ref(ptr ${receiver.name}, ${key.args})`);
+    }
     B.line(`${found} = icmp ne ptr ${raw}, null`);
     B.line(`store i64 0, ptr ${payload}`);
     B.line(`store ptr ${raw}, ptr ${payload}`);

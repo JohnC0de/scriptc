@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2449-js-dyn-worlds/walker.js",
+  "<repo>/tests/corpus/2449-js-dyn-worlds/main.js"
+ ],
+ "diags": []
+}

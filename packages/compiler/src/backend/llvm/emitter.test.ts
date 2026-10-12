@@ -99,6 +99,26 @@ test("separate LLVM parts preserve complete module bytes in native, WASI, and de
   }
 });
 
+test("the shared indexed-read helpers carry an inline hint", () => {
+  const helper = (name: string): IrFunction => ({
+    name,
+    params: [],
+    returnType: F64,
+    locals: [],
+    body: [{ kind: "return", value: { kind: "numLit", value: 1, type: F64, loc }, loc }],
+    loc,
+  });
+  const module = moduleFor([]);
+  const llvm = emitLlvmModule({
+    ...module,
+    functions: [...module.functions, helper("%arr.idxOr.0"), helper("plain")],
+  });
+  const define = (name: string): string =>
+    llvm.split("\n").find((line) => line.startsWith("define") && line.endsWith(`{ ; ${name}`))!;
+  expect(define("%arr.idxOr.0")).toMatch(/\) inlinehint #0 \{/);
+  expect(define("plain")).not.toContain("inlinehint");
+});
+
 test("throwing-call count does not multiply identical scope cleanup", () => {
   for (const boxed of [false, true]) {
     const small = emitLlvmModule(moduleFor(Array.from({ length: 4 }, call), { boxed }));

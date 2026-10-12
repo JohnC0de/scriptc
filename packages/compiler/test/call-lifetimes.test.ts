@@ -329,11 +329,15 @@ console.log(alias(new Item()).value, snapshot(new Item()).value);
   // The rebound parameter keeps borrowing (its new value lives in an owner
   // slot), but the alias saved before the rebinding must own its value.
   // `new Item()` calls the borrowed constructor body, so no retain transfers
-  // the fresh instance into it: the saved alias and the returned value.
+  // the fresh instance into it. The saved alias retains once, and `return
+  // saved` moves that owned scope entry into the result instead of retaining
+  // it again and releasing the local at scope exit: the only releases are the
+  // rebound parameter's owner slot (before the store and at exit).
   const snapshot = body(llvm, "sc_bf_snapshot");
-  expect(snapshot.match(/@sc_retain_Item/g)).toHaveLength(2);
+  expect(snapshot.match(/@sc_retain_Item/g)).toHaveLength(1);
   expect(snapshot).toContain("@sc_bf__x25_Item_constructor");
-  expect(snapshot).toContain("@sc_release_Item");
+  expect(snapshot.match(/@sc_release_Item/g)).toHaveLength(2);
+  expect(snapshot).toMatch(/(%t\d+) = load ptr, ptr %sc_l_saved_0\n[^]*ret ptr \1\n/);
 });
 
 test("unchanged captured parameters are boxed when a closure first needs them", async () => {

@@ -2,7 +2,7 @@
  * REAL lifecycle through the native (tsgo) frontend and must produce
  * exactly the RECORDED baseline's preflight diagnostics (code, message
  * text, span — the full structured diagnostic) and module evaluation
- * order (baselines/order-parity.json).
+ * order (baselines/order-parity/, one file per fixture).
  *
  * The baselines were recorded from the typescript@5.9.3 program.ts lane at
  * the phase-4 flip commit — the last commit where both frontends shipped —
@@ -24,7 +24,7 @@
  *     report upstream before shipping the bump.
  *  4. Re-record intentionally: SCRIPTC_UPDATE_BASELINES=1 pnpm exec vitest
  *     run packages/compiler/test/ts7/order-parity.test.ts rewrites
- *     baselines/order-parity.json from the CURRENT native lane; commit it
+ *     baselines/order-parity/ from the CURRENT native lane; commit it
  *     with the behavior delta stated in the message, one bump per commit.
  *  5. Then the real gates: pnpm build + lint, both vitest lanes uncached,
  *     and the diagnostics snapshots (tests/harness/__snapshots__) — those
@@ -38,29 +38,37 @@
  * sweep and the upgrade playbook's step 2. */
 
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  globSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, describe, expect, test } from "vitest";
 import { checkPreflightTs7 } from "../../src/frontend/program-node.js";
 import { Ts7Host } from "../../src/frontend/ts7/program-adapter.js";
 import type { ScrDiagnostic } from "../../src/diagnostics/diagnostic.js";
-import { allOrderEntries, orderEntriesUnder } from "../../../../scripts/ts7-order-fixtures.mjs";
+import {
+  allOrderEntries,
+  ORDER_BASELINE_DIR,
+  orderBaselinePath,
+  orderEntriesUnder,
+} from "../../../../scripts/ts7-order-fixtures.mjs";
 
 const repoRoot = join(import.meta.dirname, "../../../..");
-const baselinePath = join(import.meta.dirname, "baselines/order-parity.json");
 const UPDATE = process.env["SCRIPTC_UPDATE_BASELINES"] === "1";
 
 interface BaselineEntry {
   order: string[];
   diags: ScrDiagnostic[];
 }
-
-const baseline = JSON.parse(readFileSync(baselinePath, "utf8")) as {
-  entries: Record<string, BaselineEntry>;
-};
 
 /** Machine-independent spelling: absolute repo paths become "<repo>/…" in
  * file fields AND message text (cycle messages embed paths). */
@@ -71,6 +79,12 @@ const rel = (s: string): string =>
     .join("<repo>/");
 
 const relativeName = (s: string): string => rel(s).replace(/^<repo>\//, "");
+
+/** The recorded answer for a fixture, or undefined when none is recorded. */
+function recordedBaseline(entry: string): BaselineEntry | undefined {
+  const path = orderBaselinePath(repoRoot, relativeName(entry));
+  return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as BaselineEntry) : undefined;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -147,14 +161,22 @@ for (let i = 0; i < entries.length; i += CHUNK) chunks.push(entries.slice(i, i +
 
 if (UPDATE) {
   test("re-record baselines from the current native frontend", async () => {
-    const record: Record<string, BaselineEntry> = {};
+    const written = new Set<string>();
     const all = allEntries();
     for (let i = 0; i < all.length; i += CHUNK) {
       const batch = all.slice(i, i + CHUNK);
       const answers = await nativeAnswers(batch);
-      for (let j = 0; j < batch.length; j++) record[rel(batch[j]!)] = answers[j]!;
+      for (let j = 0; j < batch.length; j++) {
+        const path = orderBaselinePath(repoRoot, relativeName(batch[j]!));
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, JSON.stringify(answers[j]!, null, 1) + "\n");
+        written.add(path);
+      }
     }
-    writeFileSync(baselinePath, JSON.stringify({ entries: record }, null, 1) + "\n");
+    // Drop the baselines of fixtures that no longer exist.
+    for (const path of globSync(join(repoRoot, ORDER_BASELINE_DIR, "**/*.json"))) {
+      if (!written.has(path)) rmSync(path);
+    }
   }, 600_000);
 } else {
   describe(`preflight/order canary vs recorded 5.9.3 baselines (${entries.length} entries${FULL ? ", full sweep" : ""})`, () => {
@@ -165,7 +187,7 @@ if (UPDATE) {
         for (let i = 0; i < chunk.length; i++) {
           const entry = chunk[i]!;
           const name = relativeName(entry);
-          const recorded = baseline.entries[rel(entry)];
+          const recorded = recordedBaseline(entry);
           expect(
             recorded,
             `${name}: no recorded baseline — new fixture? re-record with SCRIPTC_UPDATE_BASELINES=1 (see the playbook comment)`,
