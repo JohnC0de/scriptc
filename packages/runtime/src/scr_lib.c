@@ -121,7 +121,9 @@ static ScrStr *scr_fs_win_utf8(const WCHAR *text, size_t length) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 #include <net/if_dl.h>
 #elif defined(__linux__)
+#include <inttypes.h>
 #include <netpacket/packet.h>
+#include <sys/sysinfo.h>
 #endif
 #if defined(__linux__)
 #include <sched.h> /* sched_getaffinity, CPU_COUNT (os.availableParallelism) */
@@ -2227,21 +2229,106 @@ double scr_process_rusage(double idx) {
 #endif
 }
 
-/* process.availableMemory()/constrainedMemory() — libuv's numbers: the
- * constrained form answers the cgroup cap where one exists (Linux) and 0
- * everywhere else; available is the free-ish byte count. */
+/* process.availableMemory()/constrainedMemory() — libuv's numbers
+ * (uv_get_constrained_memory, uv_get_available_memory; libuv 1.51,
+ * src/unix/linux.c). On Linux the constraint is the process's own cgroup,
+ * named by /proc/self/cgroup: cgroup v2 reads memory.max and memory.high
+ * under /sys/fs/cgroup/<path>, v1 memory.limit_in_bytes and
+ * memory.soft_limit_in_bytes under /sys/fs/cgroup/memory/<path> (falling
+ * back to the controller's root). The answer is the smaller of the two;
+ * "max" (and v1's page-aligned LONG_MAX) reads as UINT64_MAX, an unreadable
+ * file as 0, which makes the answer 0. Available memory under a constraint
+ * at most the total is the constraint minus the cgroup's current usage;
+ * otherwise MemAvailable. */
+#if defined(__linux__)
+/* uv__slurp: up to len - 1 bytes, NUL-terminated; false when unreadable. */
+static bool scr_uv_slurp(const char *path, char *buf, size_t len) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  ssize_t n;
+  do n = read(fd, buf, len - 1);
+  while (n == -1 && errno == EINTR);
+  close(fd);
+  if (n < 0) return false;
+  buf[n] = 0;
+  return true;
+}
+
+/* uv__read_uint64. */
+static uint64_t scr_uv_read_uint64(const char *path) {
+  char buf[32];
+  uint64_t v = 0;
+  if (scr_uv_slurp(path, buf, sizeof buf) && sscanf(buf, "%" SCNu64, &v) != 1 && strcmp(buf, "max\n") == 0)
+    v = UINT64_MAX;
+  return v;
+}
+
+/* uv__cgroup1_find_memory_controller: the memory controller's path without
+ * its leading slash, and its length in *n; NULL when there is none. */
+static const char *scr_uv_cgroup1_memory(const char *buf, int *n) {
+  const char *p = strchr(buf, ':');
+  while (p != NULL && strncmp(p, ":memory:", 8) != 0) {
+    p = strchr(p, '\n');
+    if (p != NULL) p = strchr(p, ':');
+  }
+  if (p != NULL) {
+    p += strlen(":memory:/");
+    *n = (int)strcspn(p, "\n");
+  }
+  return p;
+}
+
+/* uv__get_cgroup_constrained_memory over /proc/self/cgroup's contents. */
+static uint64_t scr_uv_cgroup_constrained(const char *buf) {
+  char path[4097];
+  uint64_t high = 0, max = 0;
+  int n = 0;
+  if (strncmp(buf, "0::/", 4) != 0) {
+    const char *p = scr_uv_cgroup1_memory(buf, &n);
+    bool found = false;
+    if (p != NULL) {
+      snprintf(path, sizeof path, "/sys/fs/cgroup/memory/%.*s/memory.soft_limit_in_bytes", n, p);
+      high = scr_uv_read_uint64(path);
+      snprintf(path, sizeof path, "/sys/fs/cgroup/memory/%.*s/memory.limit_in_bytes", n, p);
+      max = scr_uv_read_uint64(path);
+      found = high != 0 && max != 0;
+    }
+    if (!found) {
+      high = scr_uv_read_uint64("/sys/fs/cgroup/memory/memory.soft_limit_in_bytes");
+      max = scr_uv_read_uint64("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+    }
+    uint64_t cgroup1_max = (uint64_t)(LONG_MAX & ~(sysconf(_SC_PAGESIZE) - 1));
+    if (high == cgroup1_max) high = UINT64_MAX;
+    if (max == cgroup1_max) max = UINT64_MAX;
+  } else {
+    const char *p = buf + 4;
+    n = (int)strcspn(p, "\n");
+    snprintf(path, sizeof path, "/sys/fs/cgroup/%.*s/memory.max", n, p);
+    max = scr_uv_read_uint64(path);
+    snprintf(path, sizeof path, "/sys/fs/cgroup/%.*s/memory.high", n, p);
+    high = scr_uv_read_uint64(path);
+  }
+  if (high == 0 || max == 0) return 0;
+  return high < max ? high : max;
+}
+
+/* uv__read_proc_meminfo: a /proc/meminfo field in bytes, or 0. */
+static uint64_t scr_uv_meminfo(const char *what) {
+  char buf[4096];
+  if (!scr_uv_slurp("/proc/meminfo", buf, sizeof buf)) return 0;
+  const char *p = strstr(buf, what);
+  if (p == NULL) return 0;
+  uint64_t kb = 0;
+  sscanf(p + strlen(what), "%" SCNu64 " kB", &kb);
+  return kb * 1024;
+}
+#endif
+
 double scr_constrained_memory(void) {
 #if defined(__linux__)
-  FILE *f = fopen("/sys/fs/cgroup/memory.max", "r"); /* cgroup v2 */
-  if (f == NULL) f = fopen("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r"); /* v1 */
-  if (f == NULL) return 0;
-  char buf[64];
-  size_t n = fread(buf, 1, sizeof buf - 1, f);
-  fclose(f);
-  buf[n] = 0;
-  if (n == 0 || buf[0] == 'm') return 0; /* "max" = unconstrained */
-  double v = strtod(buf, NULL);
-  return v > 0 ? v : 0;
+  char buf[1024];
+  if (!scr_uv_slurp("/proc/self/cgroup", buf, sizeof buf)) return 0;
+  return (double)scr_uv_cgroup_constrained(buf);
 #else
   return 0;
 #endif
@@ -2262,17 +2349,40 @@ double scr_available_memory(void) {
   if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm, &count) != KERN_SUCCESS) return 0;
   return (double)vm.free_count * (double)vm_page_size;
 #elif defined(__linux__)
-  /* /proc/meminfo's MemAvailable — the kernel's own availability estimate
-   * (what uv reads via sysinfo lacks reclaimable cache). */
-  FILE *f = fopen("/proc/meminfo", "r");
-  if (f == NULL) return 0;
-  char line[128];
-  double kb = 0;
-  while (fgets(line, sizeof line, f) != NULL) {
-    if (sscanf(line, "MemAvailable: %lf kB", &kb) == 1) break;
+  /* uv_get_available_memory; its free-memory fallback is MemAvailable, then
+   * sysinfo's freeram. */
+  char buf[1024];
+  if (!scr_uv_slurp("/proc/self/cgroup", buf, sizeof buf)) return 0;
+  uint64_t free_memory = scr_uv_meminfo("MemAvailable:");
+  if (free_memory == 0) {
+    struct sysinfo info;
+    if (sysinfo(&info) == 0) free_memory = (uint64_t)info.freeram * info.mem_unit;
   }
-  fclose(f);
-  return kb * 1024.0;
+  uint64_t constrained = scr_uv_cgroup_constrained(buf);
+  if (constrained == 0) return (double)free_memory;
+  uint64_t total = scr_uv_meminfo("MemTotal:");
+  if (total == 0) {
+    struct sysinfo info;
+    if (sysinfo(&info) == 0) total = (uint64_t)info.totalram * info.mem_unit;
+  }
+  if (constrained > total) return (double)free_memory;
+  char path[4097];
+  uint64_t current;
+  if (strncmp(buf, "0::/", 4) != 0) {
+    int n = 0;
+    const char *p = scr_uv_cgroup1_memory(buf, &n);
+    current = 0;
+    if (p != NULL) {
+      snprintf(path, sizeof path, "/sys/fs/cgroup/memory/%.*s/memory.usage_in_bytes", n, p);
+      current = scr_uv_read_uint64(path);
+    }
+    if (current == 0) current = scr_uv_read_uint64("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+  } else {
+    snprintf(path, sizeof path, "/sys/fs/cgroup/%.*s/memory.current", (int)strcspn(buf + 4, "\n"), buf + 4);
+    current = scr_uv_read_uint64(path);
+  }
+  /* Usage can exceed the limit for short bursts. */
+  return constrained < current ? 0 : (double)(constrained - current);
 #else
   return 0;
 #endif
