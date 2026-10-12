@@ -301,6 +301,111 @@ static char *scr_sa_extend(char *start, char *lim, char *end) {
   return end;
 }
 
+/* Blocks above SCR_SA_MAX (array storage, hash tables, link pages, large
+ * strings) come from glibc, whose heap and per-block mappings use small
+ * pages where THP is in madvise mode (the common distribution default);
+ * in large compiler-like programs that is most of the page faults and a
+ * share of the TLB misses. glibc only advises huge pages for its own
+ * memory when the glibc.malloc.hugetlb tunable is set in the environment,
+ * which a program cannot do for itself. So once the brk heap has grown
+ * past SCR_SA_HEAP_HUGE_AFTER (small programs keep small pages and their
+ * RSS), every large allocation advises the heap grown since the previous
+ * one, and the aligned interior of a block mapped outside the heap.
+ * glibc grows the heap by its top pad beyond each request; the default
+ * (128 KiB) is smaller than a huge page, so every 2 MiB range would be
+ * first touched while it still straddles the heap end, where it can only
+ * get small pages. The policy therefore raises the top pad. Setting it
+ * fixes glibc's otherwise adaptive mmap and trim thresholds, so they are
+ * set to the adaptive maxima the heap of such a program reaches anyway. */
+#if defined(SCR_SA_THP) && defined(__GLIBC__)
+#include <malloc.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#define SCR_SA_HEAP_HUGE_AFTER ((uintptr_t)32 << 20)
+#define SCR_SA_HEAP_TOP_PAD (32 << 20)
+#define SCR_SA_HEAP_MMAP_THRESHOLD (32 << 20) /* glibc's adaptive maximum */
+#define SCR_SA_HEAP_TRIM_THRESHOLD (64 << 20) /* twice that, as glibc keeps it */
+/* 0 = undecided, 1 = following, 2 = off (THP not in madvise mode). */
+static _Atomic(int) scr_sa_heap_state;
+static _Atomic(uintptr_t) scr_sa_heap_lo; /* heap start seen at the first large block */
+static _Atomic(uintptr_t) scr_sa_heap_hi; /* end of the advised heap prefix */
+static _Atomic(uintptr_t) scr_sa_heap_page; /* the page size, read with the mode */
+/* The page size is stored before scr_sa_heap_lo is published (the CAS is a
+ * release), and every thread loads scr_sa_heap_lo, then scr_sa_heap_hi, with
+ * acquire before reading it; each scr_sa_heap_hi update is an RMW by a thread
+ * that already sees it, so any thread that wins the advice CAS sees a nonzero
+ * page size. A zero read still skips the advice rather than align to 0.
+ * These loads run only on blocks too large for the small allocator, next to
+ * a glibc malloc call: plain loads on x86-64, LDAR (or LDAPR) on arm64. */
+
+static bool scr_sa_thp_madvise_mode(void) {
+  FILE *f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+  if (!f) return false;
+  char buf[96] = {0};
+  size_t n = fread(buf, 1, sizeof buf - 1, f);
+  fclose(f);
+  buf[n] = 0;
+  return strstr(buf, "[madvise]") != NULL;
+}
+
+static void scr_sa_large_note(void *p, size_t n) {
+  int state = atomic_load_explicit(&scr_sa_heap_state, memory_order_relaxed);
+  if (state == 2 || !p) return;
+  uintptr_t top = (uintptr_t)sbrk(0);
+  if (state == 0) {
+    uintptr_t lo = atomic_load_explicit(&scr_sa_heap_lo, memory_order_acquire);
+    if (!lo) {
+      long page = sysconf(_SC_PAGESIZE);
+      if (page <= 0 || !scr_sa_thp_madvise_mode()) {
+        atomic_store_explicit(&scr_sa_heap_state, 2, memory_order_relaxed);
+        return;
+      }
+      atomic_store_explicit(&scr_sa_heap_page, (uintptr_t)page, memory_order_relaxed);
+      lo = (top + (uintptr_t)page - 1) & ~((uintptr_t)page - 1);
+      uintptr_t none = 0;
+      if (!atomic_compare_exchange_strong(&scr_sa_heap_lo, &none, lo)) lo = none;
+    }
+    if (top < lo + SCR_SA_HEAP_HUGE_AFTER) return;
+    uintptr_t unset = 0; /* the whole heap seen so far gets the advice */
+    (void)atomic_compare_exchange_strong(&scr_sa_heap_hi, &unset, lo);
+    int undecided = 0;
+    if (atomic_compare_exchange_strong(&scr_sa_heap_state, &undecided, 1)) {
+      (void)mallopt(M_MMAP_THRESHOLD, SCR_SA_HEAP_MMAP_THRESHOLD);
+      (void)mallopt(M_TRIM_THRESHOLD, SCR_SA_HEAP_TRIM_THRESHOLD);
+      (void)mallopt(M_TOP_PAD, SCR_SA_HEAP_TOP_PAD);
+    }
+  }
+  /* The heap end moved since the last look: advise what it gained (pages
+   * already touched keep their small pages), or follow a trim down. */
+  uintptr_t hi = atomic_load_explicit(&scr_sa_heap_hi, memory_order_acquire);
+  if (!hi) return; /* another thread is switching the policy on */
+  if (top > hi) {
+    if (atomic_compare_exchange_strong(&scr_sa_heap_hi, &hi, top)) {
+      /* madvise wants a page-aligned start */
+      uintptr_t page = atomic_load_explicit(&scr_sa_heap_page, memory_order_relaxed);
+      if (page) {
+        uintptr_t from = hi & ~(page - 1);
+        (void)madvise((void *)from, top - from, MADV_HUGEPAGE);
+      }
+    }
+  } else if (top < hi) {
+    (void)atomic_compare_exchange_strong(&scr_sa_heap_hi, &hi, top);
+  }
+  /* A block glibc mapped by itself (or carved from a thread's heap). */
+  uintptr_t a = (uintptr_t)p, lo = atomic_load_explicit(&scr_sa_heap_lo, memory_order_relaxed);
+  if ((a < lo || a >= top) && n >= 2 * SCR_SA_HUGE_PAGE) {
+    uintptr_t s = (a + SCR_SA_HUGE_PAGE - 1) & ~(uintptr_t)(SCR_SA_HUGE_PAGE - 1);
+    uintptr_t e = (a + n) & ~(uintptr_t)(SCR_SA_HUGE_PAGE - 1);
+    if (e > s) (void)madvise((void *)s, e - s, MADV_HUGEPAGE);
+  }
+}
+#define SCR_SA_LARGE_NOTE(p, n) scr_sa_large_note((p), (n))
+#else
+#define SCR_SA_LARGE_NOTE(p, n) ((void)0)
+#endif
+
 #ifdef SCR_WORKERS
 #include <pthread.h>
 #include <stdatomic.h>
@@ -766,7 +871,9 @@ __attribute__((cold, noinline)) void *scr_sa_slow(size_t n, bool zero) {
     scr_sa.bump[c] = p;
   }
   /* Large or zero-sized, an exhausted slice, or no reservation. */
-  return zero ? calloc(1, n) : malloc(n);
+  void *q = zero ? calloc(1, n) : malloc(n);
+  if (n > SCR_SA_MAX) SCR_SA_LARGE_NOTE(q, n);
+  return q;
 }
 
 void *scr_mem_realloc(void *p, size_t n) {
@@ -779,7 +886,11 @@ void *scr_mem_realloc(void *p, size_t n) {
     /* Another arena's block: move it into this thread's allocator. */
   }
 #endif
-  else return realloc(p, n);
+  else {
+    void *q = realloc(p, n);
+    if (n > SCR_SA_MAX) SCR_SA_LARGE_NOTE(q, n);
+    return q;
+  }
   if (n && n <= have) return p; /* still fits its block */
   void *q = scr_mem_alloc(n ? n : 1);
   if (!q) return NULL;
