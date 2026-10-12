@@ -301,7 +301,7 @@ import { LlWalkers } from "./walkers.js";
 import { isObjectArm, NULLABLE_ABSENT, NULLABLE_NULL, NullableUnions } from "./nullable-unions.js";
 import { emitNullablePresent, emitUnionPeek, emitUnionTag } from "./union-repr.js";
 import { literalCapWord, literalCapWord32 } from "./string-key-hash.js";
-import { NUMBER_MAP_ENTRY_DECL } from "./map-number-lookup.js";
+import { NUMBER_MAP_ENTRY_DECL, STRING_MAP_ENTRY_DECL } from "./map-number-lookup.js";
 import { STRING_READ_HELPERS } from "./string-reads.js";
 import {
   emitConcatInputs,
@@ -1899,8 +1899,12 @@ export class LlEmitter {
       ...(this.decls.has(NUMBER_MAP_ENTRY_DECL)
         ? [
             `%ScrMapIx = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ptr, ptr, ${this.sizeType} }`,
-            `%ScrMapEntry = type { i64, i64, i64 }`,
           ]
+        : []),
+      // String-keyed reference reads load the value slot of the entry
+      // scr_map_entry_str returns (map-number-lookup.ts).
+      ...(this.decls.has(NUMBER_MAP_ENTRY_DECL) || this.decls.has(STRING_MAP_ENTRY_DECL)
+        ? [`%ScrMapEntry = type { i64, i64, i64 }`]
         : []),
       // The runtime error prefix { rc, vt, name, message, code, cause } and the
       // class-object shape { rc, pre, post, ctor, name } — field reads on
@@ -5399,7 +5403,13 @@ export class LlEmitter {
     // Lifted functions receive their closure first (the callValue ABI).
     if (fn.captures !== undefined) params.unshift("ptr %sc_env");
     const ret = this.llType(fn.returnType);
-    const attrs = coro !== null ? "#1" : FN_ATTRS;
+    let attrs = coro !== null ? "#1" : FN_ATTRS;
+    // The shared indexed-read helper (lowerSafeIndexRead) is a dense bounds
+    // test, a state test and a load behind cold runtime fallbacks, called
+    // from every `a[i]` of one element type. Without the hint LLVM keeps the
+    // hot instances out of line once they have many callers: every read pays
+    // a call, and an integer index converts to a double and back across it.
+    if (fn.name.startsWith("%arr.idxOr.")) attrs = `inlinehint ${attrs}`;
     const debug = this.debugScope === null ? "" : ` !dbg ${this.debugScope}`;
     const symbol = borrowed ? mangleBorrowedFunction(fn.name) : mangleFunction(fn.name);
     const body = `define internal ${ret} @${symbol}(${params.join(", ")}) ${attrs}${debug} { ; ${fn.name}\n${B.render()}\n}`;
@@ -6886,7 +6896,7 @@ export class LlEmitter {
     const caseLabels = s.cases.map(() => B.newLabel("sw.c"));
     const defaultIdx = s.cases.findIndex((c) => c.test === null);
     const fallback = defaultIdx >= 0 ? caseLabels[defaultIdx]! : end;
-    if (!emitLiteralSwitch(this, disc, s.cases, caseLabels, fallback)) {
+    if (!emitLiteralSwitch(this, disc, s.disc, s.cases, caseLabels, fallback)) {
       s.cases.forEach((c, i) => {
         if (c.test === null) return;
         // Lazy source-order test evaluation (a test after the match never

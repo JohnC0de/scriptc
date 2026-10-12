@@ -14530,12 +14530,6 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
-   "order": [
-    "<repo>/tests/corpus/native-worker-arena-reuse.ts"
-   ],
-   "diags": []
-  },
   "<repo>/tests/corpus/native-worker-buffer-consumers.ts": {
    "order": [
     "<repo>/tests/corpus/native-worker-buffer-consumers.ts"
@@ -15749,6 +15743,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4651-map-string-get-entry.ts": {
+   "order": [
+    "<repo>/tests/corpus/4651-map-string-get-entry.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-arena-reuse.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-arena-reuse.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/4598-map-set-clear-reuse.ts": {
    "order": [
     "<repo>/tests/corpus/4598-map-set-clear-reuse.ts"
@@ -15794,24 +15800,6 @@
   "<repo>/tests/corpus/4602-constructor-escape-order.ts": {
    "order": [
     "<repo>/tests/corpus/4602-constructor-escape-order.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts": {
-   "order": [
-    "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts": {
-   "order": [
-    "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts": {
-   "order": [
-    "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts"
    ],
    "diags": []
   },
@@ -15878,9 +15866,33 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts": {
+   "order": [
+    "<repo>/tests/corpus/4660-typed-rest-spread-forwarding.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts": {
+   "order": [
+    "<repo>/tests/corpus/4610-array-ext-dyn-refresh.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts": {
+   "order": [
+    "<repo>/tests/corpus/4690-cycle-bypass-long-lived.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts": {
    "order": [
     "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/switch-integer-dispatch.ts": {
+   "order": [
+    "<repo>/tests/corpus/switch-integer-dispatch.ts"
    ],
    "diags": []
   }

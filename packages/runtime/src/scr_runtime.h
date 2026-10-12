@@ -2032,6 +2032,10 @@ _Static_assert(sizeof(ScrMapEntry) == 24 && offsetof(ScrMapEntry, val) == 8,
 /* Entry for a number key, or NULL when absent. The pointer is valid until
  * the next mutation; generated code reads the value slot through it. */
 const ScrMapEntry *scr_map_entry_f64(const ScrMap *m, double key);
+/* Entry for a string key, or NULL when absent, on the same terms. Typed
+ * reference reads retain the value with its static type's retain instead
+ * of the collection's adapter. */
+const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key);
 
 /* Called once on a fresh UNION_VALUE collection, before its first insert. */
 void scr_map_union_keys(ScrMap *map, const uint8_t *kinds);
