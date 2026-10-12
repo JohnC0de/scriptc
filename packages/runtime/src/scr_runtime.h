@@ -2009,6 +2009,10 @@ typedef struct ScrMap {
   ScrTraceFn key_trace;
   size_t nentries; /* dense entries used, tombstones included */
   size_t nlive;    /* live entries (Map.size) */
+  /* Two bits per inserted entry hash (scr_map.c scr_map_filter_bits): a
+   * lookup whose bits are not all set is absent without touching the index
+   * or the entries. Deletions leave their bits; rebuilds recompute it. */
+  uint64_t filter;
   size_t ecap;     /* entries capacity */
   ScrMapEntry *entries;
   size_t nbuckets;  /* zero for small linear maps; otherwise power of two >= 2 * nentries */
@@ -2033,14 +2037,20 @@ _Static_assert(offsetof(ScrMap, val_trace) == sizeof(size_t) + 2 * sizeof(uint32
 _Static_assert(offsetof(ScrMap, key_trace) == offsetof(ScrMap, val_trace) + 3 * sizeof(void *),
                "inline RC fast paths read ScrMap.key_trace as %ScrMapRc field 8");
 /* The LLVM backend's inline number-key lookup (sc_map_entry_f64) reads
- * entries, dense and ndense through %ScrMapIx fields 12, 18 and 19, and
- * entries as %ScrMapEntry { key, val, hash }. */
-_Static_assert(offsetof(ScrMap, entries) == sizeof(size_t) + 2 * sizeof(uint32_t) + 6 * sizeof(void *) + 3 * sizeof(size_t),
-               "inline number-key lookups read ScrMap.entries as %ScrMapIx field 12");
+ * entries, dense and ndense through %ScrMapIx fields 13, 19 and 20, and
+ * entries as %ScrMapEntry { key, val, hash }; %ScrMapIx field 11 is the
+ * i64 filter. */
+_Static_assert(offsetof(ScrMap, filter) ==
+                   (offsetof(ScrMap, nlive) + sizeof(size_t) + _Alignof(uint64_t) - 1) / _Alignof(uint64_t) * _Alignof(uint64_t),
+               "%ScrMapIx field 11 is ScrMap.filter, directly after nlive");
+_Static_assert(offsetof(ScrMap, nlive) == sizeof(size_t) + 2 * sizeof(uint32_t) + 6 * sizeof(void *) + sizeof(size_t),
+               "%ScrMapIx field 10 is ScrMap.nlive");
+_Static_assert(offsetof(ScrMap, entries) == offsetof(ScrMap, filter) + sizeof(uint64_t) + sizeof(size_t),
+               "inline number-key lookups read ScrMap.entries as %ScrMapIx field 13");
 _Static_assert(offsetof(ScrMap, dense) == offsetof(ScrMap, entries) + 6 * sizeof(void *),
-               "inline number-key lookups read ScrMap.dense as %ScrMapIx field 18");
+               "inline number-key lookups read ScrMap.dense as %ScrMapIx field 19");
 _Static_assert(offsetof(ScrMap, ndense) == offsetof(ScrMap, dense) + sizeof(void *),
-               "inline number-key lookups read ScrMap.ndense as %ScrMapIx field 19");
+               "inline number-key lookups read ScrMap.ndense as %ScrMapIx field 20");
 _Static_assert(sizeof(ScrMapEntry) == 24 && offsetof(ScrMapEntry, val) == 8,
                "inline number-key lookups read ScrMapEntry.val at byte 8");
 /* Entry for a number key, or NULL when absent. The pointer is valid until

@@ -1936,11 +1936,12 @@ export class LlEmitter {
         ? []
         : [`%ScrMapRc = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr }`]),
       // The complete ScrMap and its { key, val, hash } entry, read by the
-      // inline number-key lookup (sc_map_entry_f64): entries is field 12,
-      // the direct index and its length fields 18 and 19.
+      // inline number-key lookup (sc_map_entry_f64): field 11 is the i64
+      // absent-key filter, entries is field 13, the direct index and its
+      // length fields 19 and 20.
       ...(this.decls.has(NUMBER_MAP_ENTRY_DECL)
         ? [
-            `%ScrMapIx = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ptr, ptr, ${this.sizeType} }`,
+            `%ScrMapIx = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, i64, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ptr, ptr, ${this.sizeType} }`,
           ]
         : []),
       // String-keyed reference reads load the value slot of the entry
@@ -2853,7 +2854,7 @@ export class LlEmitter {
       defs.push(
         `define internal ptr @sc_map_entry_f64(ptr %m, double %k) ${FN_ATTRS} {`,
         `entry:`,
-        `  %ndp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 19`,
+        `  %ndp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 20`,
         `  %nd = load ${sz}, ptr %ndp`,
         // A non-integral key inside the table is as absent as one outside it.
         ...mapIndex.lines.map((line) => `  ${line}`),
@@ -2862,7 +2863,7 @@ export class LlEmitter {
         sz === "i64"
           ? `  %i = add i64 ${mapIndex.wide}, 0`
           : `  %i = trunc i64 ${mapIndex.wide} to ${sz}`,
-        `  %dp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 18`,
+        `  %dp = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 19`,
         `  %dense = load ptr, ptr %dp`,
         `  %sp = getelementptr inbounds i32, ptr %dense, ${sz} %i`,
         `  %s = load i32, ptr %sp`,
@@ -2871,7 +2872,7 @@ export class LlEmitter {
         `hit:`,
         `  %e32 = sub i32 %s, 1`,
         sz === "i32" ? `  %e = add i32 %e32, 0` : `  %e = zext i32 %e32 to ${sz}`,
-        `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 12`,
+        `  %ep = getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 13`,
         `  %entries = load ptr, ptr %ep`,
         `  %found = getelementptr inbounds %ScrMapEntry, ptr %entries, ${sz} %e`,
         `  ret ptr %found`,

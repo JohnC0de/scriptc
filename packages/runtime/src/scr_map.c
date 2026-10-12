@@ -215,6 +215,27 @@ static bool scr_map_key_eq(const ScrMap *m, uint64_t stored, uint64_t probe) {
                      (ScrStr *)scr_map_slot_to_ptr(probe));
 }
 
+/* ── absent-key filter ─────────────────────────────────────────────────
+ * Every live entry's hash sets two bits of m->filter, so a lookup whose
+ * two bits are not both set is absent: most misses on small and medium
+ * maps return from the header without loading the bucket table or the
+ * entries. The bits come from hash bits 44..55, apart from the compact
+ * fingerprint (top byte) and from the bucket index of every table small
+ * enough for the filter to be selective. Deletions leave their bits (the
+ * filter only has to cover the live keys); rebuilds and clears recompute
+ * it from what remains. */
+static inline uint64_t scr_map_filter_bits(uint64_t hash) {
+  return (UINT64_C(1) << (hash >> 44 & 63)) | (UINT64_C(1) << (hash >> 50 & 63));
+}
+
+static void scr_map_filter_rebuild(ScrMap *m) {
+  uint64_t filter = 0;
+  for (size_t e = 0; e < m->nentries; e++) {
+    if (m->entries[e].hash) filter |= scr_map_filter_bits(m->entries[e].hash);
+  }
+  m->filter = filter;
+}
+
 /* ── lookup ────────────────────────────────────────────────────────────
  * Returns the matching bucket, or the empty bucket where a new key belongs.
  * A zero entry hash marks a tombstone; cached hashes reject unrelated keys
@@ -299,22 +320,47 @@ static inline __attribute__((always_inline)) size_t scr_map_probe_with(
   }
 }
 
+/* The entry index for a key, or SCR_MAP_EMPTY: the probe of
+ * scr_map_probe_with without returning to the bucket it stopped at. */
+static inline __attribute__((always_inline)) size_t scr_map_probe_entry_with(
+    const ScrMap *m, uint64_t hash, uint64_t key, ScrMapLookup lookup) {
+  size_t mask = m->nbuckets - 1;
+  if (scr_map_compact_buckets(m->nbuckets)) {
+    const uint32_t *buckets = m->buckets;
+    uint32_t tag = (uint32_t)(hash >> 32 & UINT32_C(0xff000000));
+    for (size_t i = hash & mask;; i = (i + 1) & mask) {
+      uint32_t bucket = buckets[i];
+      if (!bucket) return SCR_MAP_EMPTY;
+      if ((bucket & ~SCR_MAP_INDEX_MASK) != tag) continue;
+      size_t b = (bucket & SCR_MAP_INDEX_MASK) - 1;
+      if (m->entries[b].hash == hash && scr_map_lookup_eq(m, m->entries[b].key, key, lookup)) return b;
+    }
+  }
+  const size_t *buckets = m->buckets;
+  for (size_t i = hash & mask;; i = (i + 1) & mask) {
+    size_t b = buckets[i];
+    if (b == SCR_MAP_EMPTY) return SCR_MAP_EMPTY;
+    if (m->entries[b].hash == hash && scr_map_lookup_eq(m, m->entries[b].key, key, lookup)) return b;
+  }
+}
+
 #define SCR_MAP_LINEAR_LIMIT 4
 
 /* Small collections keep only their ordered entries. Cached hashes make
  * the bounded scan cheap without allocating a separate bucket table. */
 static inline __attribute__((always_inline)) size_t scr_map_find_with(
     const ScrMap *m, uint64_t hash, uint64_t key, ScrMapLookup lookup) {
-  if (m->nlive == 0) return SCR_MAP_EMPTY;
   hash = hash ? hash : 1;
+  /* Also rejects every key of an empty map (its filter is zero). */
+  uint64_t bits = scr_map_filter_bits(hash);
+  if ((m->filter & bits) != bits) return SCR_MAP_EMPTY;
   if (m->nbuckets == 0) {
     for (size_t e = 0; e < m->nentries; e++) {
       if (m->entries[e].hash == hash && scr_map_lookup_eq(m, m->entries[e].key, key, lookup)) return e;
     }
     return SCR_MAP_EMPTY;
   }
-  size_t slot = scr_map_probe_with(m, hash, key, lookup);
-  return slot == SCR_MAP_EMPTY ? SCR_MAP_EMPTY : scr_map_bucket(m, slot);
+  return scr_map_probe_entry_with(m, hash, key, lookup);
 }
 
 static ScrMapLookup scr_map_lookup_kind(const ScrMap *m) {
@@ -432,13 +478,16 @@ static void scr_map_rebuild_buckets(ScrMap *m, size_t nbuckets) {
   m->buckets = buckets;
   m->nbuckets = nbuckets;
   size_t mask = nbuckets - 1;
+  uint64_t filter = 0;
   for (size_t e = 0; e < m->nentries; e++) {
     uint64_t hash = m->entries[e].hash;
     if (!hash) continue;
+    filter |= scr_map_filter_bits(hash);
     size_t i = hash & mask;
     while (scr_map_bucket(m, i) != SCR_MAP_EMPTY) i = (i + 1) & mask;
     scr_map_bucket_set(m, i, e, hash);
   }
+  m->filter = filter;
 }
 
 /* Point every live entry's dense slot at it (the table is zeroed first). */
@@ -540,6 +589,7 @@ static void scr_map_compact(ScrMap *m, bool reindex) {
     m->entries[w++] = m->entries[r];
   }
   m->nentries = w;
+  scr_map_filter_rebuild(m);
   if (m->nbuckets > 0) {
     size_t want = 16;
     while (want < 2 * (w + 1)) want *= 2;
@@ -771,6 +821,7 @@ void scr_map_clear(ScrMap *m) {
     scr_map_release_val(m, m->entries[e].val);
   }
   m->nlive = 0;
+  m->filter = 0;
   if (m->iter_depth == 0) {
     /* Full reset; an active iteration instead keeps the (now all-dead)
      * entries so its indices stay stable — entries added by the callback
@@ -884,6 +935,7 @@ static void scr_map_append(ScrMap *m, uint64_t hash, uint64_t key, uint64_t val,
   m->entries[idx].key = key;
   m->entries[idx].val = val;
   m->entries[idx].hash = hash;
+  m->filter |= scr_map_filter_bits(hash);
   m->nlive++;
   if (m->key_kind == SCR_MAP_KEY_STR) {
     scr_str_retain((ScrStr *)scr_map_slot_to_ptr(key)); /* key is borrowed */
@@ -977,6 +1029,7 @@ static void scr_map_set_f64_slot(ScrMap *m, uint64_t key, uint64_t val) {
         m->entries[idx].key = key;
         m->entries[idx].val = val;
         m->entries[idx].hash = hash ? hash : 1;
+        m->filter |= scr_map_filter_bits(m->entries[idx].hash);
         m->nlive++;
         m->dense[i] = (uint32_t)(idx + 1);
         return;
@@ -1279,6 +1332,7 @@ ScrMap *scr_map_clone(const ScrMap *source, bool keys_only) {
     else if (out->val_kind == SCR_MAP_VAL_REF) out->val_retain(scr_map_slot_to_ptr(copy->val));
   }
   out->nlive = count;
+  out->filter = source->filter;
   /* Size the copy's direct index for its own keys, not for the source's
    * peak; keys that are sparse for their count hash instead. */
   if (source->ndense && top / 2 < scr_map_dense_limit(count)) {
