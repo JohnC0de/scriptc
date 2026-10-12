@@ -294,7 +294,6 @@ export function emitLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
   switch (prefix) {
     case "fetch":
     case "abort":
-    case "island":
     case "json":
       return host.emitWebLibCall(e);
     case "dyn":

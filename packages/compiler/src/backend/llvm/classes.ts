@@ -341,11 +341,6 @@ export function programLifetimeRc(sizeType: "i32" | "i64"): string {
   return sizeType === "i32" ? "-2147483648" : "-9223372036854775808";
 }
 
-/** The newFn initialization stores for fields whose type ADMITS undefined
- * (undefFieldInitLineC's LLVM twin): undefined-armed union fields start
- * at the interned unit instance; dyn fields start at native undefined;
- * jsval fields (an `any` class field under --dynamic) start at the engine's
- * undefined cell. */
 function undefFieldInits(
   host: ClassHost,
   meta: LlClassMeta,
@@ -359,11 +354,10 @@ function undefFieldInits(
     // A nullable-pointer field's zeroed slot already is its unit arm.
     if (nullable?.get(meta.def.name, f.name)) return;
     const { index } = classFieldIndex(meta, f.name);
-    if (f.type.kind === "jsval" || f.type.kind === "dyn") {
-      const undefinedFn = f.type.kind === "dyn" ? "scr_dyn_undefined" : "scr_jsval_undefined";
-      host.declare(`declare ptr @${undefinedFn}()`);
+    if (f.type.kind === "dyn") {
+      host.declare("declare ptr @scr_dyn_undefined()");
       out.push(
-        `  %ufv${i} = call ptr @${undefinedFn}()`,
+        `  %ufv${i} = call ptr @scr_dyn_undefined()`,
         `  %uf${i} = getelementptr inbounds %${mangleClassStruct(meta.def.name)}, ptr %o, i64 0, i32 ${index}`,
         `  store ptr %ufv${i}, ptr %uf${i} ; ${llvmCommentText(f.name)} starts undefined`,
       );

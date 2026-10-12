@@ -87,9 +87,9 @@ console.log(/${"(a)".repeat(300)}/.test("a"));
     async () => {
       // Measured on plain (non-ASan) builds. A regex-free program's C names
       // no ScrRegex symbol, so its link line is the historical one (the
-      // compact static size class is pinned by island.test.ts). A regex-USING
+
       // binary links libregexp + libunicode, but must stay far below the
-      // embedded-engine size class.
+
       const [plainBuild, regexBuild] = await Promise.all([
         build("size-plain", `console.log("hello", "world");\n`, { sanitize: false }),
         build(

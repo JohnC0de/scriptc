@@ -21,7 +21,6 @@ import {
   type IrParam,
   type IrStmt,
   type IrType,
-  JSVAL,
   RUNTIME_EMITTER_CLASS,
   RUNTIME_ERROR_CLASSES,
   RUNTIME_STREAM_CLASSES,
@@ -76,7 +75,7 @@ import { lowerSearchParamsNew } from "./builtins/url.js";
 import { lowerTextCodecNew } from "./builtins/text-codecs.js";
 import { lowerWorkerNew } from "./builtins/workers.js";
 import {
-  requiresDynamicPackageDiag,
+  unsupportedPackageValueDiag,
   unsupportedDiag,
   type ScrDiagnostic,
 } from "../../diagnostics/diagnostic.js";
@@ -1227,13 +1226,7 @@ function undefArmedFieldType(lowerer: Lowerer, p: ts.Symbol): IrType | null {
   const arms =
     mapped.kind === "union" ? (lowerer.unions.get(mapped.unionId)?.arms ?? []) : [mapped];
   for (const a of arms) {
-    if (
-      a.kind === "map" ||
-      a.kind === "regex" ||
-      a.kind === "date" ||
-      a.kind === "jsval" ||
-      a.kind === "generator"
-    ) {
+    if (a.kind === "map" || a.kind === "regex" || a.kind === "date" || a.kind === "generator") {
       return null;
     }
     byKey.set(typeKey(a), a);
@@ -1512,13 +1505,7 @@ function inferredEmptyCollectionFieldType(
   const mappedArgument = (argument: ts.Expression): IrType | null => {
     const type = lowerer.checker.getBaseTypeOfLiteralType(lowerer.typeOf(argument));
     const mapped = lowerer.mapTypeOf(type);
-    if (
-      !mapped ||
-      mapped.kind === "dyn" ||
-      mapped.kind === "jsval" ||
-      mapped.kind === "void" ||
-      isUnitType(mapped)
-    )
+    if (!mapped || mapped.kind === "dyn" || mapped.kind === "void" || isUnitType(mapped))
       return null;
     return mapped;
   };
@@ -2766,7 +2753,6 @@ export function collectClassShapeInner(
           (type.kind === "union" &&
             (lowerer.unions.get(type.unionId)?.arms.some((a) => a.kind === "undefinedT") ??
               false)) ||
-          type.kind === "jsval" ||
           type.kind === "dyn";
         if (!member.initializer && !admitsUndefined) {
           const opts = lowerer.program.getCompilerOptions();
@@ -3470,7 +3456,6 @@ export function collectClassShapeInner(
           declared !== undefined &&
           !isUnitType(declared) &&
           declared.kind !== "union" &&
-          declared.kind !== "jsval" &&
           declared.kind !== "dyn" &&
           declared.kind !== "map" &&
           declared.kind !== "date" &&
@@ -3848,9 +3833,7 @@ export function collectClassShapeInner(
       ctor &&
       !mixinForwarding &&
       isJsSourceFile(ctor.getSourceFile()) &&
-      !ctorParams.some(
-        (shape) => shape.mode === "rest" || shape.mode === "dynRest" || shape.mode === "islandRest",
-      ) &&
+      !ctorParams.some((shape) => shape.mode === "rest" || shape.mode === "dynRest") &&
       bodyReadsArguments(ctor)
     ) {
       ctorParams.push({ type: DYN, mode: "arguments" });
@@ -7387,10 +7370,7 @@ export function lowerDerivedCtorBody(
           forward === undefined &&
           !base.builtinError &&
           !base.builtinEmitter &&
-          !base.ctorParams.some(
-            (param) =>
-              param.mode === "rest" || param.mode === "dynRest" || param.mode === "islandRest",
-          ) &&
+          !base.ctorParams.some((param) => param.mode === "rest" || param.mode === "dynRest") &&
           !superCall.arguments.some(ts.isSpreadElement) &&
           superCall.arguments.length > base.ctorParams.length;
         let args = surplusSpread
@@ -8113,28 +8093,18 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
   if (consoleCtor?.module === "console" && consoleCtor.member === "Console") {
     lowerer.noLowering("new console.Console", expr, builtinFenceHintOf("console", "Console"));
   }
-  // `new X(...)` where X is a package-declared class, in a static build:
-  // the per-package requires-dynamic diagnostic (the constructor runs in
-  // the embedded engine). Under --dynamic, X is jsval-typed and lowers
-  // to the construct op below.
-  if (!lowerer.dynamic) {
+  // A package declaration without a compiled constructor cannot provide
+  // a runtime value. Report the package at the construction site.
+  {
     const pkg = ts.isIdentifier(expr.expression)
       ? lowerer.npmPackageOfSymbol(lowerer.resolveValueSymbol(expr.expression) ?? undefined)
       : null;
     if (pkg) {
-      lowerer.pushDiag(requiresDynamicPackageDiag(pkg, loc));
+      lowerer.pushDiag(unsupportedPackageValueDiag(pkg, loc));
       throw new PoisonError();
     }
   }
-  // Island construction: a jsval-typed callee (a package-declared class,
-  // or any 'any'-typed constructor value) runs JS_CallConstructor —
-  // `new Command()` is the npm entry point. Arguments marshal in; the
-  // instance stays an island handle.
-  if (lowerer.isIslandExpr(expr.expression)) {
-    const callee = lowerer.lowerExpr(expr.expression);
-    const args = (expr.arguments ?? []).map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-    return { kind: "jsOp", op: "construct", args: [callee, ...args], type: JSVAL, loc };
-  }
+
   // `new events.EventEmitter()` — the namespace-member (and CJS
   // `require('events').EventEmitter`) construction form: the property's
   // symbol resolves to the same ambient class as the named import.
@@ -8310,7 +8280,7 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
         if (!a) return dynUndefinedExpr(loc);
         const v = lowerer.lowerExpr(a);
         if (v.type.kind === "dyn") return v;
-        if (v.kind === "unitLit" || (v.type.kind !== "jsval" && lowerer.dynConvertible(v.type))) {
+        if (v.kind === "unitLit" || lowerer.dynConvertible(v.type)) {
           return { kind: "dynFrom", value: v, type: DYN, loc };
         }
         lowerer.noLowering(
@@ -8683,23 +8653,7 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
           `${symbol.name} construction with surplus or spread arguments`,
         );
       }
-      if (lowerer.dynamic) {
-        const ctor: IrExpr = {
-          kind: "jsOp",
-          op: "globalGet",
-          name: symbol.name,
-          args: [],
-          type: JSVAL,
-          loc,
-        };
-        return {
-          kind: "jsOp",
-          op: "construct",
-          args: [ctor, ...args.map((arg) => lowerer.jsvalIn(lowerer.lowerExpr(arg), arg))],
-          type: JSVAL,
-          loc,
-        };
-      }
+
       return {
         kind: "libCall",
         fn: symbol.name === "WeakMap" ? "weakMap.new" : "weakSet.new",

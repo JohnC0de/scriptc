@@ -30,7 +30,7 @@ const global = (id: string, extra: object = {}) => ({
 
 test("immutable globals stored once with a literal read as that literal", () => {
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: "constant-globals.ts",
     entry: "%init",
     functions: [

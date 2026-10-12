@@ -54,7 +54,7 @@ test("checked collection slots refuse snapshot and adapting reference conversion
       set.add(error);
     `,
     );
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.diagnostics).toHaveLength(6);
     for (const diagnostic of coverage.diagnostics) {

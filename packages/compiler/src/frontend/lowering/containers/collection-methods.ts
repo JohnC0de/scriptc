@@ -929,11 +929,7 @@ export function lowerSetSeedNew(
     !scalar && (declared?.kind === "array" || declared?.kind === "record")
       ? lowerer.lowerCollectionKey(node, declared)
       : lowerer.lowerExpr(node);
-  if (
-    declared?.kind === "string" &&
-    setT.elem.kind === "string" &&
-    (source.type.kind === "dyn" || source.type.kind === "jsval")
-  ) {
+  if (declared?.kind === "string" && setT.elem.kind === "string" && source.type.kind === "dyn") {
     source = lowerer.coerceInto(node, source, STRING);
   }
   if (setT.elem.kind === "dyn" && lowerer.dynConvertible(source.type)) {
@@ -953,9 +949,7 @@ export function lowerSetSeedNew(
   if (declared?.kind === "array" && typeEquals(declared.elem, setT.elem)) {
     // Preserve the existing checked scalar-iterable bridge. Reference
     // elements must retain identity and cannot enter via a copying exit.
-    if (source.type.kind === "jsval" && lowerer.boundaryExitSafe(arrayOf(setT.elem))) {
-      source = { kind: "jsExit", value: source, type: arrayOf(setT.elem), loc };
-    }
+
     if (source.type.kind === "dyn" && scalar) {
       source = lowerer.coerceInto(
         node,

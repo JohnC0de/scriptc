@@ -11,16 +11,14 @@ export function withWorkerRuntimeVariants(matrix) {
         ...unit,
         variants: unit.variants.flatMap((variant) => [
           { ...variant, when: { ...variant.when, workers: false } },
-          ...(variant.defines.includes("SCR_DYNAMIC")
-            ? []
-            : [
-                {
-                  ...variant,
-                  id: `${variant.id}-workers`,
-                  when: { ...variant.when, workers: true },
-                  defines: [...variant.defines, "SCR_WORKERS"],
-                },
-              ]),
+          ...[
+            {
+              ...variant,
+              id: `${variant.id}-workers`,
+              when: { ...variant.when, workers: true },
+              defines: [...variant.defines, "SCR_WORKERS"],
+            },
+          ],
         ]),
       })),
       ...sources.map((source) => ({

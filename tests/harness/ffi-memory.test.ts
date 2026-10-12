@@ -27,7 +27,6 @@ describe.each(["llvm"] as const)("native FFI memory, %s", (backend) => {
       writeFileSync(entry, readFileSync(fixture, "utf8").replaceAll("require", loader));
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         sanitize,
         outDir,
         outPath: join(outDir, loader),

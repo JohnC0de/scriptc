@@ -13,7 +13,7 @@ async function lower(source: string): Promise<IrModule> {
     const entry = join(dir, "main.ts"),
       outPath = join(dir, "main.ir.json");
     await writeFile(entry, source);
-    const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir", dynamic: false });
+    const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir" });
     if (!result.ok)
       throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     const mod = deserializeModule(await readFile(outPath, "utf8"));

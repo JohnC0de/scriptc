@@ -17,7 +17,7 @@ function fixture(): IrModule {
     loc,
   });
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "__main",
     functions: [{ name: "__main", params: [], returnType: VOID, locals: [], body, loc }],
@@ -112,7 +112,7 @@ test("reference identity and instanceof borrow their operands", () => {
     body: [{ kind: "return" as const, value, loc }],
   });
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "__main",
     classes: [

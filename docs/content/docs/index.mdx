@@ -2,9 +2,9 @@
 title: "Introduction"
 ---
 
-scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. It uses TypeScript's type information to compile supported code directly to native instructions. Static builds run without Node.js or a JavaScript engine.
+scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. It uses TypeScript's type information to compile supported code directly to native instructions. Executables run without Node.js or a JavaScript engine.
 
-For npm dependencies and `any`-typed code, enable `--dynamic` to include an embedded JavaScript engine. Use [coverage reports](/docs/coverage) to check which parts of a program compile statically, require the engine, or are unsupported.
+Eligible npm dependencies compile to native code alongside application code. Use [coverage reports](/docs/coverage) to check which operations compile and which are unsupported.
 
 ## Compile a program
 
@@ -34,34 +34,11 @@ $ ./fib
 
 See [Quickstart](/docs/quickstart) for installation and platform requirements.
 
-## Compilation modes
+<span id="compilation-modes" />
 
-scriptc classifies operations into three tiers:
+## Native compilation
 
-<table>
-  <thead>
-    <tr>
-      <th>Tier</th>
-      <th>Behavior</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>Static</td>
-      <td>Compiles to native code. This is the default mode.</td>
-    </tr>
-    <tr>
-      <td>Dynamic</td>
-      <td>Runs in the embedded quickjs-ng engine when <code>--dynamic</code> is enabled. This includes npm packages' shipped JavaScript and supported uses of <code>any</code>.</td>
-    </tr>
-    <tr>
-      <td>Rejected</td>
-      <td>Produces a compilation diagnostic with an <code>SC</code> code, source location, and rewrite hint where available.</td>
-    </tr>
-  </tbody>
-</table>
-
-Enabling `--dynamic` does not add support for unsupported statically typed calls. The [npm dependencies guide](/docs/dependencies) explains package execution and the boundary between static and dynamic code.
+scriptc compiles supported TypeScript and JavaScript to native instructions. It has no runtime JavaScript engine fallback. The [npm dependencies guide](/docs/dependencies) explains package eligibility and diagnostics.
 
 ## Language and API support
 
@@ -72,7 +49,7 @@ Static compilation includes supported forms of:
 - Strings, BigInts, arrays, Maps, Sets, JSON, Math, typed arrays, and Buffers.
 - Node.js filesystem, path, process, child-process, crypto, timer, and networking APIs.
 
-These features have API-specific restrictions. The [Node.js compatibility reference](/compatibility) lists static and dynamic API support, and [Limitations](/docs/limitations) describes compilation restrictions and runtime differences from Node.js.
+These features have API-specific restrictions. The [Node.js compatibility reference](/compatibility) lists native API support, and [Limitations](/docs/limitations) describes compilation restrictions and runtime differences from Node.js.
 
 Programs are checked against the `es2025` standard library and scriptc's ambient declarations. Project declarations such as `@types/node` participate when available, and `tsconfig.json` controls checker strictness.
 
@@ -116,6 +93,6 @@ HELLO
 
 - [Quickstart](/docs/quickstart): install the CLI and build an executable.
 - [CLI Reference](/docs/cli): commands and compiler options.
-- [Coverage Reports](/docs/coverage): identify dynamic operations and compilation blockers.
+- [Coverage Reports](/docs/coverage): identify compilation blockers.
 - [npm Dependencies](/docs/dependencies): use packages in compiled programs.
 - [How It Works](/docs/how-it-works): compiler stages, runtime, and testing.

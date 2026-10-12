@@ -135,12 +135,7 @@ static void dc_throw_bad_fn_arg(const ScrDyn *cb, const char *arg_name) {
              (int)(cb->v.str->len < 28 ? cb->v.str->len : 28), cb->v.str->data);
     received = detail;
     break;
-  case SCR_DYN_JSVAL:
-    /* An engine callback may well BE a function — subscribing island
-     * values is unarmed (lane dyn-routing-ops); fence loudly rather
-     * than claim "Received an instance of Object". */
-    scr_dyn_isl_fence(cb, "subscribing");
-    return;
+
   default: break;
   }
   char buf[160];

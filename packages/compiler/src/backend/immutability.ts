@@ -13,7 +13,7 @@ import {
 /** Fields that are never written once their object can be observed outside
  * its own construction (cycle-mutability.ts derives the facts from every
  * store in the IR, including typed-ref commits from checked-dynamic code,
- * and disables them for library builds and dynamic islands).
+ * and disables them for library builds).
  *
  * Outside constructors, a reference read from such a field stays valid for
  * as long as its owner object is alive: nothing can replace it and release

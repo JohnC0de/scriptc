@@ -10,9 +10,8 @@
  * agree with the `// @exit:` directive. NOTHING is normalized — a CRLF or
  * path-separator difference is a finding, not noise.
  *
- * Scope: the whole corpus — `// @dynamic` programs included (the engine
- * archive cross-builds per target, buildEngineArchiveCross) and zlib too
- * (per-target vendored objects) — PLUS the listening-fixture legs
+ * Scope: the whole native corpus, including per-target vendored zlib
+ * objects, plus the listening-fixture legs
  * (tests/fixtures/{server,dgram,fetch}, the linux lane's shape): fixture
  * programs cross-compile, ship, and run ON THE BOX against the box's
  * Node, with the per-case driver script (the box's node again) following
@@ -194,18 +193,10 @@ const WINDOWS_SKIPS: Record<string, string> = {
   "1540-os-userinfo.ts": "userInfo().shell null on Windows Node (typed string here)",
 };
 
-// The lane attempts the WHOLE corpus — `// @dynamic` programs included
-// (the engine archive cross-builds for the windows triple). Still-gated
-// features and WINDOWS_SKIPS skip visibly below.
+// The lane compiles the whole corpus natively for Windows. Target
+// capability refusals and WINDOWS_SKIPS remain visible below.
 function directiveHead(file: string): string[] {
   return readFileSync(file, "utf8").split("\n", 2);
-}
-
-/** `// @dynamic` (differential.test.ts's directive): compile with the
- * island engine embedded. The Node side needs no flag — the island shim
- * covers the surface. */
-function wantsDynamic(file: string): boolean {
-  return directiveHead(file).some((l) => /^\/\/ @dynamic\s*$/.test(l));
 }
 
 /** `// @transform-types` (differential.test.ts's directive): the Node
@@ -359,7 +350,7 @@ async function runWindowsNode(file: string): Promise<RunResult> {
     : "";
   const shims = directiveHead(file).includes("// @no-node-shims")
     ? ""
-    : "--import ./comptime-shim.mjs --import ./island-shim.mjs ";
+    : "--import ./comptime-shim.mjs ";
   return runOnBox(`node ${transform}${nodep}${shims}${entry}`);
 }
 
@@ -382,7 +373,6 @@ async function crossCompile(file: string): Promise<string> {
   const result = await compile(file, {
     outPath,
     outDir,
-    dynamic: wantsDynamic(file),
     backend: "llvm",
   });
   if (!result.ok) {
@@ -596,7 +586,6 @@ describe.skipIf(!enabled)(`windows differential (${target})`, () => {
       await execFileAsync("ssh", [...sshOpts, host, `cmd /c mkdir ${laneDirWin}`]);
       await scpToLane([
         join(repoRoot, "tests/harness/comptime-shim.mjs"),
-        join(repoRoot, "tests/harness/island-shim.mjs"),
         // The corpus package.json ({"type":"module"}): without it the
         // oracle's module detection can run export-less programs as sloppy
         // CJS, where the macOS oracle (and the compiler) see strict ESM.
@@ -755,17 +744,6 @@ describe.skipIf(!enabled)(`windows differential (${target})`, () => {
     });
   }
 
-  /* ── the fetch fixture leg (tests/fixtures/fetch) — fetch.test.ts's
-   * contract with every process ON THE BOX (the linux lane's shape): the
-   * fixture servers run under the box's Node for the whole describe
-   * (started over one long-lived ssh session; killed by PID at the end —
-   * a remote process can outlive its ssh client, the hung-listener
-   * lesson, and node.exe is not ours to blanket-kill on a shared box),
-   * and each case runs under the box's Node AND cross-compiled
-   * (--dynamic, the ambient fetch is island-backed), byte-compared, with
-   * the POISONED proxy env both fetches must ignore. The opt-in arm
-   * routes both lanes through the counting proxy and reads the count
-   * over the wire (the /__count query). */
   describe.skipIf(fetchCases.length === 0)(`fetch fixtures (${fetchCases.length} cases)`, () => {
     let serversChild: ReturnType<typeof spawn> | undefined;
     let serversPid = "";
@@ -821,9 +799,6 @@ describe.skipIf(!enabled)(`windows differential (${target})`, () => {
       serversChild?.kill("SIGKILL");
     });
 
-    /** Cross-compiles one fetch fixture (fetch.test.ts's build: always
-     * --dynamic, the cache key covering the shared fixture node_modules)
-     * and ships the .exe. */
     async function shipFetchFixture(c: { name: string; entry: string }): Promise<void> {
       const hash = createHash("sha256");
       const inputs = [
@@ -839,7 +814,6 @@ describe.skipIf(!enabled)(`windows differential (${target})`, () => {
       const result = await compile(c.entry, {
         outPath: join(outDir, `${c.name}.exe`),
         outDir,
-        dynamic: true,
         backend: "llvm",
       });
       if (!result.ok) {

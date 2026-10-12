@@ -13,13 +13,11 @@ import type { NativeToolchainManifest } from "../../packages/compiler/src/native
 const root = join(import.meta.dirname, "../..");
 const entry = join(root, "tests/fixtures/self-hosting/native-toolchain.ts");
 const features: NativeLinkFeatures = {
-  dynamic: false,
   regex: false,
   copying: false,
   textDecoderLegacy: false,
   fileHandle: false,
   fetch: false,
-  netIsland: false,
   zlib: false,
   assert: false,
   inspect: false,
@@ -46,10 +44,9 @@ const features: NativeLinkFeatures = {
 };
 
 test("native toolchain configuration, staging and helper validation are static", async () => {
-  const coverage = await analyzeInChild(entry, { dynamic: false });
+  const coverage = await analyzeInChild(entry, {});
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.stats.statementsFailed).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -65,7 +62,6 @@ for (const backend of ["llvm"] as const) {
         outPath: join(directory, "toolchain" + target.outputSuffixes.exe),
         backend,
         optimization: "dev",
-        dynamic: false,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });
       if (!built.ok) throw new Error(JSON.stringify(built.diagnostics));
@@ -100,7 +96,7 @@ for (const backend of ["llvm"] as const) {
           object_format: target.objectFormat,
           minimum_os: target.minimumOs,
         },
-        runtime_abi: { version: 13, marker: "scr_runtime_abi_v13" },
+        runtime_abi: { version: 14, marker: "scr_runtime_abi_v14" },
         compiler: { command: "fixture", identity: "fixture", target: target.llvmTriple },
         macros: { executable: [], excluded: [], sanitizer: "external-toolchain-required" },
         flavors: {

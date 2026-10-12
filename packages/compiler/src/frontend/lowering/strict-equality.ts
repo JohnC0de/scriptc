@@ -37,11 +37,7 @@ function atomicEquality(
 ): IrExpr | null {
   const a = left.type,
     b = right.type;
-  if (
-    [a.kind, b.kind].some(
-      (kind) => kind === "dyn" || kind === "jsval" || kind === "caught" || kind === "void",
-    )
-  )
+  if ([a.kind, b.kind].some((kind) => kind === "dyn" || kind === "caught" || kind === "void"))
     return null;
   if (isUnitType(a) || isUnitType(b)) return boolLit(a.kind === b.kind, loc);
   if (a.kind === "object" && b.kind === "object" && !typeEquals(a, b)) {

@@ -7,7 +7,6 @@ import {
   type IrLocal,
   type IrStmt,
   type IrType,
-  JSVAL,
   VOID,
   type SrcLoc,
   arrayOf,
@@ -330,15 +329,7 @@ export function buildArraySortFn(
         loc,
       };
     }
-    if (elem.kind === "jsval") {
-      return {
-        kind: "jsOp",
-        op: "eq",
-        args: [value, { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }],
-        type: BOOL,
-        loc,
-      };
-    }
+
     return null;
   };
   const greater: Greater = (left, right) => {

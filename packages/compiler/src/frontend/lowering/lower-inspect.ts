@@ -1,40 +1,6 @@
 import { dynUndefinedExpr, boolLit, helperLoc, numLit, strLit, varRef } from "../../ir/build.js";
 import { InternalCompilerError } from "../../errors.js";
-/* The node:util inspect/format lowering (a spoke module like
- * lower-assert.ts): STATIC util.inspect — one synthesized traversal
- * helper per argument type (the deepStrictEqual precedent, interned per
- * typeKey), producing Node v24's byte-exact DEFAULT-options rendering —
- * and util.format/formatWithOptions over compile-time format strings.
- *
- * The division of labor: the synthesized helpers own the TRAVERSAL the
- * static type dictates (fields, elements, entries, union arms, depth
- * bookkeeping); scr_inspect.c owns everything the type cannot know —
- * scalar formatting (-0, the quoting ladder, string splitting), Buffer
- * hex, and the layout engine (frames, break-length, grid grouping).
- * Checked-dynamic values render ENTIRELY in the runtime (the dyn
- * carries its own shape); island `any` values render their scalar kinds
- * and throw catchably on composites (the runtime tag is all there is).
- *
- * Options fence honestly, never approximate: depth takes any numeric
- * literal plus null/Infinity (cycle-capable types are safe unbounded —
- * the circular machinery cuts every cycle), colors:false / compact:3 /
- * breakLength:80 are the accepted no-op spellings, and everything else
- * names itself in the diagnostic. Values whose rendering would need
- * runtime type identity the static type lacks fence the same way: class
- * hierarchies (a subclass's name and extra fields are dynamic), function
- * values inside composites (no runtime name exists), Uint8Array-vs-
- * Buffer ambiguity.
- *
- * CYCLIC runtime data renders Node's exact `<ref *N>`/`[Circular *N]`
- * markers: helpers over cycle-capable composites (typeReachesItself)
- * drive the runtime seen/circular protocol (insp.circCheck/seenPush/
- * refWrap — scr_inspect.c), numbering in discovery order per top-level
- * value, exactly formatValue's ctx.seen/ctx.circular.
- *
- * Known-divergence corners (SEMANTICS.md): errors render the STACKLESS
- * `[Name: message]` form (compiled binaries carry no JS stack), and
- * record/class property order follows declaration order (SEMANTICS.md
- * 36's existing stance). */
+
 import * as ts from "../ts7/adapter.js";
 import { unsignedHex } from "../../format-integer.js";
 import type { Lowerer } from "./lowerer.js";
@@ -162,7 +128,6 @@ function inspectSupport(
     case "symbol":
     case "bigint":
     case "dyn":
-    case "jsval":
       return null;
     case "array":
       return inspectSupport(lowerer, t.elem, visiting, out);
@@ -320,14 +285,6 @@ export function inspectExpr(
       return { kind: "libCall", fn: "insp.buffer", args: [value], type: STRING, loc };
     case "dyn":
       return { kind: "libCall", fn: "insp.dyn", args: [value, recurse, depth], type: STRING, loc };
-    case "jsval":
-      return {
-        kind: "libCall",
-        fn: "insp.jsval",
-        args: [value, recurse, depth],
-        type: STRING,
-        loc,
-      };
     case "object":
       if (isErrorClass(lowerer, t.className)) {
         return {
@@ -1818,11 +1775,7 @@ export function lowerFormatCall(
             continue;
           }
           case 102: // f — parseFloat's full grammar has no static lowering
-            lowerer.noLowering(
-              "util.format %f",
-              expr,
-              "parseFloat has no static lowering (it runs with --dynamic)",
-            );
+            lowerer.noLowering("util.format %f", expr, "parseFloat has no native lowering");
             break;
           case 99: // c — consumes its argument, contributes nothing
             a += 1;
@@ -2010,7 +1963,6 @@ export function lowerUtilModuleCall(
       if (
         result &&
         result.kind !== "dyn" &&
-        result.kind !== "jsval" &&
         canDynCheckTo(
           result,
           (id) => lowerer.shapes.get(id),
@@ -2050,8 +2002,6 @@ function lowerParseArgsCall(lowerer: Lowerer, expr: ts.CallExpression, loc: SrcL
     const raw = lowerer.lowerExpr(configNode);
     if (raw.type.kind === "dyn") {
       config = raw;
-    } else if (raw.type.kind === "jsval") {
-      config = { kind: "dynFromJsval", value: raw, type: DYN, loc };
     } else if (
       canConvertToDyn(
         raw.type,
@@ -2093,7 +2043,6 @@ function lowerParseArgsCall(lowerer: Lowerer, expr: ts.CallExpression, loc: SrcL
   if (
     result !== null &&
     result.kind !== "dyn" &&
-    result.kind !== "jsval" &&
     result.kind !== "void" &&
     canDynCheckTo(
       result,

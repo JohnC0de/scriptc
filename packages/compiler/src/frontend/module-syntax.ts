@@ -25,9 +25,7 @@ export interface SpecifierUse {
   requireViaHelper: boolean;
   /** import("x") — evaluation-time. */
   dynamicImport: boolean;
-  /** import.meta.resolve("x") — resolves synchronously without loading.
-   * It still needs an emitted edge for bare package names so the island can
-   * answer from its fixed graph; relative and URL-like names need no edge. */
+
   importMetaResolve: boolean;
 }
 

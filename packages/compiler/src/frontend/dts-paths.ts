@@ -26,7 +26,7 @@ function declarationPath(name: string): string {
 }
 
 /** Path of the shipped ambient declarations — the always-shipped CORE
- * (comptime/__island_eval, setTimeout). Part of EVERY program scriptc
+ * (comptime, setTimeout). Part of EVERY program scriptc
  * builds, the project-world preflight program included. */
 export function ambientDtsPath(): string {
   return declarationPath("scriptc.d.ts");

@@ -271,27 +271,6 @@ function loadAsDirectory(base: string): string | null {
   return null;
 }
 
-/** The RUNTIME sibling of a PROJECT declaration twin — "src/index.js" for
- * "src/index.d.ts" when both exist OUTSIDE node_modules — or null. Node
- * loads the JS (declaration files do not exist in its world), and a
- * project module's implementation is what scriptc compiles: a hand-kept
- * .d.ts beside runtime JS (the classic typed-JS-library entry, the classic
- * typed-JS-library pattern) is the author's claim about the code, not
- * the code. EXACTLY the .d.ts/.js pair: the per-format spellings
- * (.d.mts/.d.cts twins — an openh264.d.mts beside its island-bound
- * wasm loader, the npm fixtures' shape.d.mts) are the established
- * scriptc idiom for declaring a typed surface over JS that deliberately
- * runs in the island, and stay authoritative. npm packages keep the npm
- * story (their declarations ARE the consumer surface; --npm-static opts
- * into the JS per package), and a declaration with NO runtime sibling
- * stays a type-only module exactly as before. The tsgo host hides the
- * same twins (loadProgram's composed fsShadow), so both resolution
- * worlds answer the JS.
- *
- * "PROJECT" means the entry's own package realm: a workspace-linked
- * package's realpaths carry no node_modules segment either, but its
- * declarations ARE the consumer surface (the npm story), so twins hide
- * only under the same package.json as the entry. */
 let projectRealmPkgJson: string | null = null;
 
 export function setProjectRealm(entryPath: string): void {
@@ -609,7 +588,7 @@ export function resolveProjectImport(fromFile: string, specifier: string): strin
   // registered bare specifier answers its attested SOURCE entry — the one
   // chokepoint that makes preflight's user-module edges, the module
   // order, and the CJS link check all agree the package compiles as
-  // program modules instead of island-embedding its published dist.
+
   const provenance = provenanceEntryFor(specifier);
   if (provenance !== null) return normalizeResolvedPath(provenance);
   const viaPaths = resolveViaProjectPaths(specifier);
@@ -964,18 +943,6 @@ export function resolveBareModule(
   return npmStatic ? passOnce("js") : (passOnce("types") ?? passOnce("js"));
 }
 
-/** A workspace-linked bare package whose executable entry is TypeScript,
- * not shipped JavaScript. The type-resolution pass must reach that source
- * directly, and the runtime-JS pass must have no answer: a workspace that
- * ships dist/index.js beside src/index.ts remains an ordinary npm package
- * whose JavaScript executes in the island unless --npm-static opts it in.
- *
- * Source-only workspace packages are part of the program author's module
- * graph instead. The TypeScript program already loaded their source and
- * resolved package-internal `.js` spellings to `.ts`; returning that same
- * entry from resolveProjectModule lets preflight, module ordering, and
- * lowering share the checker-resolved graph without feeding TypeScript to
- * the JavaScript island. */
 export function resolveWorkspaceSourceModule(
   fromFile: string,
   specifier: string,

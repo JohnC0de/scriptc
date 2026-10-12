@@ -20,7 +20,7 @@ for (const n of pair()) total += n;
 console.log(total, calls);
 `,
     );
-    const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir", dynamic: false });
+    const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir" });
     if (!result.ok) throw new Error(result.diagnostics.map((d) => d.message).join("\n"));
     const mod = deserializeModule(await readFile(outPath, "utf8"));
     expect(validateModule(mod)).toEqual([]);

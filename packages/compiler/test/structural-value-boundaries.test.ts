@@ -85,13 +85,12 @@ test.each([
     try {
       const entry = join(dir, "main.ts");
       writeFileSync(entry, source);
-      const { coverage } = analyze(entry, { dynamic: false });
+      const { coverage } = analyze(entry, {});
       expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
       expect(coverage.diagnostics).toContainEqual(
         expect.objectContaining({ code: "SC1090", message: expect.stringContaining(message) }),
       );
       expect(coverage.diagnostics.some((diagnostic) => diagnostic.code === "SC9001")).toBe(false);
-      expect(coverage.stats.statementsIsland).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -25,7 +25,6 @@ console.log(count(new Child()), count(new Base()));
       outDir: dir,
       outPath,
       outputKind: "llvm",
-      dynamic: false,
     });
     expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true);
     const llvm = await readFile(outPath, "utf8");
