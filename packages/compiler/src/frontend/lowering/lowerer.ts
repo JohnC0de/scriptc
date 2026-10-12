@@ -78,6 +78,7 @@ import { ArrayOwnership } from "./runtime-optional-ownership.js";
 import { StringIndexBounds } from "./string-index-bounds.js";
 import { NanCodedReads } from "./nan-coded-reads.js";
 import { RuntimeOptionalLocals } from "./runtime-optional-locals.js";
+import { collectContractAnnotations, type ContractAnnotations } from "../contract-types.js";
 import { sanitizeUnregisteredClassTypes } from "./sanitize-class-types.js";
 import { UnregisteredClassTypes } from "./unregistered-class-types.js";
 import type { WidthLift } from "./width-lift.js";
@@ -727,6 +728,9 @@ export interface LowerResult {
   /** Present iff diagnostics is empty. */
   module: IrModule | null;
   diagnostics: ScrDiagnostic[];
+  /** The program's written contract types (@scriptc/types), keyed by the
+   * source locations the IR carries; absent when it writes none. */
+  contracts?: ContractAnnotations;
   /** JS statements whose compile fences DEFERRED to runtime (runtimeFence
    * statements in the module) — off the build, on the coverage report. */
   runtimeFences: ScrDiagnostic[];
@@ -1039,6 +1043,37 @@ export function lowerToIr(
   const divergences = scanDivergences(resultLowerer, moduleOrder);
   timing("divergence-scan", { found: divergences.length });
   if (divergences.length > 0) result = { ...result, divergences };
+  // Contract types (@scriptc/types): written annotations, checked against
+  // the IR by the compile pipeline (contracts/check.ts).
+  // Acyclic object types name the IR unit the program lowered them to; a
+  // type the module never uses has no unit (mapping it now only touches the
+  // lowerer's tables, never the finished module).
+  const lowered = result.module;
+  const contracts = collectContractAnnotations(program.getTypeChecker(), moduleOrder, (type) => {
+    if (lowered === null) return null;
+    const mapped = panicSafe(() => resultLowerer.mapTypeOf(type), null);
+    if (mapped?.kind === "object")
+      return lowered.classes?.some((c) => c.name === mapped.className)
+        ? `object:${mapped.className}`
+        : null;
+    if (mapped?.kind === "record")
+      return lowered.records?.some((r) => r.id === mapped.shapeId)
+        ? `record:${mapped.shapeId}`
+        : null;
+    if (mapped?.kind === "union")
+      return lowered.unions?.some((u) => u.id === mapped.unionId)
+        ? `union:${mapped.unionId}`
+        : null;
+    return null;
+  });
+  timing("contract-annotations", { found: contracts.count });
+  if (contracts.diagnostics.length > 0)
+    result = {
+      ...result,
+      module: null,
+      diagnostics: [...result.diagnostics, ...contracts.diagnostics],
+    };
+  else if (contracts.count > 0) result = { ...result, contracts };
   if (options.coverage !== true) return result;
   const remainder = new Lowerer(program, entry, moduleOrder, dynamic, {
     frontendServices: options.frontendServices,

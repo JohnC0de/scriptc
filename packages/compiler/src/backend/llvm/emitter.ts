@@ -99,6 +99,7 @@ import { scalarizeNumericRecords } from "../../ir/scalar-records.js";
 import { specializeNumericCalls } from "../../ir/numeric-call-specialization.js";
 import { everyExprChild, everyStmtChild, everyStmtList } from "../../ir/traverse.js";
 import { analyzeIntegerRanges, INT32_RANGE, type IntegerRanges } from "../../ir/integer-ranges.js";
+import { unshareNodes } from "../../ir/unshare.js";
 import { analyzeInt32Slots, type Int32Slots } from "../../ir/int32-slots.js";
 import { analyzeFinalFields, constructorClass, type FinalFields } from "../../ir/final-fields.js";
 import { foldConstantGlobals } from "../../ir/constant-globals.js";
@@ -409,7 +410,10 @@ export interface LlvmTargetOptions {
   detachedExit?: boolean;
 }
 
-export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): string {
+export function emitLlvmModule(input: IrModule, options: LlvmTargetOptions = {}): string {
+  // Facts are keyed by node identity: emit the same module whether it was
+  // lowered in memory or read back from its serialized form.
+  const mod = unshareNodes(input);
   // Keep source storage intact for debugger inspection in dev builds.
   return new LlEmitter(
     options.debugSources === undefined
@@ -421,9 +425,10 @@ export function emitLlvmModule(mod: IrModule, options: LlvmTargetOptions = {}): 
 
 /** Keep large translation units below the host's single-string limit. */
 export function emitLlvmModuleSource(
-  mod: IrModule,
+  input: IrModule,
   options: LlvmTargetOptions = {},
 ): string | readonly string[] {
+  const mod = unshareNodes(input);
   const parts = new LlEmitter(
     options.debugSources === undefined
       ? scalarizeNumericRecords(specializeNumericCalls(foldConstantGlobals(mod), mangleFunction))
@@ -762,6 +767,9 @@ export class LlEmitter {
   private readonly initializerBindings: ReturnType<typeof findInitializerBindings>;
   /** Whole-program int32 storage and parameter/result facts. */
   readonly int32Slots: Int32Slots;
+  /** Immutable module constants (contract types) whose graphs become
+   * immortal once initialized: their reads need no reference counting. */
+  readonly immortalGlobals: ReadonlySet<string>;
   private numericLocals = new Map<string, IrLocal>();
   private captureIds = new Set<string>();
   /** Active induction bindings retain their width independently of size_t. */
@@ -849,6 +857,7 @@ export class LlEmitter {
     this.constantNumericTables = findConstantNumericTables(mod);
     this.initializerBindings = findInitializerBindings(mod);
     this.int32Slots = analyzeInt32Slots(mod);
+    this.immortalGlobals = new Set(mod.contracts?.immortalGlobals ?? []);
     this.finalFields = analyzeFinalFields(mod);
     this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.ffiExtendNarrowIntegers =
@@ -6017,6 +6026,33 @@ export class LlEmitter {
         }
         B.line(`store ${this.llType(b.type)} ${v.name}, ptr ${b.slot}`);
         this.storeIntegerView(s.localId, v, s.value);
+        if (b.kind === "global" && this.immortalGlobals.has(s.localId)) {
+          // An Immutable module constant (contracts/check.ts proved it is
+          // fresh, publishable and never written): its graph becomes
+          // immortal, so reads skip reference counting and the collector
+          // never visits it.
+          const lines = this.publishWalkers.emitPublish(v.name, v.type, s.loc);
+          for (const line of lines) B.line(line.trimStart());
+          // Reads of this global skip retains from here on, which is only
+          // sound once the graph really is immortal. Node.js never fails
+          // here, so a refusal means the contract proof was wrong: stop
+          // rather than keep running with a mortal graph read as immortal.
+          if (lines.length > 0) {
+            this.declare(`declare zeroext i1 @scr_exc_pending()`);
+            this.declare(`declare void @scr_trap(ptr)`);
+            const refused = B.tmp();
+            B.line(`${refused} = call zeroext i1 @scr_exc_pending()`);
+            const stop = B.newLabel("immutable.refused");
+            const done = B.newLabel("immutable.published");
+            B.condBr(refused, stop, done);
+            B.startBlock(stop);
+            B.line(
+              `call void @scr_trap(ptr ${this.cstr("scriptc: internal error: an Immutable value could not be published\n")})`,
+            );
+            B.terminate("unreachable");
+            B.startBlock(done);
+          }
+        }
         break;
       }
       case "exprStmt":

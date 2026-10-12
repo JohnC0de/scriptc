@@ -94,7 +94,7 @@ interface HeaderTypes {
  * unrecognized so header growth can never slip past the guard unmapped. */
 function cTypeToLl(raw: string, types: HeaderTypes): string {
   const t = raw
-    .replace(/\b(const|struct|restrict|volatile|extern|_Noreturn)\b/g, " ")
+    .replace(/\b(const|struct|restrict|volatile|extern|_Noreturn|SCR_COLD)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (t.includes("*")) return "ptr";

@@ -13,6 +13,10 @@ export type IntegerRanges = ReadonlyMap<IrExpr, IntegerRange | null>;
 const SIGNED: IntegerRange = { min: -2147483648, max: 2147483647 };
 const UNSIGNED: IntegerRange = { min: 0, max: 4294967295 };
 const EXACT_LIMIT = 2 ** 53;
+/** The most UTF-16 code units a runtime string holds: SCR_STR_MAX_CAP
+ * (scr_runtime.h) caps a string's UTF-8 bytes, and a UTF-16 length never
+ * exceeds the UTF-8 byte length. */
+const STRING_MAX_UNITS = 0x7fffffff;
 type Facts = Map<string, IntegerRange>;
 
 function union(left: IntegerRange, right: IntegerRange): IntegerRange {
@@ -62,6 +66,132 @@ export const INT32_RANGE: IntegerRange = SIGNED;
 export function withinInt32(range: IntegerRange | null | undefined): boolean {
   return !!range && range.min >= SIGNED.min && range.max <= SIGNED.max;
 }
+export function withinUint32(range: IntegerRange | null | undefined): boolean {
+  return !!range && range.min >= UNSIGNED.min && range.max <= UNSIGNED.max;
+}
+
+export type BitwiseOp = "&" | "|" | "^" | "<<" | ">>" | ">>>";
+export function isBitwiseOp(op: string): op is BitwiseOp {
+  return op === "&" || op === "|" || op === "^" || op === "<<" || op === ">>" || op === ">>>";
+}
+
+/** What an operand of a bitwise operator is known to be: a range of exact
+ * integers, or, for a numeric literal that is not one (2^53 + 2, 0.5, NaN,
+ * Infinity), its value. Unknown operands are null. */
+export type BitwiseOperand = IntegerRange | number | null;
+function operandView(e: IrExpr, range: IntegerRange | null): BitwiseOperand {
+  return range ?? (e.kind === "numLit" ? e.value : null);
+}
+
+/** The values ToInt32 can produce from the operand. A range inside int32 is
+ * its own image; [2^31, 2^32) shifts down by 2^32; anything wider or unknown
+ * wraps to the whole int32 range. */
+function int32View(operand: BitwiseOperand): IntegerRange {
+  if (typeof operand === "number") return { min: operand | 0, max: operand | 0 };
+  if (withinInt32(operand)) return operand!;
+  if (operand && operand.min > SIGNED.max && operand.max <= UNSIGNED.max)
+    return { min: operand.min - 2 ** 32, max: operand.max - 2 ** 32 };
+  return SIGNED;
+}
+/** The values ToUint32 can produce from the operand. */
+function uint32View(operand: BitwiseOperand): IntegerRange {
+  if (typeof operand === "number") return { min: operand >>> 0, max: operand >>> 0 };
+  if (withinUint32(operand)) return operand!;
+  if (operand && operand.min >= SIGNED.min && operand.max < 0)
+    return { min: operand.min + 2 ** 32, max: operand.max + 2 ** 32 };
+  return UNSIGNED;
+}
+/** The shift counts (`ToUint32(count) & 31`) the operand can produce. */
+function shiftCounts(operand: BitwiseOperand): IntegerRange {
+  const counts = uint32View(operand);
+  return counts.max - counts.min < 32 && (counts.min & 31) <= (counts.max & 31)
+    ? { min: counts.min & 31, max: counts.max & 31 }
+    : { min: 0, max: 31 };
+}
+/** The smallest 2^k - 1 at or above a non-negative int32 or uint32. */
+function bitCover(value: number): number {
+  let cover = 0;
+  while (cover < value) cover = cover * 2 + 1;
+  return cover;
+}
+
+/** The result range of a JS bitwise operator over its operands' ranges.
+ * Every result is an exact integer and never -0. */
+export function bitwiseRange(
+  op: BitwiseOp,
+  leftOperand: BitwiseOperand,
+  rightOperand: BitwiseOperand,
+): IntegerRange {
+  if (op === ">>>") {
+    const value = uint32View(leftOperand),
+      counts = shiftCounts(rightOperand);
+    return {
+      min: Math.floor(value.min / 2 ** counts.max),
+      max: Math.floor(value.max / 2 ** counts.min),
+    };
+  }
+  const left = int32View(leftOperand);
+  if (op === ">>" || op === "<<") {
+    const counts = shiftCounts(rightOperand);
+    if (op === ">>")
+      return {
+        min: Math.min(
+          Math.floor(left.min / 2 ** counts.min),
+          Math.floor(left.min / 2 ** counts.max),
+        ),
+        max: Math.max(
+          Math.floor(left.max / 2 ** counts.min),
+          Math.floor(left.max / 2 ** counts.max),
+        ),
+      };
+    const min = Math.min(left.min * 2 ** counts.min, left.min * 2 ** counts.max),
+      max = Math.max(left.max * 2 ** counts.min, left.max * 2 ** counts.max);
+    return withinInt32({ min, max }) ? { min, max } : SIGNED;
+  }
+  const right = int32View(rightOperand);
+  if (op === "&") {
+    // Clearing bits of a non-negative value cannot raise it; a negative
+    // operand keeps the result at or below the other operand's maximum.
+    if (left.min >= 0 && right.min >= 0) return { min: 0, max: Math.min(left.max, right.max) };
+    if (left.min >= 0) return { min: 0, max: left.max };
+    if (right.min >= 0) return { min: 0, max: right.max };
+    if (left.max < 0 && right.max < 0)
+      return { min: SIGNED.min, max: Math.min(left.max, right.max) };
+    return SIGNED;
+  }
+  if (left.min === 0 && left.max === 0) return right;
+  if (right.min === 0 && right.max === 0) return left;
+  if (left.min >= 0 && right.min >= 0) {
+    const max = bitCover(Math.max(left.max, right.max));
+    return op === "|" ? { min: Math.max(left.min, right.min), max } : { min: 0, max };
+  }
+  if (op === "|") {
+    // Setting bits of a negative int32 raises it toward -1.
+    if (left.max < 0 && right.max < 0) return { min: Math.max(left.min, right.min), max: -1 };
+    if (left.max < 0) return { min: left.min, max: -1 };
+    if (right.max < 0) return { min: right.min, max: -1 };
+  }
+  return SIGNED;
+}
+
+/** The operand a bitwise operator returns unchanged when that operand is an
+ * int32 (a uint32 for `>>>`): `x | 0`, `x ^ 0`, `x & -1`, `x << 0`, `x >> 0`
+ * and `x >>> 0`, with the literal on either side where the operator is
+ * commutative. Literals count by their converted value (`x | 2 ** 32`). */
+export function bitwiseIdentityOperand(e: IrExpr & { kind: "bin" }): "left" | "right" | null {
+  const neutral = (literal: IrExpr): boolean => {
+    if (literal.kind !== "numLit") return false;
+    if (e.op === "&") return (literal.value | 0) === -1;
+    if (e.op === "|" || e.op === "^") return (literal.value | 0) === 0;
+    return false;
+  };
+  if (e.op === "<<" || e.op === ">>" || e.op === ">>>")
+    return e.right.kind === "numLit" && ((e.right.value >>> 0) & 31) === 0 ? "left" : null;
+  if (e.op !== "&" && e.op !== "|" && e.op !== "^") return null;
+  if (neutral(e.right)) return "left";
+  if (neutral(e.left)) return "right";
+  return null;
+}
 
 /** Whole-program facts about storage outside the analyzed function, each
  * proven by the caller (int32-slots.ts): every value a field slot, a
@@ -72,6 +202,9 @@ export interface IntegerSlotFacts {
   field?: (className: string, field: string) => IntegerRange | null;
   call?: (callee: string) => IntegerRange | null;
   boxed?: (localId: string) => IntegerRange | null;
+  /** Locals and globals an Int32 contract covers (ir/contract-check.ts):
+   * every write anywhere is proven int32, so every read is one. */
+  locals?: (localId: string) => IntegerRange | null;
 }
 
 /** Structured local dataflow. Calls cannot write uncaptured local slots,
@@ -97,8 +230,10 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
   const loopLocals = new Map(fn.locals.filter((l) => !captures.has(l.id)).map((l) => [l.id, l]));
   // A captured binding has no local dataflow: only a proof that covers
   // every write of the shared box anywhere applies to its reads.
-  const boxedRange = (localId: string): IntegerRange | null =>
-    eligible.has(localId) ? null : (slots.boxed?.(localId) ?? null);
+  const boxedRange = (localId: string): IntegerRange | null => {
+    const boxed = eligible.has(localId) ? null : (slots.boxed?.(localId) ?? null);
+    return boxed ?? slots.locals?.(localId) ?? null;
+  };
   const slotRange = (e: IrExpr): IntegerRange | null =>
     e.type.kind !== "f64"
       ? null
@@ -288,7 +423,11 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
         ? { min: bound.value, max: bound.value }
         : ranges.get(bound);
     if (!boundRange) return;
-    const previous = facts.get(ref.localId);
+    // An Int32 contract local holds an int32 even where the dataflow has
+    // no fact for it (loop headers, after unknown regions).
+    const previous =
+      facts.get(ref.localId) ??
+      (eligible.has(ref.localId) ? (slots.locals?.(ref.localId) ?? undefined) : undefined);
     if (!previous) return;
     if (!truth)
       op =
@@ -335,25 +474,17 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
         const left = expr(e.left, facts);
         const right = expr(e.right, facts);
         if (e.type.kind !== "f64") break;
-        if (e.op === ">>>") {
-          const shift = e.right.kind === "numLit" ? e.right.value & 31 : 0;
-          range = { min: 0, max: 4294967295 >>> shift };
-        } else if (e.op === "&") {
-          const mask =
-            e.left.kind === "numLit"
-              ? e.left.value | 0
-              : e.right.kind === "numLit"
-                ? e.right.value | 0
-                : -1;
-          range = mask >= 0 ? { min: 0, max: mask } : SIGNED;
-        } else if (e.op === "|" || e.op === "^" || e.op === "<<" || e.op === ">>") range = SIGNED;
+        if (isBitwiseOp(e.op))
+          range = bitwiseRange(e.op, operandView(e.left, left), operandView(e.right, right));
         else if (left && right) range = integerArithmeticRange(e.op, left, right);
         break;
       }
       case "unary": {
         const operand = expr(e.operand, facts);
-        if (e.op === "~") range = SIGNED;
-        else if (e.op === "-" && operand && (operand.max < 0 || operand.min > 0))
+        if (e.op === "~") {
+          const value = int32View(operandView(e.operand, operand));
+          range = { min: -value.max - 1, max: -value.min - 1 };
+        } else if (e.op === "-" && operand && (operand.max < 0 || operand.min > 0))
           range = { min: -operand.max, max: -operand.min };
         break;
       }
@@ -435,6 +566,27 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
           },
         );
         if (e.method === "length") range = UNSIGNED;
+        break;
+      case "strIntrinsic":
+        // The conservative child handling of unknown forms; only the result
+        // range is new: a length or a found index is an int32.
+        havoc(facts, [e], facts);
+        everyExprChild(
+          e,
+          (child) => {
+            expr(child, new Map(facts));
+            return true;
+          },
+          (child) => {
+            body([child], new Map(facts));
+            return true;
+          },
+        );
+        if (e.type.kind === "f64") {
+          if (e.method === "length") range = { min: 0, max: STRING_MAX_UNITS };
+          // An empty needle is found at the clamped position, up to the length.
+          else if (e.method === "indexOf") range = { min: -1, max: STRING_MAX_UNITS };
+        }
         break;
       case "fieldGet":
         expr(e.obj, facts);
@@ -559,8 +711,20 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
           if (s.cond) refine(s.cond, true, inside);
           body(s.body, inside);
           // Continue can bypass any body assignment. The update therefore
-          // starts from header invariants rather than the body's exit facts.
-          if (s.update) body([s.update], new Map(loop));
+          // starts from header invariants rather than the body's exit facts,
+          // plus what the condition proved about bindings the body never
+          // writes (they still hold the values the condition tested).
+          if (s.update) {
+            const entry = new Map(loop);
+            if (s.cond) {
+              const refined = new Map(loop);
+              refine(s.cond, true, refined);
+              const written = new Set<string>();
+              for (const node of s.body) for (const id of writes(node)) written.add(id);
+              for (const [id, range] of refined) if (!written.has(id)) entry.set(id, range);
+            }
+            body([s.update], entry);
+          }
           havoc(facts, [s], facts);
           break;
         }

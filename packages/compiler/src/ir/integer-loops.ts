@@ -175,6 +175,9 @@ export function matchIntegerCountedForLoop(
       e.args.some(counter)
     )
       useful = true;
+    // A string read at the counter indexes with the integer directly.
+    if (e.kind === "strIntrinsic" && e.method === "charCodeAt" && e.args[0] && counter(e.args[0]))
+      useful = true;
     return (!guarded || ++cost <= 80) && everyExprChild(e, expr, bodyStmt);
   };
   const bodyStmt = (s: IrStmt): boolean => {

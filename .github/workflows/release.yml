@@ -380,7 +380,7 @@ jobs:
       - name: Check version sync
         run: |
           VERSION="${{ needs.check-release.outputs.version }}"
-          for pkg in packages/runtime packages/runtime-* packages/llvm-* packages/compiler packages/threads packages/cli packages/cli-*; do
+          for pkg in packages/runtime packages/runtime-* packages/llvm-* packages/compiler packages/threads packages/types packages/cli packages/cli-*; do
             if [ "$(node -p "require('./$pkg/package.json').private === true")" = "true" ]; then
               continue
             fi
@@ -478,6 +478,7 @@ jobs:
           for pkg in packages/cli-*; do publish_dir "$pkg"; done
           publish_dir packages/compiler
           publish_dir packages/threads
+          publish_dir packages/types
           publish_dir packages/cli
           echo "All package uploads accepted; npm registry propagation may continue after this job." >> "$GITHUB_STEP_SUMMARY"
 
