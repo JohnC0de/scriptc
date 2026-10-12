@@ -51,8 +51,12 @@ export function emitLiteralExpr(
         const integer = B.tmp();
         const number = B.tmp();
         B.line(`${integer} = load ${integerSlot.type}, ptr ${integerSlot.slot}`);
+        // A 64-bit induction value is a safe integer, so its sign bit is
+        // clear and the signed conversion is exact: one cvtsi2sd instead of
+        // x86-64's multi-instruction unsigned 64-bit conversion.
+        const signedConversion = integerSlot.signed === true || integerSlot.type === "i64";
         B.line(
-          `${number} = ${integerSlot.signed ? "sitofp" : "uitofp"} ${integerSlot.type} ${integer} to double`,
+          `${number} = ${signedConversion ? "sitofp" : "uitofp"} ${integerSlot.type} ${integer} to double`,
         );
         const uint32 = integerSlot.type === "i32" ? integer : B.tmp();
         if (integerSlot.type !== "i32")

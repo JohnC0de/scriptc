@@ -53,6 +53,18 @@ void arc4random_buf(void *buf, size_t n);
 #define SCR_TL
 #endif
 
+/* Entry points that only run when a JS exception is being raised. noinline
+ * keeps the throw machinery out of every caller: the LLVM helper never
+ * imports noinline runtime bodies into program code, so a compiled function
+ * whose only slow path throws stays small enough to inline and needs no
+ * callee-saved registers on its fast path. cold tells the C compiler that
+ * runtime paths reaching them are unlikely. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SCR_COLD __attribute__((cold, noinline))
+#else
+#define SCR_COLD
+#endif
+
 /* ── process ──────────────────────────────────────────────────────────── */
 
 /* Called once at the top of main: private stdout formatter buffer,
@@ -336,7 +348,7 @@ bool scr_context_is_main(void);
  * report. Zero (the default) disables the check on that stack. */
 extern SCR_TL uintptr_t scr_stack_guard;
 void scr_stack_guard_init(void);
-void scr_stack_overflow(void);
+SCR_COLD void scr_stack_overflow(void);
 #if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(__APPLE__) && \
     (defined(__aarch64__) || defined(__x86_64__))
 /* Darwin worker executables: reading a thread-local variable calls its TLV
@@ -797,9 +809,9 @@ void scr_publish_refuse(const char *message);
  * TypeErrors. scr_throw_published_array answers false (and throws nothing)
  * when Node's operation would not write the array. */
 struct ScrArr;
-void scr_throw_published_field(const char *prop, const char *owner);
+SCR_COLD void scr_throw_published_field(const char *prop, const char *owner);
 bool scr_throw_published_array(int op, const struct ScrArr *a, double index, double n);
-void scr_throw_published_collection(bool set);
+SCR_COLD void scr_throw_published_collection(bool set);
 
 /* ── class hierarchies (single inheritance) ───────────────────────────
  * Classes in an `extends` hierarchy share a two-word object prefix: the
@@ -1170,8 +1182,8 @@ ScrError *scr_domex_clone(ScrError *e, const struct ScrDyn *options);
 /* Throw a fresh DOMException through the exception cell (atob/btoa's
  * InvalidCharacterError sites). Copies both C strings; the _str form
  * takes ownership of the message. */
-void scr_throw_domex(const char *name, const char *message);
-void scr_throw_domex_str(const char *name, ScrStr *message);
+SCR_COLD void scr_throw_domex(const char *name, const char *message);
+SCR_COLD void scr_throw_domex_str(const char *name, ScrStr *message);
 
 /* Switch runtime-side error allocation to collector-headered (called from
  * main() when the compiler's cycle fixpoint marks the hierarchy). */
@@ -1179,7 +1191,7 @@ void scr_error_set_traced(void);
 
 /* Allocate + initialize (name = the kind's builtin name, message retained
  * from the borrowed argument; NULL means ""). Returns +1. */
-ScrError *scr_error_new(int kind, ScrStr *message);
+SCR_COLD ScrError *scr_error_new(int kind, ScrStr *message);
 /* Initialize the error prefix of an already-allocated (zeroed) object —
  * the super(message) call of a compiled `extends Error` constructor. Both
  * arguments are borrowed. */
@@ -1219,22 +1231,22 @@ bool scr_error_is(const void *obj);
  * takes ownership of message; the _msg form copies the C string. The _named
  * form (island bridge) takes ownership of both strings and picks the
  * builtin vtable whose class name matches `name` (Error otherwise). */
-void scr_throw_error(int kind, ScrStr *message);
-void scr_throw_error_msg(int kind, const char *message, size_t len);
-void scr_throw_error_named(ScrStr *name, ScrStr *message);
+SCR_COLD void scr_throw_error(int kind, ScrStr *message);
+SCR_COLD void scr_throw_error_msg(int kind, const char *message, size_t len);
+SCR_COLD void scr_throw_error_named(ScrStr *name, ScrStr *message);
 /* A read of a declare-d const nothing defines: throws Node's catchable
  * ReferenceError "<name> is not defined". Borrows name; always throws. */
-void scr_undef_global_read(ScrStr *name);
+SCR_COLD void scr_undef_global_read(ScrStr *name);
 /* The `code` slot (NodeJS.ErrnoException's .code): set stamps a fresh
  * string from the C literal (replacing any previous value); get answers
  * +1 or NULL when absent (the compiler's undefined arm). The _msg_code
  * thrower is scr_throw_error_msg with the code stamped on the payload. */
 void scr_error_set_code(ScrError *e, const char *code);
 ScrStr *scr_error_code(ScrError *e);
-void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
+SCR_COLD void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
  * error of `kind`, `code` stamped when non-empty. Borrows both. */
-void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
+SCR_COLD void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
 
 /* ── string methods ─────────────────────────────────────────────────
  * ECMA-262 observable semantics over UTF-8 storage with UTF-16 code-unit
@@ -3067,23 +3079,23 @@ static inline bool scr_exc_pending_inline(void) { return scr_exc_active->kind !=
 _Static_assert(offsetof(ScrExcCell, kind) == 0 && sizeof(ScrExcKind) == 4 && SCR_EXC_NONE == 0,
                "the LLVM emitter's inline pending check loads an i32 kind at offset 0");
 
-void scr_throw_f64(double v);
-void scr_throw_bool(bool v);
-void scr_throw_str(ScrStr *v); /* takes ownership */
+SCR_COLD void scr_throw_f64(double v);
+SCR_COLD void scr_throw_bool(bool v);
+SCR_COLD void scr_throw_str(ScrStr *v); /* takes ownership */
 /* Takes ownership of v; retain/release must be non-NULL (the compiler
  * passes the payload type's `_v` adapters, like scr_union_new_ref); trace
  * is non-NULL iff the payload type carries a cycle header. */
-void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
-                   ScrTraceFn trace);
+SCR_COLD void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
+                            ScrTraceFn trace);
 /* Store a reference whose JS typeof was checked at the throw site. */
-void scr_throw_ref_classified(void *v, void *(*retain)(void *), void (*release)(void *),
-                              ScrTraceFn trace, bool object);
-void scr_throw_primitive_ref(void *v, void *(*retain)(void *), void (*release)(void *),
-                             ScrTraceFn trace);
+SCR_COLD void scr_throw_ref_classified(void *v, void *(*retain)(void *), void (*release)(void *),
+                                       ScrTraceFn trace, bool object);
+SCR_COLD void scr_throw_primitive_ref(void *v, void *(*retain)(void *), void (*release)(void *),
+                                      ScrTraceFn trace);
 /* Same ownership contract as scr_throw_ref; the payload must be a
  * hierarchy-class instance (vtable word present) — see SCR_EXC_OBJ. */
-void scr_throw_obj(void *v, void *(*retain)(void *), void (*release)(void *),
-                    ScrTraceFn trace);
+SCR_COLD void scr_throw_obj(void *v, void *(*retain)(void *), void (*release)(void *),
+                            ScrTraceFn trace);
 
 /* Catch: discard the in-flight exception (releases a refcounted payload). */
 void scr_exc_clear(void);
@@ -5303,22 +5315,22 @@ void scr_dyn_check_listener(const ScrDyn *cb, const char *argname);
 const char *scr_dyn_specific_type(const ScrDyn *v, char *buf, size_t cap);
 /* ERR_INVALID_ARG_TYPE with the runtime-rendered Received tail (the
  * error.argTypeThrow libCall). Borrows all three; always throws. */
-void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
-void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
+SCR_COLD void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
+SCR_COLD void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
 /* The property flavor ("The \"options.x\" property must be ...") — the
  * option-bag validators' gate (error.propTypeThrow). Always throws. */
-void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
-void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
+SCR_COLD void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
+SCR_COLD void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
 /* Node's ERR_INVALID_ARG_VALUE ("The argument 'encoding' is invalid
  * encoding. Received 'no'") — reason NULL renders "is invalid".
  * TypeError; always throws catchably. */
-void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
+SCR_COLD void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
 /* The ERR_INVALID_ARG_VALUE/%j "Received" renderer (inspect-lite:
  * strings quote, scalars print plain, deep shapes sketch). */
 const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap);
 /* A ladder's post-validation refuse: throws the compiler-rendered SC2020
  * statement-fence text verbatim (Node's validation errors run first). */
-void scr_throw_lowering_fence(const ScrStr *msg);
+SCR_COLD void scr_throw_lowering_fence(const ScrStr *msg);
 /* ERR_OUT_OF_RANGE's "Received" number rendering (Node's
  * addNumericalSeparator underscores past 2^32) — scr_bytes.c's renderer,
  * shared by the fs/net/tls option-ladder validators. */

@@ -7,6 +7,10 @@
 
 #define SCR_ARR_MAX_LENGTH ((size_t)UINT32_MAX)
 #define SCR_ARR_MAX_INDEX (SCR_ARR_MAX_LENGTH - 1)
+/* A length as a JS number. Lengths never exceed 2^32 - 1, so the signed
+ * conversion is exact; x86-64 has no single instruction for the unsigned
+ * 64-bit one that a plain size_t cast compiles to. */
+#define SCR_ARR_LEN_F64(n) ((double)(int64_t)(n))
 /* Keep the packed representation proportional to the populated elements.
  * Indices below this cutoff always grow dense storage geometrically. Above
  * it, dense storage grows only when the new range stays populated: a
@@ -62,15 +66,16 @@ static void scr_arr_trap_oob(double i, size_t len) {
 static size_t scr_arr_check_index(const ScrArr *a, double i, bool allow_append) {
   const double max_index = (double)SCR_ARR_MAX_INDEX;
   if (!(i >= 0) || i != trunc(i) || i > max_index ||
-      (!allow_append && i >= (double)a->len)) {
+      (!allow_append && i >= SCR_ARR_LEN_F64(a->len))) {
     scr_arr_trap_oob(i, a->len);
   }
-  return (size_t)i;
+  /* 0 <= i < 2^32: the signed conversion is exact and a single instruction. */
+  return (size_t)(int64_t)i;
 }
 
 static bool scr_arr_valid_index(double i, size_t *out) {
   if (!(i >= 0) || i != trunc(i) || i > (double)SCR_ARR_MAX_INDEX) return false;
-  *out = (size_t)i;
+  *out = (size_t)(int64_t)i;
   return true;
 }
 
@@ -819,7 +824,7 @@ void scr_arr_release(ScrArr *a) {
   }
 }
 
-double scr_arr_len(ScrArr *a) { return (double)a->len; }
+double scr_arr_len(ScrArr *a) { return SCR_ARR_LEN_F64(a->len); }
 
 bool scr_arr_has(const ScrArr *a, double i) {
   size_t idx;
@@ -841,7 +846,7 @@ double scr_arr_state(const ScrArr *a, double i) {
 }
 
 double scr_arr_next_present(const ScrArr *a, double start) {
-  if (!(start < (double)a->len)) return (double)a->len;
+  if (!(start < SCR_ARR_LEN_F64(a->len))) return SCR_ARR_LEN_F64(a->len);
   size_t i = start > 0 ? (size_t)ceil(start) : 0;
   size_t end = a->cap < a->len ? a->cap : a->len;
   for (; i < end; i++) {
@@ -851,7 +856,7 @@ double scr_arr_next_present(const ScrArr *a, double start) {
   if (pos < SCR_AX(a)->sparse_len && SCR_AX(a)->sparse[pos].index < a->len) {
     return (double)SCR_AX(a)->sparse[pos].index;
   }
-  return (double)a->len;
+  return SCR_ARR_LEN_F64(a->len);
 }
 
 static void scr_arr_invalid_length(double length) {
@@ -1271,10 +1276,13 @@ bool scr_arr_delete(ScrArr *a, double i) {
 /* ── push / pop ────────────────────────────────────────────────────────── */
 
 static double scr_arr_push_slot(ScrArr *a, uint64_t slot) {
-  size_t idx = scr_arr_check_index(a, (double)a->len, true);
+  /* scr_arr_check_index(a, len, true) without the double round trip: the
+   * length is an integer, so only the upper bound can fail. */
+  if (a->len > SCR_ARR_MAX_INDEX) scr_arr_trap_oob(SCR_ARR_LEN_F64(a->len), a->len);
+  size_t idx = a->len;
   scr_arr_store_owned(a, idx, slot);
   a->len++;
-  return (double)a->len;
+  return SCR_ARR_LEN_F64(a->len);
 }
 
 double scr_arr_push_f64(ScrArr *a, double v) {
@@ -1314,7 +1322,7 @@ double scr_arr_push_spread(ScrArr *a, const ScrArr *src) {
     scr_arr_grow_dense(a, old_len + add);
     scr_arr_copy_dense(a, old_len, src, 0, add, false, true);
     a->len += add;
-    return (double)a->len;
+    return SCR_ARR_LEN_F64(a->len);
   }
   if (src == a) {
     ScrArrStorage old = scr_arr_take_storage(a);
@@ -1331,7 +1339,7 @@ double scr_arr_push_spread(ScrArr *a, const ScrArr *src) {
     }
     a->len = old_len + add;
     scr_arr_free_storage(&old);
-    return (double)a->len;
+    return SCR_ARR_LEN_F64(a->len);
   }
   a->len = old_len + add;
   for (size_t i = 0; i < add; i++) {
@@ -1343,7 +1351,7 @@ double scr_arr_push_spread(ScrArr *a, const ScrArr *src) {
       scr_arr_store_state_owned(a, old_len + i, 0, SCR_ARR_UNDEFINED);
     }
   }
-  return (double)a->len;
+  return SCR_ARR_LEN_F64(a->len);
 }
 
 double scr_arr_concat_copy(ScrArr *a, const ScrArr *src) {
@@ -1355,7 +1363,7 @@ double scr_arr_concat_copy(ScrArr *a, const ScrArr *src) {
     scr_arr_grow_dense(a, old_len + add);
     scr_arr_copy_dense(a, old_len, src, 0, add, false, false);
     a->len += add;
-    return (double)a->len;
+    return SCR_ARR_LEN_F64(a->len);
   }
   if (src == a) {
     ScrArrStorage old = scr_arr_take_storage(a);
@@ -1372,7 +1380,7 @@ double scr_arr_concat_copy(ScrArr *a, const ScrArr *src) {
     }
     a->len = old_len + add;
     scr_arr_free_storage(&old);
-    return (double)a->len;
+    return SCR_ARR_LEN_F64(a->len);
   }
   a->len = old_len + add;
   for (size_t i = 0; i < src->cap; i++) {
@@ -1384,7 +1392,7 @@ double scr_arr_concat_copy(ScrArr *a, const ScrArr *src) {
     scr_arr_copy_index(a, old_len + SCR_AX(src)->sparse[i].index, src,
                        SCR_AX(src)->sparse[i].index);
   }
-  return (double)a->len;
+  return SCR_ARR_LEN_F64(a->len);
 }
 
 /* ── unshift / reverse ──────────────────────────────────────────────────
@@ -1395,7 +1403,7 @@ double scr_arr_concat_copy(ScrArr *a, const ScrArr *src) {
  * tail move by reading the relocated original block. */
 static double scr_arr_unshift_slot(ScrArr *a, uint64_t slot) {
   if (a->len == SCR_ARR_MAX_LENGTH) {
-    scr_arr_trap_oob((double)a->len, a->len);
+    scr_arr_trap_oob(SCR_ARR_LEN_F64(a->len), a->len);
   }
   size_t old_len = a->len;
   if (scr_arr_is_dense(a) && scr_arr_dense_ok(a, old_len + 1, 1)) {
@@ -1404,7 +1412,7 @@ static double scr_arr_unshift_slot(ScrArr *a, uint64_t slot) {
     a->data[0] = slot;
     a->present[0] = SCR_ARR_VALUE;
     a->len++;
-    return (double)a->len;
+    return SCR_ARR_LEN_F64(a->len);
   }
   ScrArrStorage old = scr_arr_take_storage(a);
   a->len = 0;
@@ -1418,7 +1426,7 @@ static double scr_arr_unshift_slot(ScrArr *a, uint64_t slot) {
   }
   a->len = old_len + 1;
   scr_arr_free_storage(&old);
-  return (double)a->len;
+  return SCR_ARR_LEN_F64(a->len);
 }
 
 double scr_arr_unshift_f64(ScrArr *a, double v) {
@@ -1456,7 +1464,7 @@ double scr_arr_unshift_many(ScrArr *a, size_t count, const uint64_t *slots) {
     scr_arr_free_storage(&old);
   }
   a->len = old_len + count;
-  return (double)a->len;
+  return SCR_ARR_LEN_F64(a->len);
 }
 
 double scr_arr_unshift_spread(ScrArr *a, const ScrArr *src) {
@@ -1471,7 +1479,7 @@ double scr_arr_unshift_spread(ScrArr *a, const ScrArr *src) {
     /* A self-spread reads the original values at their moved location. */
     scr_arr_copy_dense(a, 0, src, src == a ? add : 0, add, false, true);
     a->len += add;
-    return (double)a->len;
+    return SCR_ARR_LEN_F64(a->len);
   }
   ScrArrStorage old = scr_arr_take_storage(a);
   a->len = 0;
@@ -1497,7 +1505,7 @@ double scr_arr_unshift_spread(ScrArr *a, const ScrArr *src) {
   }
   a->len = old_len + add;
   scr_arr_free_storage(&old);
-  return (double)a->len;
+  return SCR_ARR_LEN_F64(a->len);
 }
 
 ScrArr *scr_arr_reverse(ScrArr *a) {
@@ -1615,7 +1623,7 @@ void *scr_arr_shift_ref(ScrArr *a) { return scr_slot_to_ptr(scr_arr_shift_slot(a
  * out of the receiver (no retain/release churn); the tail slides down.
  * Borrows a. */
 ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
-  double len = (double)a->len;
+  double len = SCR_ARR_LEN_F64(a->len);
   double s0 = isnan(start) ? 0 : trunc(start);
   if (s0 < 0) s0 += len;
   size_t from = s0 <= 0 ? 0 : s0 >= len ? a->len : (size_t)s0;
@@ -1679,7 +1687,7 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
  * appending the tail follows indexed copying (holes stay holes). */
 ScrArr *scr_arr_splice_insert(ScrArr *a, double start, double deleteCount,
                               const ScrArr *items) {
-  double len = (double)a->len;
+  double len = SCR_ARR_LEN_F64(a->len);
   double s0 = isnan(start) ? 0 : trunc(start);
   if (s0 < 0) s0 += len;
   size_t from = s0 <= 0 ? 0 : s0 >= len ? a->len : (size_t)s0;
@@ -1728,7 +1736,7 @@ ScrArr *scr_arr_splice_insert(ScrArr *a, double start, double deleteCount,
  * sparse-sized results keep the general implementation. */
 void scr_arr_splice_drop(ScrArr *a, double start, double deleteCount, size_t count,
                          const uint64_t *slots) {
-  double len = (double)a->len;
+  double len = SCR_ARR_LEN_F64(a->len);
   double s0 = isnan(start) ? 0 : trunc(start);
   if (s0 < 0) s0 += len;
   size_t from = s0 <= 0 ? 0 : s0 >= len ? a->len : (size_t)s0;
@@ -1916,7 +1924,7 @@ static void scr_join_append(ScrStr **out, const char *bytes, size_t n) {
  * references, exactly JS's shallow copy. Borrows a; returns +1. */
 ScrArr *scr_arr_slice(ScrArr *a, double start, double end) {
   /* ToIntegerOrInfinity + relative-index resolution over the LENGTH. */
-  double len = (double)a->len;
+  double len = SCR_ARR_LEN_F64(a->len);
   double s0 = isnan(start) ? 0 : trunc(start);
   double e0 = isnan(end) ? 0 : trunc(end);
   if (s0 < 0) s0 += len;
