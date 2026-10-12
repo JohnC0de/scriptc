@@ -425,10 +425,10 @@ void *scr_map_get_span_ref(const ScrMap *m, const char *bytes, size_t length) {
 static void scr_map_rebuild_buckets(ScrMap *m, size_t nbuckets) {
   bool compact = scr_map_compact_buckets(nbuckets);
   size_t bytes = nbuckets * (compact ? sizeof(uint32_t) : sizeof(size_t));
-  void *buckets = malloc(bytes);
+  void *buckets = scr_mem_alloc(bytes);
   if (!buckets) scr_map_oom();
   memset(buckets, compact ? 0 : 0xff, bytes);
-  free(m->buckets);
+  scr_mem_free(m->buckets);
   m->buckets = buckets;
   m->nbuckets = nbuckets;
   size_t mask = nbuckets - 1;
@@ -467,7 +467,7 @@ static size_t scr_map_dense_limit(size_t live) {
 }
 
 static void scr_map_dense_alloc(ScrMap *m, size_t n) {
-  uint32_t *dense = realloc(m->dense, n * sizeof *dense);
+  uint32_t *dense = scr_mem_realloc(m->dense, n * sizeof *dense);
   if (!dense) scr_map_oom();
   m->dense = dense;
   m->ndense = n;
@@ -485,7 +485,7 @@ static __attribute__((noinline)) void scr_map_enter_dense(ScrMap *m, double inco
     if (!scr_map_dense_slot(scr_map_slot_to_f64(m->entries[e].key), limit, &i)) return;
     if (i > top) top = i;
   }
-  free(m->buckets);
+  scr_mem_free(m->buckets);
   m->buckets = NULL;
   m->nbuckets = 0;
   scr_map_dense_alloc(m, scr_map_dense_size(top));
@@ -505,7 +505,7 @@ static __attribute__((noinline)) bool scr_map_grow_dense(ScrMap *m, double k, si
 
 /* Switch to the bucket table; cached entry hashes are already complete. */
 static __attribute__((noinline)) void scr_map_leave_dense(ScrMap *m) {
-  free(m->dense);
+  scr_mem_free(m->dense);
   m->dense = NULL;
   m->ndense = 0;
   if (m->nentries < SCR_MAP_LINEAR_LIMIT) return;
@@ -549,7 +549,7 @@ static void scr_map_compact(ScrMap *m, bool reindex) {
   if (!dense) return;
   if (reindex) {
     if (w == 0) {
-      free(m->dense);
+      scr_mem_free(m->dense);
       m->dense = NULL;
       m->ndense = 0;
       return;
@@ -571,7 +571,7 @@ static void scr_map_grow_entries(ScrMap *m) {
     if (cap > SIZE_MAX / 2 / sizeof(ScrMapEntry)) scr_map_oom();
     cap *= 2;
   }
-  ScrMapEntry *entries = realloc(m->entries, cap * sizeof *entries);
+  ScrMapEntry *entries = scr_mem_realloc(m->entries, cap * sizeof *entries);
   if (!entries) scr_map_oom();
   m->entries = entries;
   m->ecap = cap;
@@ -651,9 +651,9 @@ static void scr_map_gcfree(void *o) {
     if (!m->key_trace) scr_map_release_key(m, m->entries[e].key);
     if (!m->val_trace) scr_map_release_val(m, m->entries[e].val);
   }
-  free(m->entries);
-  free(m->buckets);
-  free(m->dense);
+  scr_mem_free(m->entries);
+  scr_mem_free(m->buckets);
+  scr_mem_free(m->dense);
 #ifdef SCR_RC_AUDIT
   scr_live_maps--;
 #endif
@@ -664,6 +664,12 @@ ScrMap *scr_map_new(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
                      void *(*val_retain)(void *), void (*val_release)(void *),
                      ScrTraceFn val_trace) {
   return scr_map_new_typed(key_kind, val_kind, NULL, NULL, NULL, val_retain, val_release, val_trace);
+}
+
+/* Map construction inlines into its callers; keeping the header allocation
+ * out of line keeps those call sites as small as the libc call they had. */
+static __attribute__((noinline)) ScrMap *scr_map_alloc_plain(void) {
+  return scr_mem_calloc(sizeof(ScrMap));
 }
 
 ScrMap *scr_map_new_typed(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
@@ -677,7 +683,7 @@ ScrMap *scr_map_new_typed(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
     static const ScrCycType cyc_type = { &scr_map_trace, &scr_map_gcfree, SCR_CYC_KIND_MAP };
     m = scr_cyc_alloc(sizeof *m, &cyc_type);
   } else {
-    m = calloc(1, sizeof *m);
+    m = scr_map_alloc_plain();
     if (!m) scr_map_oom();
   }
   m->rc = 1;
@@ -710,14 +716,14 @@ static void scr_map_destroy(void *object) {
     scr_map_release_key(m, m->entries[e].key);
     scr_map_release_val(m, m->entries[e].val);
   }
-  free(m->entries);
-  free(m->buckets);
-  free(m->dense);
+  scr_mem_free(m->entries);
+  scr_mem_free(m->buckets);
+  scr_mem_free(m->dense);
 #ifdef SCR_RC_AUDIT
   scr_live_maps--;
 #endif
   if (m->key_trace || m->val_trace) scr_cyc_free(m);
-  else free(m);
+  else scr_mem_free(m);
 }
 
 void scr_map_release(ScrMap *m) {
@@ -771,7 +777,7 @@ void scr_map_clear(ScrMap *m) {
      * after the clear append past them and ARE visited (Node-exact). */
     m->nentries = 0;
     if (m->ecap > SCR_MAP_CLEAR_KEEP && m->ecap / 8 > walked) {
-      free(m->entries);
+      scr_mem_free(m->entries);
       m->entries = NULL;
       m->ecap = 0;
     }
@@ -779,13 +785,13 @@ void scr_map_clear(ScrMap *m) {
   /* Without either index, a map is a linear scan; dead entries kept for an
    * active iteration are skipped by every later rebuild. */
   if (m->ndense > SCR_MAP_CLEAR_KEEP && m->ndense / 32 > walked) {
-    free(m->dense);
+    scr_mem_free(m->dense);
     m->dense = NULL;
     m->ndense = 0;
   }
   if (m->nbuckets) {
     if (m->nbuckets > SCR_MAP_CLEAR_KEEP && m->nbuckets / 8 > walked) {
-      free(m->buckets);
+      scr_mem_free(m->buckets);
       m->buckets = NULL;
       m->nbuckets = 0;
     } else {
@@ -1254,7 +1260,7 @@ ScrMap *scr_map_clone(const ScrMap *source, bool keys_only) {
   size_t count = source->nlive;
   if (!count) return out;
   if (count > SIZE_MAX / sizeof(ScrMapEntry) || count > SIZE_MAX / 2 / sizeof(size_t)) scr_map_oom();
-  out->entries = malloc(count * sizeof(ScrMapEntry));
+  out->entries = scr_mem_alloc(count * sizeof(ScrMapEntry));
   if (!out->entries) scr_map_oom();
   out->ecap = count;
   size_t top = 0;
