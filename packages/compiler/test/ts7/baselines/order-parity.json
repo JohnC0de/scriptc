@@ -15743,9 +15743,15 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/4651-map-string-get-entry.ts": {
+  "<repo>/tests/corpus/4650-stale-property-narrowing.ts": {
    "order": [
-    "<repo>/tests/corpus/4651-map-string-get-entry.ts"
+    "<repo>/tests/corpus/4650-stale-property-narrowing.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4652-stale-closure-binding-narrowing.ts": {
+   "order": [
+    "<repo>/tests/corpus/4652-stale-closure-binding-narrowing.ts"
    ],
    "diags": []
   },
@@ -15893,6 +15899,12 @@
   "<repo>/tests/corpus/switch-integer-dispatch.ts": {
    "order": [
     "<repo>/tests/corpus/switch-integer-dispatch.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/4651-map-string-get-entry.ts": {
+   "order": [
+    "<repo>/tests/corpus/4651-map-string-get-entry.ts"
    ],
    "diags": []
   }
