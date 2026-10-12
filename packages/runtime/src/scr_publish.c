@@ -118,7 +118,7 @@ void scr_pub_arr(void *v, ScrPub *ctx, ScrPubFn elem) {
     scr_pub_refuse(ctx, "Cannot publish an array with non-index properties");
     return;
   }
-  if (!scr_pub_mark(ctx, a, a->elem_trace != NULL, SCR_PUB_KIND_ARRAY)) return;
+  if (!scr_pub_mark(ctx, a, a->cyc != 0, SCR_PUB_KIND_ARRAY)) return;
   ScrPubFn fn = a->elem == SCR_ELEM_STR ? scr_pub_str_fn : a->elem == SCR_ELEM_REF ? elem : NULL;
   if (!fn) return;
   size_t dense = a->len < a->cap ? a->len : a->cap;

@@ -1,10 +1,10 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import { analyzeInChild, compileInChild } from "./self-hosting-compiler-process.js";
+import { spawnResult } from "./spawn-result.js";
 import { nativeCodegenTarget } from "../../packages/compiler/src/backend/targets.js";
 import type { NativeLinkFeatures } from "../../packages/compiler/src/backend/native-link-info.js";
 import type { RuntimePackManifest } from "../../packages/compiler/src/backend/runtime-pack-core.js";
@@ -100,7 +100,7 @@ for (const backend of ["llvm"] as const) {
           object_format: target.objectFormat,
           minimum_os: target.minimumOs,
         },
-        runtime_abi: { version: 12, marker: "scr_runtime_abi_v12" },
+        runtime_abi: { version: 13, marker: "scr_runtime_abi_v13" },
         compiler: { command: "fixture", identity: "fixture", target: target.llvmTriple },
         macros: { executable: [], excluded: [], sanitizer: "external-toolchain-required" },
         flavors: {
@@ -143,7 +143,7 @@ for (const backend of ["llvm"] as const) {
         default_target: target.helper.defaultTarget,
         data_layout: target.helper.defaultDataLayout,
       };
-      const check = (
+      const check = async (
         status: number,
         message: string,
         action = "stage",
@@ -153,11 +153,11 @@ for (const backend of ["llvm"] as const) {
           input,
           JSON.stringify({ toolchain, stage, features, action, version: helperVersion }),
         );
-        const options = { cwd: root, timeout: 30_000, maxBuffer: 1024 * 1024 };
+        const options = { cwd: root, timeout: 30_000 };
         const results = [];
         for (const native of [false, true]) {
           rmSync(stage, { recursive: true, force: true });
-          const result = spawnSync(
+          const result = await spawnResult(
             native ? built.binaryPath : process.execPath,
             native ? [input] : ["--import", "tsx", entry, input],
             native ? { ...options, env: { ...process.env, PATH: "" } } : options,
@@ -171,24 +171,24 @@ for (const backend of ["llvm"] as const) {
         expect(results[1]!.stdout).toEqual(results[0]!.stdout);
         expect(results[1]!.stderr).toEqual(results[0]!.stderr);
       };
-      check(0, "base.o");
+      await check(0, "base.o");
       expect(readFileSync(join(stage, artifact.path))).toEqual(bytes);
       // A later replacement of the installed input cannot change staged bytes.
       writeFileSync(join(pack, artifact.path), Buffer.from("changed"));
       expect(readFileSync(join(stage, artifact.path))).toEqual(bytes);
-      check(1, "hash mismatch");
+      await check(1, "hash mismatch");
       expect(existsSync(join(stage, artifact.path))).toBe(false);
       writeFileSync(join(pack, artifact.path), bytes);
       rmSync(join(pack, "license.txt"));
-      check(1, "license payload is incomplete");
+      await check(1, "license payload is incomplete");
       writeFileSync(join(pack, "license.txt"), "license");
       rmSync(join(pack, artifact.path));
-      check(1, "artifact is missing");
+      await check(1, "artifact is missing");
       writeFileSync(join(pack, artifact.path), bytes);
       writeFileSync(toolchain, JSON.stringify({ ...config, compiler_version: "other" }));
-      check(1, "version mismatch");
+      await check(1, "version mismatch");
       writeFileSync(toolchain, JSON.stringify(config));
-      check(0, "1 1.2.3 22.1.8", "helper");
+      await check(0, "1 1.2.3 22.1.8", "helper");
       for (const [field, value] of Object.entries({
         protocol_version: "2",
         llvm_version: "0",
@@ -199,7 +199,7 @@ for (const backend of ["llvm"] as const) {
         data_layout: "other",
         host_triple: null,
       })) {
-        check(1, field, "helper", { ...version, [field]: value });
+        await check(1, field, "helper", { ...version, [field]: value });
       }
     } finally {
       rmSync(directory, { recursive: true, force: true });

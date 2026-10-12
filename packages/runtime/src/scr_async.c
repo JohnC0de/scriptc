@@ -1342,7 +1342,7 @@ static void scr_promise_all_settle(ScrAllState *st, ScrPromise *result, size_t i
       if (st->values) {
         scr_promise_fulfill_ref(result, scr_arr_retain(st->values), scr_arr_retain_v,
                                  scr_arr_release_v,
-                                 st->values->elem_trace ? scr_arr_trace_v : NULL);
+                                 st->values->cyc ? scr_arr_trace_v : NULL);
       } else {
         scr_promise_fulfill_void(result);
       }
@@ -1460,7 +1460,7 @@ ScrPromise *scr_promise_all(ScrArr *ps, ScrArr *values,
     if (st->values) {
       scr_promise_fulfill_ref(result, scr_arr_retain(st->values), scr_arr_retain_v,
                                scr_arr_release_v,
-                               st->values->elem_trace ? scr_arr_trace_v : NULL);
+                               st->values->cyc ? scr_arr_trace_v : NULL);
     } else {
       scr_promise_fulfill_void(result);
     }

@@ -32,3 +32,15 @@ rename(CONFIG);
 grow(ROWS as number[][]);
 shared.push(4);
 console.log(COUNTER.count, VIEW.length, ROWS.length, CONFIG.name);
+
+// A write at an index that may be negative, fractional or too large adds a
+// property instead of an element, so the factory's result is not fresh.
+function fill(at: number): number[] {
+  const table: number[] = [];
+  for (let i = 0; i < 4; i++) table[i] = i;
+  table[at] = -1;
+  return table;
+}
+
+const FILLED: Immutable<number[]> = fill(-1);
+console.log(FILLED.length);

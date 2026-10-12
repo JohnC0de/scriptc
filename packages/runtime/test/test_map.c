@@ -126,6 +126,36 @@ static void test_string_keys(void) {
   scr_map_release(m);
 }
 
+/* scr_map_entry_str: the entry of a string key, for generated code that
+ * reads the value slot and retains it with the value type's own retain. The
+ * lookup itself takes no reference, in linear and bucketed maps alike. */
+static void test_string_entries(void) {
+  ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_REF, scr_str_retain_v, scr_str_release_v, NULL);
+  ScrStr *missing = S("missing");
+  check(scr_map_entry_str(m, missing) == NULL, "empty map has no entry");
+  char name[16];
+  for (int i = 0; i < 40; i++) {
+    snprintf(name, sizeof name, "key%d", i);
+    ScrStr *k = S(name);
+    scr_map_set_str_ref(m, k, S(name)); /* value +1 moves in */
+    scr_str_release(k);
+    ScrStr *probe = S("key0"); /* a different object with equal bytes */
+    const ScrMapEntry *e = scr_map_entry_str(m, probe);
+    check(e != NULL, "entry found by content");
+    ScrStr *v = (ScrStr *)(uintptr_t)e->val;
+    check(v->len == 4 && memcmp(v->data, "key0", 4) == 0, "entry value slot holds the value");
+    check(v->rc == 1, "entry lookup takes no reference");
+    scr_str_release(probe);
+  }
+  check(scr_map_entry_str(m, missing) == NULL, "absent key has no entry");
+  ScrStr *k7 = S("key7");
+  check(scr_map_delete_str(m, k7), "delete");
+  check(scr_map_entry_str(m, k7) == NULL, "deleted key has no entry");
+  scr_str_release(k7);
+  scr_str_release(missing);
+  scr_map_release(m);
+}
+
 /* String keys hash to 32 bits; heap strings cache the value in their header
  * and static strings (compiler literals, runtime one-character strings)
  * carry it precomputed. The vectors are shared with the compiler's
@@ -558,6 +588,8 @@ static void test_value_keys_and_copies(void) {
 }
 
 #ifdef SCR_RC_AUDIT
+static const ScrArrOps map_arr_ops = { scr_map_retain_v, scr_map_release_v, scr_map_trace_v };
+
 static void test_identity_cycles(void) {
   scr_collect_cycles();
   long maps = scr_map_live_count();
@@ -566,7 +598,7 @@ static void test_identity_cycles(void) {
   long unions = scr_union_live_count();
   for (int mode = 0; mode < 5; mode++) {
     for (int i = 0; i < 100; i++) {
-      ScrArr *key = scr_arr_new_ref(scr_map_retain_v, scr_map_release_v, scr_map_trace_v, 0);
+      ScrArr *key = scr_arr_new_ops(&map_arr_ops, 0);
       bool wrapped = mode >= 3;
       ScrMapValKind value_kind = mode == 0 ? SCR_MAP_VAL_F64 : SCR_MAP_VAL_REF;
       ScrTraceFn value_trace = mode == 2 ? scr_arr_trace_v : NULL;
@@ -601,6 +633,7 @@ int main(void) {
   test_key_bytes();
   test_string_bucket_collisions();
   test_string_keys();
+  test_string_entries();
   test_same_value_zero();
   test_span_keys();
   test_string_hash_cache();
