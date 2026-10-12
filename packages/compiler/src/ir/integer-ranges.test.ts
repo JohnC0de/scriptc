@@ -430,6 +430,30 @@ test("whole-program slot facts seed parameters, field reads and call results", (
   expect([seeded.get(field), seeded.get(result), seeded.get(param)]).toEqual([INT32, INT32, INT32]);
 });
 
+test("string lengths and found indices are int32, other string reads stay unknown", () => {
+  const text: IrExpr = { loc, kind: "strLit", value: "abc", type: STRING };
+  const read = (method: "length" | "indexOf" | "charCodeAt", args: IrExpr[] = []): IrExpr => ({
+    loc,
+    kind: "strIntrinsic",
+    method,
+    receiver: text,
+    args,
+    type: F64,
+  });
+  const length = read("length");
+  const found = read("indexOf", [{ loc, kind: "strLit", value: "b", type: STRING }]);
+  const code = read("charCodeAt", [num(0)]);
+  const next = bin("+", length, num(1));
+  const ranges = analyzeIntegerRanges(
+    fn([observe(length), observe(found), observe(code), observe(next)]),
+  );
+  expect(ranges.get(length)).toEqual({ min: 0, max: 2147483647 });
+  expect(ranges.get(found)).toEqual({ min: -1, max: 2147483647 });
+  // charCodeAt can be NaN.
+  expect(ranges.get(code)).toBeNull();
+  expect(ranges.get(next)).toEqual({ min: 1, max: 2147483648 });
+});
+
 const BITWISE: Record<BitwiseOp, (left: number, right: number) => number> = {
   "&": (left, right) => left & right,
   "|": (left, right) => left | right,
@@ -530,8 +554,8 @@ test("bitwise ranges keep known operand ranges", () => {
   const analyzed = analyzeIntegerRanges(
     fn([observe(truncated), observe(half), observe(bin("|", ref("unknown"), num(0)))]),
   );
-  expect(analyzed.get(truncated)).toEqual({ min: 0, max: 2 ** 30 });
-  expect(analyzed.get(half)).toEqual({ min: 0, max: 2 ** 29 });
+  expect(analyzed.get(truncated)).toEqual({ min: 0, max: 2 ** 31 - 1 });
+  expect(analyzed.get(half)).toEqual({ min: 0, max: 2 ** 30 - 1 });
 });
 
 test("bitwise identity operands follow ToInt32 and the shift-count mask", () => {

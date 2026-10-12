@@ -13,7 +13,10 @@ export type IntegerRanges = ReadonlyMap<IrExpr, IntegerRange | null>;
 const SIGNED: IntegerRange = { min: -2147483648, max: 2147483647 };
 const UNSIGNED: IntegerRange = { min: 0, max: 4294967295 };
 const EXACT_LIMIT = 2 ** 53;
-const STRING_LENGTH_LIMIT = 2 ** 30;
+/** The most UTF-16 code units a runtime string holds: SCR_STR_MAX_CAP
+ * (scr_runtime.h) caps a string's UTF-8 bytes, and a UTF-16 length never
+ * exceeds the UTF-8 byte length. */
+const STRING_MAX_UNITS = 0x7fffffff;
 type Facts = Map<string, IntegerRange>;
 
 function union(left: IntegerRange, right: IntegerRange): IntegerRange {
@@ -530,16 +533,6 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
         }
         break;
       }
-      case "strIntrinsic": {
-        // Node's strings hold at most 2^29 - 24 code units (V8's limit).
-        expr(e.receiver, facts);
-        for (const arg of e.args) expr(arg, facts);
-        if (e.type.kind === "f64") {
-          if (e.method === "length") range = { min: 0, max: STRING_LENGTH_LIMIT };
-          else if (e.method === "indexOf") range = { min: -1, max: STRING_LENGTH_LIMIT };
-        }
-        break;
-      }
       case "bytesIntrinsic": {
         expr(e.receiver, facts);
         for (const arg of e.args) expr(arg, facts);
@@ -573,6 +566,27 @@ export function analyzeIntegerRanges(fn: IrFunction, slots: IntegerSlotFacts = {
           },
         );
         if (e.method === "length") range = UNSIGNED;
+        break;
+      case "strIntrinsic":
+        // The conservative child handling of unknown forms; only the result
+        // range is new: a length or a found index is an int32.
+        havoc(facts, [e], facts);
+        everyExprChild(
+          e,
+          (child) => {
+            expr(child, new Map(facts));
+            return true;
+          },
+          (child) => {
+            body([child], new Map(facts));
+            return true;
+          },
+        );
+        if (e.type.kind === "f64") {
+          if (e.method === "length") range = { min: 0, max: STRING_MAX_UNITS };
+          // An empty needle is found at the clamped position, up to the length.
+          else if (e.method === "indexOf") range = { min: -1, max: STRING_MAX_UNITS };
+        }
         break;
       case "fieldGet":
         expr(e.obj, facts);

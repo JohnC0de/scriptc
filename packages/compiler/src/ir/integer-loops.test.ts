@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { BOOL, F64, arrayOf, type IrExpr, type IrLocal, type IrStmt } from "./ir.js";
+import { BOOL, F64, STRING, arrayOf, type IrExpr, type IrLocal, type IrStmt } from "./ir.js";
 import { matchIntegerArrayForLoop, matchIntegerCountedForLoop } from "./integer-loops.js";
 
 const loc = { file: "integer-array-loop.ts", start: 0, end: 0 };
@@ -181,4 +181,30 @@ test("an unproven start versions the loop on an exact integer start", () => {
   large.init = { kind: "varDecl", localId: "i", init: ref("start"), loc };
   large.body = Array.from({ length: 81 }, () => large.body[0]!);
   expect(matchIntegerCountedForLoop(large, withStart)).toBeNull();
+});
+
+test("a string read at the counter is an integer consumer", () => {
+  const withText = new Map(locals);
+  withText.set("limit", { id: "limit", name: "limit", type: F64, mutable: true });
+  withText.set("s", { id: "s", name: "s", type: STRING, mutable: false });
+  const read = (index: IrExpr): IrStmt => ({
+    kind: "exprStmt",
+    expr: {
+      kind: "strIntrinsic",
+      method: "charCodeAt",
+      receiver: { kind: "varRef", localId: "s", type: STRING, loc },
+      args: [index],
+      type: F64,
+      loc,
+    },
+    loc,
+  });
+  const s = counted(ref("limit"));
+  s.body = [read(ref("i"))];
+  expect(matchIntegerCountedForLoop(s, withText)?.localId).toBe("i");
+  s.body = [read({ kind: "bin", op: "+", left: ref("i"), right: number(1), type: F64, loc })];
+  expect(matchIntegerCountedForLoop(s, withText)?.localId).toBe("i");
+  // A read at another index does not consume the counter.
+  s.body = [read(ref("limit"))];
+  expect(matchIntegerCountedForLoop(s, withText)).toBeNull();
 });

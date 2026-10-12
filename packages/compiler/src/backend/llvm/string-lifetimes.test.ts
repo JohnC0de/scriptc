@@ -306,7 +306,10 @@ const methodCases: {
   inline?: boolean;
 }[] = [
   { method: "length", args: [], result: F64, target: "utf16_len", inline: true },
-  { method: "charCodeAt", args: [num(1)], result: F64, target: "char_code_at", inline: true },
+  // An exact integer index skips the double conversion; any other index
+  // enters through the double ABI.
+  { method: "charCodeAt", args: [num(1)], result: F64, target: "char_code_at_int", inline: true },
+  { method: "charCodeAt", args: [num(1.5)], result: F64, target: "char_code_at", inline: true },
   { method: "charAt", args: [num(1)], result: STRING, target: "char_at" },
   { method: "indexOf", args: [ref("argument"), num(1)], result: F64, target: "index_of" },
   { method: "includes", args: [ref("argument")], result: BOOL, target: "includes" },
@@ -340,7 +343,7 @@ const methodCases: {
 ];
 
 test.each(methodCases)(
-  "$method passes borrowed string inputs through its runtime ABI",
+  "$method ($target) passes borrowed string inputs through its runtime ABI",
   ({ method, args, result, target, inline }) => {
     const f = fn(
       "method",
