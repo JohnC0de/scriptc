@@ -8,9 +8,10 @@
  * `undefined`, sparse indices, noncanonical numeric properties (negative,
  * fractional, NaN, infinite, 2^32-1), and out-of-range reads branch to the
  * unchanged runtime call, which is marked cold. The ScrArr field indices
- * match the C layout in scr_runtime.h: len 1, cap 2, data 7, present 8. */
+ * (SCR_ARR_FIELD) match the C layout in scr_runtime.h. */
 
 import { isRefCounted, type IrExpr, type IrType } from "../../ir/ir.js";
+import { SCR_ARR_FIELD } from "./common.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import { exactInteger, widenInteger } from "./integer-values.js";
 
@@ -85,10 +86,14 @@ function emitDenseGuard(
     data = B.tmp(),
     statesPtr = B.tmp(),
     states = B.tmp();
-  B.line(`${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 7`);
+  B.line(
+    `${dataPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.data}`,
+  );
   host.markMemoryPointer(dataPtr, "array:header");
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
-  B.line(`${statesPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 8`);
+  B.line(
+    `${statesPtr} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${SCR_ARR_FIELD.present}`,
+  );
   host.markMemoryPointer(statesPtr, "array:header");
   B.line(`${states} = load ptr, ptr ${statesPtr}${host.fieldAliasAttachment(statesPtr)}`);
   const widen = (value: string): string => {
@@ -389,9 +394,9 @@ export function emitDenseArrayPush(
     join = B.newLabel("arr.push.join");
   B.condBr(room, fast, slow);
   B.startBlock(fast);
-  const dataPtr = header(7),
+  const dataPtr = header(SCR_ARR_FIELD.data),
     data = B.tmp(),
-    statesPtr = header(8),
+    statesPtr = header(SCR_ARR_FIELD.present),
     states = B.tmp();
   B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
   B.line(`${states} = load ptr, ptr ${statesPtr}${host.fieldAliasAttachment(statesPtr)}`);

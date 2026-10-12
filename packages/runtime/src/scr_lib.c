@@ -4702,7 +4702,8 @@ int scr_fs_symlink_infer(ScrStr *absolute) {
 
 void scr_fs_symlink(ScrStr *target, ScrStr *destination, int kind) {
 #ifdef _WIN32
-  ScrArr *parts = scr_arr_new_ref(scr_str_retain_v, scr_str_release_v, NULL, 3);
+  static const ScrArrOps str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
+  ScrArr *parts = scr_arr_new_ops(&str_ops, 3);
   scr_arr_push_ref(parts, scr_str_retain(destination));
   scr_arr_push_ref(parts, scr_str_new("..", 2));
   scr_arr_push_ref(parts, scr_str_retain(target));
@@ -7545,12 +7546,12 @@ ScrArr *scr_set_to_arr_str(const ScrMap *s) {
   return out;
 }
 
-ScrArr *scr_set_to_arr_ref(const ScrMap *s) {
-  ScrArr *out = scr_arr_new_ref(s->key_retain, s->key_release, s->key_trace, s->nlive);
+ScrArr *scr_set_to_arr_ref(const ScrMap *s, const ScrArrOps *ops) {
+  ScrArr *out = scr_arr_new_ops(ops, s->nlive);
   if (scr_set_to_arr_sparse(s, out)) return out;
   for (size_t i = 0; i < s->nentries; i++) {
     if (!s->entries[i].hash) continue;
-    s->key_retain((void *)(uintptr_t)s->entries[i].key);
+    ops->retain((void *)(uintptr_t)s->entries[i].key);
     out->data[out->len] = s->entries[i].key;
     out->present[out->len++] = SCR_ARR_VALUE;
   }

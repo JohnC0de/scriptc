@@ -396,11 +396,14 @@ static MockRec *mock_cyc_new(int value) {
   return r;
 }
 
+static const ScrArrOps mock_ops = { &mock_retain, &mock_release, NULL };
+static const ScrArrOps mock_cyc_ops = { &mock_cyc_retain, &mock_cyc_release, &mock_trace };
+
 static void test_ref_elements(void) {
 #ifdef SCR_RC_AUDIT
   long arrays0 = scr_arr_live_count();
 #endif
-  ScrArr *a = scr_arr_new_ref(&mock_retain, &mock_release, NULL, 0);
+  ScrArr *a = scr_arr_new_ops(&mock_ops, 0);
   scr_arr_push_ref(a, mock_new(1)); /* ownership moves in */
   scr_arr_push_ref(a, mock_new(2));
   check_f64(scr_arr_len(a), 2, "ref push grows");
@@ -446,7 +449,7 @@ static void test_ref_cycle(void) {
   long arrays0 = scr_arr_live_count();
 #endif
   /* arr -> rec -> arr: drop the external references, then collect. */
-  ScrArr *arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 0);
+  ScrArr *arr = scr_arr_new_ops(&mock_cyc_ops, 0);
   MockRec *rec = mock_cyc_new(7);
   rec->owner = (ScrArr *)scr_arr_retain(arr); /* rec points back at arr */
   scr_arr_push_ref(arr, rec);                 /* arr owns rec */
@@ -466,7 +469,7 @@ static void test_ref_truncate_cycle(void) {
   /* The truncation release runs while the record points back at the array.
    * The array edge must be detached before mock_cyc_release can trigger the
    * cycle collector. */
-  ScrArr *arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 0);
+  ScrArr *arr = scr_arr_new_ops(&mock_cyc_ops, 0);
   MockRec *rec = mock_cyc_new(8);
   rec->owner = (ScrArr *)scr_arr_retain(arr);
   scr_arr_push_ref(arr, rec);
@@ -481,7 +484,7 @@ static void test_ref_truncate_cycle(void) {
 
 static void test_ref_trace_storage_boundaries(void) {
   long before = mock_live;
-  ScrArr *arr = scr_arr_new_ref(&mock_cyc_retain, &mock_cyc_release, &mock_trace, 4096);
+  ScrArr *arr = scr_arr_new_ops(&mock_cyc_ops, 4096);
   MockRec *dense = mock_cyc_new(1);
   MockRec *sparse = mock_cyc_new(2);
   MockRec *property = mock_cyc_new(3);

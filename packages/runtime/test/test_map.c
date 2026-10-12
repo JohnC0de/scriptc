@@ -558,6 +558,8 @@ static void test_value_keys_and_copies(void) {
 }
 
 #ifdef SCR_RC_AUDIT
+static const ScrArrOps map_arr_ops = { scr_map_retain_v, scr_map_release_v, scr_map_trace_v };
+
 static void test_identity_cycles(void) {
   scr_collect_cycles();
   long maps = scr_map_live_count();
@@ -566,7 +568,7 @@ static void test_identity_cycles(void) {
   long unions = scr_union_live_count();
   for (int mode = 0; mode < 5; mode++) {
     for (int i = 0; i < 100; i++) {
-      ScrArr *key = scr_arr_new_ref(scr_map_retain_v, scr_map_release_v, scr_map_trace_v, 0);
+      ScrArr *key = scr_arr_new_ops(&map_arr_ops, 0);
       bool wrapped = mode >= 3;
       ScrMapValKind value_kind = mode == 0 ? SCR_MAP_VAL_F64 : SCR_MAP_VAL_REF;
       ScrTraceFn value_trace = mode == 2 ? scr_arr_trace_v : NULL;
