@@ -43,6 +43,7 @@ extern long scr_map_live_count(void);     /* scr_map.c */
 extern long scr_box_live_count(void);     /* scr_closure.c */
 extern long scr_closure_live_count(void); /* scr_closure.c */
 extern long scr_obj_live_count(void);     /* scr_object.c */
+extern long scr_obj_lifetime_count(void); /* scr_object.c */
 extern long scr_union_live_count(void);   /* scr_union.c */
 extern long scr_dyn_live_count(void);     /* scr_json.c */
 extern long scr_bytes_live_count(void);   /* scr_bytes.c */
@@ -57,6 +58,15 @@ static void scr_rc_audit_at_exit(void) {
   if (scr_abandoned_fibers > 0) {
     fprintf(stderr, "scriptc RC audit skipped: %ld fiber(s) never resumed\n",
             scr_abandoned_fibers);
+    return;
+  }
+  /* ProgramLifetime instances (@scriptc/types) are never freed, and neither
+   * is anything they hold: a strict audit would only report that deliberate
+   * retention. */
+  long lifetime = scr_obj_lifetime_count();
+  if (lifetime > 0) {
+    fprintf(stderr, "scriptc RC audit skipped: %ld program-lifetime object(s) never freed\n",
+            lifetime);
     return;
   }
   long strings = scr_str_live_count();

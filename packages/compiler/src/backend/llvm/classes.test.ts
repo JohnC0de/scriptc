@@ -123,7 +123,12 @@ test("ProgramLifetime hierarchies are immortal from construction and take no ref
     expect(nw, cls).toContain("store i64 -1, ptr %o");
     expect(nw, cls).not.toContain("scr_cyc_alloc");
     expect(llvm, cls).not.toContain(`@${mangleClassTrace(cls)}.cyctype`);
+    // The RC audit (sanitize builds) learns that the program keeps
+    // program-lifetime objects; other builds emit nothing for it.
+    expect(nw, cls).toContain("call void @scr_obj_lifetime_note(ptr %o)");
   }
+  const plain = emitLlvmModule(mod, { pointerBits: 64, objectAudit: false });
+  expect(plain).not.toContain("scr_obj_lifetime_note");
   // The mortal Owner keeps its header, counts and possible-root step.
   expect(body(mangleClassNew("Owner"))).toContain("store i64 1, ptr %o");
   expect(body(mangleClassNew("Owner"))).toContain("scr_cyc_alloc");

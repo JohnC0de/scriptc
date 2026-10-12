@@ -632,6 +632,13 @@ export function emitClassShapes(
       ),
     );
     nw.push(`  store ${host.sizeType} ${lifetime ? -1 : 1}, ptr %o`);
+    if (lifetime && audit) {
+      // --sanitize builds: the RC audit skips its leak report when the
+      // program keeps program-lifetime objects (scr_console.c), and
+      // LeakSanitizer scans them as roots (scr_object.c).
+      host.declare(`declare void @scr_obj_lifetime_note(ptr)`);
+      nw.push(`  call void @scr_obj_lifetime_note(ptr %o)`);
+    }
     if (meta.hierarchy) {
       nw.push(
         `  %vtp = getelementptr inbounds %${struct}, ptr %o, i64 0, i32 1`,

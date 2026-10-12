@@ -5416,8 +5416,13 @@ long scr_dyn_live_count(void);
  */
 void scr_obj_alloc_note(void);
 void scr_obj_free_note(void);
+/* Emitted by the RC-audit lane's ProgramLifetime constructors, after the
+ * allocation note: such instances are never freed (the exit audit skips its
+ * leak report, and LeakSanitizer scans them as roots). */
+void scr_obj_lifetime_note(const void *obj);
 #ifdef SCR_RC_AUDIT
 long scr_obj_live_count(void);
+long scr_obj_lifetime_count(void);
 #else
 /* Only the RC audit lane counts live objects. Other runtimes keep the
  * out-of-line no-op symbols for direct-emission objects that still call
