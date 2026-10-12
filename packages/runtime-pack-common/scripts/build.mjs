@@ -7,7 +7,11 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createRuntimePackMatrix } from "../runtime-pack-matrix.mjs";
-import { assertArtifactsExcludeStrings } from "./artifact-policy.mjs";
+import {
+  RUNTIME_COMPILE_FLAGS,
+  assertArtifactsExcludeStrings,
+  runtimeForbiddenStrings,
+} from "./artifact-policy.mjs";
 import { createDeterministicArchive } from "./archive.mjs";
 import { buildRuntimeUnit, resolveRuntimeUnitHelper } from "./runtime-unit.mjs";
 import { installRuntimePack, withBuildLock } from "./build-state.mjs";
@@ -48,6 +52,7 @@ async function build() {
   const commonFlags = [
     ...config.targetArgs,
     ...(config.compilerFlags ?? []),
+    ...RUNTIME_COMPILE_FLAGS,
     "-std=c11",
     ...(config.threadArgs ?? []),
     "-fno-math-errno",
@@ -300,6 +305,7 @@ async function build() {
     const vendorTarget = [
       ...config.targetArgs,
       ...(config.compilerFlags ?? []),
+      ...RUNTIME_COMPILE_FLAGS,
       "-g0",
       ...codeAlignment,
       ...(config.runtimeDefines ?? []).map((define) => `-D${define}`),
@@ -361,7 +367,10 @@ async function build() {
                 ]
               : []),
           ];
-    await assertArtifactsExcludeStrings(stagedOutputRoot, config.forbiddenArtifactStrings ?? []);
+    await assertArtifactsExcludeStrings(
+      stagedOutputRoot,
+      runtimeForbiddenStrings(config.forbiddenArtifactStrings),
+    );
     const archiveSpecs = new Map(matrix.archives.map((entry) => [entry.id, entry]));
     const licensed = [
       [join(runtimeRoot, "LICENSE"), "artifacts/licenses/scriptc-runtime.txt", "Apache-2.0"],
