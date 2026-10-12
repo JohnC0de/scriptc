@@ -3,7 +3,7 @@ scriptc coverage tests/coverage-fixtures/divergences.ts
   statements analyzed   18
   compile statically    18  (100%)
 
-  fully static — this program has no dynamic remainder.
+  fully static — all analyzed statements compile to native code.
 
   differs from Node   8 sites (compiles; the native program can behave differently)
       ×1  SC6001  passing a 'Tagged' where 'Labeled' is expected copies the object (a narrower record shape compiles as a field copy): the write to 'target.label' updates only the copy, while under Node it updates the…

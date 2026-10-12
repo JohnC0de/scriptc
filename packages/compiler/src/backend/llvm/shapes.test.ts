@@ -27,7 +27,7 @@ function declarationHost(
     tracedShapes: new Set(),
     tracedUnions: new Set(),
     nullableUnions: new NullableUnions({
-      irVersion: 15,
+      irVersion: 16,
       sourceFile: "test.ts",
       functions: [],
       entry: "main",
@@ -170,7 +170,7 @@ describe("LLVM runtime RC symbols", () => {
 describe("emitted object releases", () => {
   test("a surviving headered record enqueues only when not already buffered", () => {
     const mod: IrModule = {
-      irVersion: 15,
+      irVersion: 16,
       sourceFile: "cycle.ts",
       entry: "main",
       functions: [],
@@ -192,7 +192,7 @@ describe("emitted object releases", () => {
 
 describe("live-object audit notes", () => {
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: "audit.ts",
     entry: "main",
     functions: [],

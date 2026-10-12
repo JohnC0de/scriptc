@@ -63,11 +63,10 @@ const featureCalls: readonly [string, IrLibFn][] = [
 ];
 
 test("the production runtime dependency scanners lower entirely statically", () => {
-  const { coverage } = analyze(entry, { dynamic: false });
+  const { coverage } = analyze(entry, {});
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(150);
   expect(coverage.stats.statementsFailed).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -81,7 +80,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: join(dir, process.platform === "win32" ? "features.exe" : "features"),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });
@@ -182,22 +180,6 @@ for (const backend of ["llvm"] as const) {
         loc,
       });
       check("ordinary string data is not IR", strings, [], none);
-      const embedded = empty();
-      embedded.embedded = {
-        modules: [{ key: "package", source: "/* fetch() */", format: "esm" }],
-        edges: [],
-      };
-      check("embedded text is not a capability fact", embedded, [], ["fetch", "zlib"]);
-      embedded.embedded.modules[0]!.usesFetch = true;
-      check("embedded fetch fact survives serialization", embedded, ["fetch"]);
-      embedded.embedded.edges.push({
-        from: "package",
-        specifier: "node:zlib",
-        to: "node:zlib",
-        kind: "import",
-      });
-      check("embedded builtin edge survives serialization", embedded, ["fetch", "zlib"]);
-
       // Audit genuine frontend output too, including closure tables,
       // recursive types, metadata and JSON callback helper functions.
       for (const [source, feature] of [
@@ -212,7 +194,6 @@ for (const backend of ["llvm"] as const) {
           outDir: dir,
           outPath: path,
           outputKind: "ir",
-          dynamic: false,
         });
         if (!emitted.ok)
           throw new Error(emitted.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

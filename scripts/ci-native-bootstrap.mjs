@@ -33,7 +33,14 @@ export async function runNativeBootstrapChecks(plan, checks) {
   const failures = results
     .filter((result) => result.status === "rejected")
     .map((result) => result.reason);
-  if (failures.length) throw new AggregateError(failures, "native bootstrap phases failed");
+  if (failures.length) {
+    const details = results.flatMap((result, index) =>
+      result.status === "rejected"
+        ? [`${plan.phases[index]}: ${result.reason?.stack ?? result.reason}`]
+        : [],
+    );
+    throw new AggregateError(failures, `native bootstrap phases failed\n${details.join("\n")}`);
+  }
 }
 
 export async function runBootstrapAndPackageChecks({

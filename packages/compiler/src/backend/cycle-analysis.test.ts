@@ -21,7 +21,7 @@ import { computeTraced as llvmTraced } from "./llvm/shapes.js";
 const loc = { file: "cycles.ts", start: 0, end: 1 };
 function module(): IrModule {
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [{ name: "main", locals: [], params: [], returnType: VOID, body: [], loc }],
@@ -689,6 +689,43 @@ test("library builds keep the mutable-graph analysis", () => {
   const mod = tree();
   mod.lib = {} as NonNullable<IrModule["lib"]>;
   checkExact(mod, ["object:Tree"], ["link"]);
+});
+
+test("ProgramLifetime hierarchies are leaves: never traced and never closing a cycle", () => {
+  const mod = module();
+  const node: IrType = { kind: "object", className: "Node" };
+  const sym: IrType = { kind: "object", className: "Sym" };
+  const scope: IrType = { kind: "object", className: "Scope" };
+  mod.classes = [
+    {
+      name: "Node",
+      loc,
+      fields: [
+        { name: "parent", type: node },
+        { name: "symbol", type: sym },
+        { name: "visit", type: funcOf([], VOID) },
+      ],
+    },
+    { name: "Name", loc, base: "Node", fields: [{ name: "text", type: STRING }] },
+    { name: "Sym", loc, fields: [{ name: "declarations", type: arrayOf(node) }] },
+    {
+      name: "Scope",
+      loc,
+      fields: [
+        { name: "parent", type: scope },
+        { name: "symbols", type: mapOf(STRING, sym) },
+      ],
+    },
+  ];
+  mod.records = [shape("holder", [arrayOf(node), mapOf(STRING, sym)])];
+  // Without the contract the intrinsic callback field makes everything that
+  // reaches Node traced.
+  check(mod, ["object:Node", "object:Name", "object:Sym", "object:Scope", "record:holder"]);
+  // With it, Node and Sym are never freed: edges into them cannot close a
+  // garbage cycle, and the collector never walks their fields. Only the
+  // mortal Scope cycle remains.
+  mod.contracts = { programLifetime: ["Node", "Sym"] };
+  check(mod, ["object:Scope"]);
 });
 
 test("explanations name a cycle through a mutable edge, or the intrinsic field reached", () => {

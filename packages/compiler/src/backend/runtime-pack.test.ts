@@ -27,13 +27,11 @@ import { MACOS_ARM64_TARGET, WINDOWS_X64_MSVC_TARGET, type NativeTargetSpec } fr
 const VERSION = compilerReleaseVersion();
 
 const BASE: NativeLinkFeatures = {
-  dynamic: false,
   regex: false,
   copying: false,
   textDecoderLegacy: false,
   fileHandle: false,
   fetch: false,
-  netIsland: false,
   zlib: false,
   assert: false,
   inspect: false,
@@ -81,9 +79,9 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
   };
   const base = await artifact("artifacts/base.o", "base");
   const legacy = await artifact("artifacts/legacy.o", "legacy");
-  const dynamic = await artifact("artifacts/dynamic.o", "dynamic");
+  const fileHandle = await artifact("artifacts/fileHandle.o", "fileHandle");
   const regex = await artifact("artifacts/regex.a", "regex");
-  const quickjs = await artifact("artifacts/qjs.a", "qjs");
+  const zlib = await artifact("artifacts/zlib.a", "zlib");
   await writeFile(join(root, "license.txt"), "license");
   const units = [
     {
@@ -97,7 +95,12 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
           defines: ["SCR_TEXT_DECODER_LEGACY"],
           ...legacy,
         },
-        { id: "dynamic", when: { dynamic: true }, defines: ["SCR_DYNAMIC"], ...dynamic },
+        {
+          id: "fileHandle",
+          when: { fileHandle: true },
+          defines: ["SCR_TEST_FILE_HANDLE"],
+          ...fileHandle,
+        },
       ],
     },
   ];
@@ -113,14 +116,14 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
       object_format: target.objectFormat,
       minimum_os: target.minimumOs,
     },
-    runtime_abi: { version: 13, marker: "scr_runtime_abi_v13" },
+    runtime_abi: { version: 14, marker: "scr_runtime_abi_v14" },
     compiler: {
       command: "clang",
       identity: "fixture clang",
       target: target.llvmTriple,
     },
     macros: {
-      executable: ["SCR_DYNAMIC", "SCR_TEXT_DECODER_LEGACY"],
+      executable: ["SCR_TEST_FILE_HANDLE", "SCR_TEXT_DECODER_LEGACY"],
       excluded: ["SCR_LIB", "SCR_THREAD_INSTANCES", "SCR_RC_AUDIT"],
       sanitizer: "external-toolchain-required",
     },
@@ -129,8 +132,8 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
       dev: { optimization: "-O0", runtime_units: units },
     },
     archives: [
-      { id: "libregexp", predicate: { all: ["regex"], not: ["dynamic"] }, ...regex },
-      { id: "quickjs", predicate: "dynamic", ...quickjs },
+      { id: "libregexp", predicate: { all: ["regex"], not: ["fileHandle"] }, ...regex },
+      { id: "zlib", predicate: "fileHandle", ...zlib },
     ],
     system_libraries: [{ name: "System", predicate: true }],
     licenses: [{ path: "license.txt", license: "fixture" }],
@@ -180,10 +183,9 @@ describe("runtime pack manifests", () => {
   });
 
   test("feature implications and predicates are deterministic", () => {
-    const features = effectiveRuntimeFeatures({ ...BASE, dynamic: true, fetch: true });
+    const features = effectiveRuntimeFeatures({ ...BASE, fileHandle: true, fetch: true });
     expect(features).toMatchObject({
       nativeFetch: true,
-      netIslandEffective: true,
       netEffective: true,
       httpEffective: true,
       tlsEffective: true,
@@ -191,7 +193,7 @@ describe("runtime pack manifests", () => {
       zlibEffective: true,
     });
     expect(evaluateRuntimePredicate({ all: ["fetch"], not: ["regex"] }, features)).toBe(true);
-    expect(evaluateRuntimePredicate({ any: ["regex", "dynamic"] }, features)).toBe(true);
+    expect(evaluateRuntimePredicate({ any: ["regex", "fileHandle"] }, features)).toBe(true);
   });
 
   test("static runtime-pack executable links dead-strip too", async () => {
@@ -238,15 +240,17 @@ describe("runtime pack manifests", () => {
     });
     expect(legacy.runtimeObjects.map((path) => path.split("/").at(-1))).toEqual(["legacy.o"]);
     expect(legacy.archives.map((path) => path.split("/").at(-1))).toEqual(["regex.a"]);
-    const dynamic = await loadRuntimePack({
+    const fileHandle = await loadRuntimePack({
       target: MACOS_ARM64_TARGET,
-      features: { ...BASE, dynamic: true, regex: true },
+      features: { ...BASE, fileHandle: true, regex: true },
       optimization: "dev",
       resolver,
     });
-    expect(dynamic.flavor).toBe("dev");
-    expect(dynamic.runtimeObjects.map((path) => path.split("/").at(-1))).toEqual(["dynamic.o"]);
-    expect(dynamic.archives.map((path) => path.split("/").at(-1))).toEqual(["qjs.a"]);
+    expect(fileHandle.flavor).toBe("dev");
+    expect(fileHandle.runtimeObjects.map((path) => path.split("/").at(-1))).toEqual([
+      "fileHandle.o",
+    ]);
+    expect(fileHandle.archives.map((path) => path.split("/").at(-1))).toEqual(["zlib.a"]);
   });
 
   test("runtime bitcode follows the selected speed variant and is verified", async () => {
@@ -306,7 +310,7 @@ describe("runtime pack manifests", () => {
     expect(
       await loadRuntimeBitcode({
         target: MACOS_ARM64_TARGET,
-        features: { ...BASE, dynamic: true },
+        features: { ...BASE, fileHandle: true },
         resolver,
       }),
     ).toBeNull();
@@ -691,9 +695,7 @@ test("library runtime selection requires dedicated packs and never substitutes e
   await writeFile(join(f.root, "runtime-pack.json"), JSON.stringify(f.manifest));
   const threaded = await loadRuntimePack({ ...options, mode: "library-thread" });
   expect(threaded.runtimeObjects.map((path) => basename(path))).toEqual(["base.o"]);
-  await expect(
-    loadRuntimePack({ ...options, features: { ...BASE, dynamic: true }, mode: "library" }),
-  ).rejects.toThrow("do not support dynamic");
+
   delete f.manifest.flavors.release;
   delete f.manifest.flavors.dev;
   await writeFile(join(f.root, "runtime-pack.json"), JSON.stringify(f.manifest));

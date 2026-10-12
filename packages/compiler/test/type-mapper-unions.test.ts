@@ -65,7 +65,6 @@ function context(): TypeMapperCtx {
     shapes: new ShapeRegistry(),
     unions: new UnionRegistry(),
     classNamer: (decl) => decl.name?.text ?? "anonymous",
-    dynamic: false,
     typeMemo: new Map(),
     isStdlibFile: (sf) => load.program.isSourceFileDefaultLibrary(sf),
     isNpmFile: () => false,
@@ -82,16 +81,13 @@ function mapped(name: string, ctx: TypeMapperCtx): IrType & { kind: "union" } {
 test("primitive mapping preserves template widening and mixed enum member domains", () => {
   const ctx = context();
   ctx.canMemoizeType = () => false;
-  for (const dynamic of [false, true]) {
-    ctx.dynamic = dynamic;
-    expect(mapType(aliases.get("PrimitiveText")!, ctx)).toEqual({ kind: "string" });
-    expect(mapType(aliases.get("PrimitiveNumber")!, ctx)).toEqual({ kind: "f64" });
-    expect(mapType(aliases.get("PrimitiveBoolean")!, ctx)).toEqual({ kind: "bool" });
-    expect(mapType(aliases.get("TemplateText")!, ctx)).toEqual({ kind: "string" });
-    const enumType = mapped("EnumValue", ctx);
-    expect(mapType(aliases.get("EnumMember")!, ctx)).toEqual(enumType);
-    expect(ctx.unions.get(enumType.unionId)!.arms).toEqual([{ kind: "f64" }, { kind: "string" }]);
-  }
+  expect(mapType(aliases.get("PrimitiveText")!, ctx)).toEqual({ kind: "string" });
+  expect(mapType(aliases.get("PrimitiveNumber")!, ctx)).toEqual({ kind: "f64" });
+  expect(mapType(aliases.get("PrimitiveBoolean")!, ctx)).toEqual({ kind: "bool" });
+  expect(mapType(aliases.get("TemplateText")!, ctx)).toEqual({ kind: "string" });
+  const enumType = mapped("EnumValue", ctx);
+  expect(mapType(aliases.get("EnumMember")!, ctx)).toEqual(enumType);
+  expect(ctx.unions.get(enumType.unionId)!.arms).toEqual([{ kind: "f64" }, { kind: "string" }]);
 });
 
 describe("checker and synthesized optional union identity", () => {

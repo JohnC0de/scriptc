@@ -33,6 +33,11 @@ Contract types are type aliases that mean nothing to TypeScript or Node.js but a
       <td>No chain of references leads from an object of the class or type back to itself.</td>
       <td>Its objects carry no cycle-collector header and are freed by reference counting alone.</td>
     </tr>
+    <tr>
+      <td><code>ProgramLifetime</code></td>
+      <td>Instances of the class are kept until the program exits.</td>
+      <td>Instances are immortal from construction: no reference counting, no cycle collection, never freed.</td>
+    </tr>
   </tbody>
 </table>
 
@@ -117,6 +122,8 @@ scriptc recognizes a contract where it is written as the annotation of a declara
   <dd>Parameters, variables, class instance fields and function results.</dd>
   <dt><code>Acyclic</code></dt>
   <dd>Classes (<code>class C implements Acyclic</code>), interfaces (<code>interface I extends Acyclic</code>) and object type aliases (<code>type T = Acyclic&lt;...&gt;</code> over an object type).</dd>
+  <dt><code>ProgramLifetime</code></dt>
+  <dd>The <code>implements</code> clause of a class declaration: <code>class Node implements ProgramLifetime</code>.</dd>
 </dl>
 
 A contract anywhere else (a type alias, an interface member, an element or type argument such as `Int32[]`, a function type) would promise something scriptc does not check, so the build reports it with SC7006.
@@ -251,6 +258,37 @@ $ scriptc build graph.ts
 1 error.
 ```
 
+## ProgramLifetime
+
+`ProgramLifetime` marks a class whose instances a program keeps until it exits, such as the nodes of a syntax tree, the symbols of a symbol table or interned types. scriptc then never reference counts, collects or frees instances of the class and of its subclasses: they are never freed, every retain and release on them compiles to nothing, and the cycle collector neither walks them nor needs to trace the objects that point to them. Node.js behavior is unchanged; only memory use differs, because an instance the program drops is never reclaimed.
+
+```ts:tree.ts
+import type { ProgramLifetime } from "@scriptc/types";
+
+abstract class SyntaxNode implements ProgramLifetime {
+  parent: SyntaxNode | undefined = undefined;
+}
+
+class Identifier extends SyntaxNode {
+  readonly text: string;
+  constructor(text: string) {
+    super();
+    this.text = text;
+  }
+}
+```
+
+scriptc checks that the promise cannot change what the program computes (SC7008):
+
+- the class is the root of its hierarchy, so every value of any class type in the hierarchy is program-lifetime; built-in bases such as `Error`, `EventEmitter` and streams are refused because they hold runtime state that is released with the object;
+- the build is an executable: a library's host decides when the objects it receives are released.
+
+A class can be both `ProgramLifetime` and `Acyclic`. `Acyclic` is still checked against the references the program writes, so a chain of references that passes through a program-lifetime instance and leads back is still a cycle (SC7007).
+
+Instances can be published to other threads with `@scriptc/threads` like other class instances: `publish()` makes them immutable and shares them by reference, writes to a published instance throw the same `TypeError` as under Node.js, and instances that were not published stay writable and are cloned by `postMessage` and `workerData`.
+
+Static code has no `WeakRef` or `FinalizationRegistry`, and a `WeakMap` or `WeakSet` entry whose key is never freed is never observable as removed, so nothing else can tell the difference.
+
 ## Diagnostics
 
 Each failed contract names the declaration and the reason:
@@ -348,6 +386,10 @@ $ scriptc build reject.ts
     <tr>
       <td>SC7007</td>
       <td>An <code>Acyclic</code> class or type can lie on a reference cycle; the message shows the cycle.</td>
+    </tr>
+    <tr>
+      <td>SC7008</td>
+      <td>A <code>ProgramLifetime</code> class is not the root of its hierarchy, or is part of a library build.</td>
     </tr>
   </tbody>
 </table>

@@ -527,9 +527,6 @@ ScrArr *scr_module_cache_keys(void) {
   return keys;
 }
 
-/* Raw argv accessors for the island's process shim (scr_island.c): the
- * island's process.argv must match the static world's ["scriptc",
- * argv[0], ...] shape exactly, so both build from the same stash. */
 int scr_lib_arg_count(void) {
 #if defined(_WIN32) && !defined(SCR_LIB)
   scr_lib_prepare_utf8_argv();
@@ -1425,7 +1422,7 @@ ScrStr *scr_os_user_homedir(void) { return scr_os_homedir(); }
 ScrStr *scr_os_release(void) { return scr_str_new("", 0); }
 ScrStr *scr_os_type(void) { return scr_str_new("WASI", 4); }
 double scr_os_totalmem(void) { return 0; }
-/* One thread of execution, as the dynamic island's os answers. */
+/* WASI modules run on one thread of execution. */
 double scr_os_available_parallelism(void) { return 1; }
 /* The guest temp namespace is stable across hosts. `scriptc run` preopens
  * the host's /tmp at this path; other WASI hosts can provide the same
@@ -2688,7 +2685,6 @@ ScrBytes *scr_fs_read_file_bytes(ScrStr *path) {
 ScrStr *scr_fs_read_file(ScrStr *path) {
   return scr_fs_read_file_core(path, false);
 }
-
 
 static ScrStr *scr_fs_realpath_common(ScrStr *path, const char *op) {
 #ifdef _WIN32
@@ -5259,12 +5255,6 @@ ScrStr *scr_crypto_random_string(double n, ScrStr *enc) {
   return out;
 }
 
-/* ── incremental MD5/SHA-1/SHA-2 and HMAC ──────────────────────────
- * The first-class Hash/Hmac handles, fused one-shot paths, island bridge,
- * and PBKDF2 all share these contexts. Hash.copy() is a context snapshot;
- * update never buffers the full input. Differential tests pin every
- * algorithm against Node's implementation. */
-
 static const uint32_t scr_sha256_k[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
     0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -5849,9 +5839,6 @@ static size_t scr_hmac_final(const ScrDigestCtx *inner, const ScrDigestCtx *oute
   return n;
 }
 
-/* One-shot digest/HMAC by algorithm name — the island bridge and static
- * helpers both use the incremental core. Returns zero for an unknown
- * algorithm, preserving the island's unsupported-digest probe. */
 size_t scr_crypto_digest_raw(const char *alg, const unsigned char *data, size_t len,
                              unsigned char out[64]) {
   ScrDigestAlg kind;

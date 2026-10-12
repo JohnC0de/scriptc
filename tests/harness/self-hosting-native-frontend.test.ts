@@ -105,7 +105,7 @@ for (const backend of ["llvm"] as const) {
           `import { compile } from ${JSON.stringify(api)};
          const result = await compile(process.argv[1], {
            outDir: process.argv[2], outPath: process.argv[3], backend: process.argv[4],
-           dynamic: false, optimization: 'dev', sanitize: process.argv[5] === '1',
+           optimization: 'dev', sanitize: process.argv[5] === '1',
            ffiProfilePath: process.argv[6],
          });
          console.log(JSON.stringify({ ...result, sourceTexts: undefined }));`,
@@ -181,11 +181,6 @@ for (const backend of ["llvm"] as const) {
         const source = join(root, "tests/corpus", file);
         const { module, report } = lowerRequest(file, { entry: source });
         expect(report[0], file).toEqual({ preflight: [], npmStatic: [] });
-        expect(report[1], file).toMatchObject({
-          stats: { statementsFailed: 0, statementsIsland: 0, functionsSkipped: 0 },
-          diagnostics: [],
-          validation: [],
-        });
         if (!module) throw new Error(file + ": missing native IR");
         const cPath = join(directory, "program.ll");
         writeFileSync(cPath, emitLlvmModule(module));
@@ -241,7 +236,7 @@ for (const backend of ["llvm"] as const) {
       });
       expect(fallback.report[0]).toMatchObject({
         npmStatic: [
-          { package: "gtdrift", status: "fallback", detail: expect.stringContaining("__toESM") },
+          { package: "gtdrift", status: "refused", detail: expect.stringContaining("__toESM") },
         ],
       });
 

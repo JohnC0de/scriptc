@@ -106,7 +106,7 @@ Other variants remain visible as exclusions.`);
     revision: pin.commit, snapshotSha256: pin.snapshotSha256,
     profile: "static-adapted-v5",
     harnessSha256: sha256(harnessSource + assertThrowsSource + propertyHelperSource),
-    dynamic: false, requestedBackend: backend, sanitize: process.env.SCRIPTC_SAN === "1",
+    requestedBackend: backend, sanitize: process.env.SCRIPTC_SAN === "1",
     host: `${process.platform}-${process.arch}`, node: process.version,
     compilerVersion: JSON.parse(readFileSync(join(directory, "../../packages/compiler/package.json"), "utf8")).version,
     scope: values.root ? "survey" : "regression-profile",

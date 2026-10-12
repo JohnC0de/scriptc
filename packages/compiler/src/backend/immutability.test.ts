@@ -48,7 +48,7 @@ function module(
   functions: IrModule["functions"],
 ): IrModule {
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     classes,

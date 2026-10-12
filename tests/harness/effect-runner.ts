@@ -39,7 +39,6 @@ export async function checkEffectFixture(
       outPath: join(dir, "program"),
       backend: "llvm",
       optimization,
-      dynamic: false,
       npmStatic,
       sanitize,
     };

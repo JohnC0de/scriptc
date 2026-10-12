@@ -7,16 +7,6 @@ import {
   varRef,
 } from "../../ir/build.js";
 
-/* The server-surface lowering (node:net + node:http — the spoke-module
- * pattern, like lower-island.ts): module-function calls (net
- * createServer/connect/createConnection, http createServer/request/get —
- * named AND namespace import forms, both dispatched here), method calls
- * on netServer/netSocket/httpReq/httpRes/httpClientReq receivers, the
- * composed `server.address().port` read, and the property surface
- * (req.url/method/statusCode/socket/headers, res.headersSent,
- * socket.remoteAddress, request.destroyed). Everything the lib declares
- * beyond these shapes fences member-qualified — never a generic
- * rejection, never silence. */
 import * as ts from "../ts7/adapter.js";
 import type { Lowerer } from "./lowerer.js";
 import { ladderFenceExpr } from "./lowerer.js";
@@ -103,17 +93,6 @@ function requireStatementPosition(lowerer: Lowerer, call: ts.CallExpression, wha
   );
 }
 
-/** Node enables net.Server's reusePort socket option only for the exact
- * boolean value true. This is intentionally different from the ordinary
- * condition lowering used by ipv6Only: JavaScript values such as 1 and
- * "true" are truthy, but Node leaves reusePort disabled for them.
- *
- * Typed boolean-or-undefined option bindings are represented by the normal
- * tagged union. Initializers narrow that union to its boolean arm; shorthand
- * properties are required to have the concrete BOOL shape below, matching
- * ipv6Only's static option-record fence. Other static values still evaluate
- * once, then produce false; checked-dynamic and island values use strict
- * equality against the boolean true. */
 function lowerExactReusePort(lowerer: Lowerer, value: IrExpr, node: ts.Node): IrExpr {
   const loc = locOf(node);
   const falseValue = (): IrExpr => boolLit(false, loc);
@@ -128,15 +107,7 @@ function lowerExactReusePort(lowerer: Lowerer, value: IrExpr, node: ts.Node): Ir
       loc,
     };
   }
-  if (value.type.kind === "jsval") {
-    return {
-      kind: "jsOp",
-      op: "eq",
-      args: [value, lowerer.jsvalIn(boolLit(true, loc), node)],
-      type: BOOL,
-      loc,
-    };
-  }
+
   if (value.type.kind === "union") {
     const def = lowerer.unions.get(value.type.unionId);
     const boolTag = def?.arms.findIndex((arm) => arm.kind === "bool") ?? -1;

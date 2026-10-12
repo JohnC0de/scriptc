@@ -11,11 +11,10 @@ const entry = join(root, "tests/fixtures/self-hosting/ts7-client.ts");
 const tempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
 
 test("the production TypeScript RPC and filesystem client lowers entirely statically", () => {
-  const { coverage } = analyze(entry, { dynamic: false });
+  const { coverage } = analyze(entry, {});
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(200);
   expect(coverage.stats.statementsFailed, JSON.stringify(coverage.diagnostics)).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -32,7 +31,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: join(dir, process.platform === "win32" ? "client.exe" : "client"),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });

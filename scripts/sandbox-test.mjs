@@ -30,7 +30,6 @@ const laneCaseShardedFiles = [
   "tests/harness/effect4.test.ts",
   "tests/harness/differential.test.ts",
   "tests/harness/llvm-differential.test.ts",
-  "tests/harness/npm.test.ts",
   "tests/harness/server.test.ts",
   "tests/harness/test262.test.ts",
   "tests/harness/three.test.ts",
@@ -86,7 +85,7 @@ const invariantRemoteFiles = [
   "packages/runtime/test/map.test.ts",
   "packages/runtime/test/path.test.ts",
   "packages/runtime/test/regex.test.ts",
-  "tests/harness/island-surface.test.ts",
+  "tests/harness/stdlib-surface.test.ts",
   "tests/harness/library-mode.test.ts",
   "tests/harness/library-profile.test.ts",
   "tests/harness/linux-differential.test.ts",
@@ -126,7 +125,6 @@ const remoteWorkspaceReset = workspaceResetCommand("/workspace");
 const hostLaneContractFiles = [
   "tests/harness/ffi.test.ts",
   "tests/harness/ffi-scalars.test.ts",
-  "tests/harness/island.test.ts",
   "tests/harness/library-multi.test.ts",
   "tests/harness/differential.test.ts",
   "tests/harness/server.test.ts",
@@ -137,7 +135,6 @@ const hostLaneContractPattern = [
   "calls the manifest-bound archive across every v1 ABI class",
   "matches Node conversions through native calls",
   "a missing FFI symbol is an SC5004 diagnostic",
-  "deep island recursion on a fiber is a catchable RangeError",
   "M1: external definitions equal the declared set exactly",
   "M2: independent state and collects",
   "M6: four threads, one archive",
@@ -151,7 +148,6 @@ const hostLaneContractPattern = [
   "read-all: chunked writes with delays, then EOF",
 ].join("|");
 const hostInvariantContractFiles = [
-  "tests/harness/island.test.ts",
   "tests/harness/library-mode.test.ts",
   "tests/harness/regex.test.ts",
 ];
@@ -168,8 +164,8 @@ const hostInvariantContractPattern = [
 // Logically portable acceptance suites whose oracle lives in an external
 // worktree that is intentionally not uploaded. Run them locally in both
 // flavors, sharding suites whose individual cases are independently addressable.
-const localLaneFiles = ["tests/harness/prettier-e2e.test.ts", "tests/harness/portless-e2e.test.ts"];
-const localCaseShardedFiles = ["tests/harness/vercel-e2e.test.ts"];
+const localLaneFiles = ["tests/harness/portless-e2e.test.ts"];
+const localCaseShardedFiles = [];
 
 const { values } = parseArgs({
   options: {
@@ -1042,7 +1038,7 @@ try {
             label: `local ${lane} external files`,
           }),
         );
-        const caseTasks = lanes.flatMap((lane) =>
+        const caseTasks = (localCaseShardedFiles.length === 0 ? [] : lanes).flatMap((lane) =>
           Array.from({ length: localCaseShardCount }, (_, offset) => {
             const shard = offset + 1;
             return run("pnpm", ["test", "--reporter=dot", ...localCaseShardedFiles], {

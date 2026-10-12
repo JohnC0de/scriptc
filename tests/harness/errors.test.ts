@@ -61,16 +61,11 @@ async function compileAndRun(
   for (const [extraName, text] of Object.entries(extraFiles)) {
     writeFileSync(join(outDir, extraName), text);
   }
-  // `// @dynamic` on the entry's FIRST line embeds the island engine —
-  // for runtime-fence shapes only mixed dynamic graphs can spell (the
-  // diagnostics suite's directive, applied to the run-and-observe lane).
-  const dynamic = /^\/\/ @dynamic\s*$/.test(source.split("\n", 1)[0] ?? "");
   const result = await compile(file, {
     outPath: join(outDir, name),
     outDir,
     sanitize,
     backend: "llvm",
-    dynamic,
   });
   if (!result.ok) {
     throw new Error(
@@ -668,7 +663,7 @@ export type Other = string;
     );
   });
 
-  test("dynamic islands retain the native ESM link failure", async () => {
+  test("native compilation retains the ESM link failure", async () => {
     const r = await compileAndRun(
       "esm-type-link-dynamic",
       `// @dynamic
@@ -762,18 +757,18 @@ console.log('middle never runs');
   });
 });
 
-describe("checked-dynamic/island boundary fences (scriptc-only)", () => {
-  test("an island-typed argument into a call through 'unknown' runs Node-exactly (the retired SC1101 fence)", async () => {
+describe("checked-dynamic boundary behavior (scriptc-only)", () => {
+  test("a checked argument into a call through 'unknown' matches Node", async () => {
     // `this` in a plain JS function is the checked-dynamic ambient
     // receiver; a member CALL through it with an 'any'-typed argument
-    // used to fence at compile (no jsval→dyn crossing existed — SEMANTICS
+
     // 383(d)'s "one unbridgeable mix"). The crossing exists now
     // (dynFromJsval, SEMANTICS 394): the argument wraps by reference, the
     // statement compiles for real, and the unbound-`this` member read
     // throws Node's OWN TypeError — the divergence this pin used to own
     // is retired.
     const r = await compileAndRun(
-      "island-arg-dyn-call",
+      "checked-arg-dyn-call",
       `// @dynamic
 'use strict';
 function register(item) {

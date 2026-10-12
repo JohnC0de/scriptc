@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { F64, JSVAL, type IrExpr, type IrFunction, type IrStmt } from "../../ir/ir.js";
+import { F64, DYN, type IrExpr, type IrFunction, type IrStmt } from "../../ir/ir.js";
 import { everyStmtList } from "../../ir/traverse.js";
 import { buildArraySortFn, buildBytesSortFn } from "./lower-array-sort.js";
 
@@ -22,7 +22,7 @@ test("sort helpers give every IR site its own node", () => {
   const helpers = [
     buildArraySortFn("%arr.sort.0", F64, 2, false, null, loc),
     buildArraySortFn("%arr.toSorted.1", F64, 1, true, null, loc),
-    buildArraySortFn("%arr.sort.2", JSVAL, 2, false, null, loc),
+    buildArraySortFn("%arr.sort.2", DYN, 2, false, null, loc),
     buildArraySortFn("%arr.sort.3", union, 2, true, 1, loc),
     buildBytesSortFn("%bytes.sort.4", 2, true, loc),
     buildBytesSortFn("%bytes.sort.5", 0, false, loc),

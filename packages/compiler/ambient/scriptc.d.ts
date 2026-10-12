@@ -5,7 +5,7 @@
  * without a lowering is a SC2020 diagnostic at its use site. This file
  * declares only what that ES-only library does not:
  *
- * 1. scriptc's own primitives (comptime, __island_eval).
+ * 1. scriptc's own primitives (comptime).
  * 2. The RequestInfo type alias, supplied by the default DOM lib in ordinary
  *    TypeScript projects but absent from @types/node's globals.
  * 3. setTimeout/clearTimeout and the Timeout handle (Node/dyn territory the
@@ -108,11 +108,3 @@ declare function clearTimeout(handle?: Timeout | number | null | undefined): voi
  * baked result is exactly what Node would compute at runtime (the
  * differential harness verifies this with a `comptime = (f) => f()` shim). */
 declare function comptime<T>(compute: () => T): T;
-
-/* INTERNAL TESTING HOOK — not part of the supported surface, deliberately
- * undocumented. Evaluates `code` in the embedded dynamic-island engine and
- * returns String(result); island exceptions arrive as catchable errors.
- * Requires --dynamic (a clean diagnostic otherwise). This exists to prove
- * the engine embed end-to-end in tests; user-facing constructs will lower
- * to the island through their own paths, not through this. */
-declare function __island_eval(code: string): string;

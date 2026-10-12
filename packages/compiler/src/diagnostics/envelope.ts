@@ -23,14 +23,12 @@ export const DIAGNOSTICS_SCHEMA_VERSION = 1;
 /** What kind of problem a diagnostic reports, independent of its code band:
  *  - invalid-source: the program itself is wrong (TypeScript errors, bad JSON modules)
  *  - unsupported: valid TypeScript/JavaScript scriptc cannot compile yet
- *  - dynamic-only: compiles when the build embeds the dynamic engine (--dynamic)
  *  - divergence: compiles, but the native program behaves differently from Node
  *  - environment: project configuration, scriptc's type world, toolchain or target
  *  - internal: a compiler bug */
 export type DiagnosticCategory =
   | "invalid-source"
   | "unsupported"
-  | "dynamic-only"
   | "divergence"
   | "environment"
   | "internal";
@@ -99,6 +97,8 @@ export interface DiagnosticsEnvelope {
   stats?: {
     statementsTotal: number;
     statementsStatic: number;
+    /** Always 0: every compiled statement is native. Kept so schema
+     * version 1 consumers keep reading the same fields. */
     statementsDynamic: number;
     statementsFailed: number;
     functionsSkipped: number;
@@ -110,14 +110,6 @@ export interface DiagnosticsEnvelope {
   diagnostics: LocatedDiagnostic[];
 }
 
-/** Codes whose construct RUNS under --dynamic (the embedded engine). */
-export const DYNAMIC_CAPABLE_CODES: ReadonlySet<string> = new Set([
-  "SC2010",
-  "SC2011",
-  "SC2012",
-  "SC2013",
-]);
-
 /** The divergence band: compiles, but the program can behave differently
  * from Node. Warnings, never build failures. */
 export function isDivergenceCode(code: string): boolean {
@@ -127,7 +119,6 @@ export function isDivergenceCode(code: string): boolean {
 export function categoryOf(diag: ScrDiagnostic): DiagnosticCategory {
   const code = diag.code;
   if (isDivergenceCode(code)) return "divergence";
-  if (DYNAMIC_CAPABLE_CODES.has(code)) return "dynamic-only";
   if (code === "SC0001") return diag.typeWorld === true ? "environment" : "invalid-source";
   if (code === "SC0003") return "invalid-source";
   if (code === "SC0002" || code === "SC0004") return "environment";

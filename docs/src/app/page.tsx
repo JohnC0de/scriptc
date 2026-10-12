@@ -24,7 +24,7 @@ $ scriptc coverage hello.ts
   statements analyzed   2
   compile statically    2  (100%)
 
-  fully static — this program has no dynamic remainder.`;
+  fully static — all analyzed statements compile to native code.`;
 
 const tiers = [
   {
@@ -32,8 +32,8 @@ const tiers = [
     body: "Supported TypeScript and JavaScript operations compile to native code. Static executables run without Node.js or a JavaScript engine.",
   },
   {
-    title: "Runs dynamically",
-    body: "Enable --dynamic to run npm packages and supported any-typed code in an embedded JavaScript engine. Values converted to static types are checked at runtime.",
+    title: "Native npm dependencies",
+    body: "Eligible npm dependencies compile alongside your application. Checked values preserve runtime type checks without an embedded JavaScript engine.",
   },
   {
     title: "Rejected at compile time",
@@ -48,11 +48,11 @@ const points = [
   },
   {
     title: "Native executables",
-    body: "Build a program into an executable for a supported target. JavaScript dependencies used with --dynamic are embedded at build time.",
+    body: "Build a program into an executable for a supported target. Eligible JavaScript dependencies compile to native code at build time.",
   },
   {
     title: "Compilation coverage",
-    body: "Coverage reports show static and dynamic statement counts and list compilation blockers for the program being analyzed.",
+    body: "Coverage reports show native statement counts and list compilation blockers for the program being analyzed.",
   },
   {
     title: "Differentially tested",
@@ -145,8 +145,7 @@ export default function Home() {
               <h2 className="text-heading-24 text-gray-1000">Check compilation support</h2>
               <p className="mt-3 text-copy-14 text-gray-900">
                 Use {siteName} coverage to analyze a program before building it. The report
-                identifies operations that compile statically, require the embedded engine,
-                or remain unsupported.
+                identifies operations that compile natively and explains unsupported forms.
               </p>
               <Link
                 href="/docs/coverage"

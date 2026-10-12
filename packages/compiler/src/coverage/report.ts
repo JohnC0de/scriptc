@@ -10,7 +10,6 @@ import type { Milestone, ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import {
   DIAGNOSTICS_SCHEMA,
   DIAGNOSTICS_SCHEMA_VERSION,
-  DYNAMIC_CAPABLE_CODES,
   SourceLocator,
   groupDiagnostics,
   type DiagnosticGroup,
@@ -21,15 +20,10 @@ import {
 } from "../diagnostics/envelope.js";
 import { renderDiagnostics } from "../diagnostics/render.js";
 import type { LowerStats } from "../frontend/lowering/lowerer.js";
-import type { NpmBuiltinUse, NpmLazyTrap } from "../frontend/npm.js";
 import type { ProvenanceSources } from "../frontend/provenance-registry.js";
 
 export interface CoverageInput {
   file: string;
-  /** Analyzed as a --dynamic build: island sites LOWER (their statements
-   * land in stats.statementsIsland) instead of SC2013-fencing, and the
-   * report renders them as "compile dynamically". */
-  dynamic?: boolean;
   stats: LowerStats;
   diagnostics: ScrDiagnostic[];
   /** JS statements whose compile fences deferred to RUNTIME (runtimeFence
@@ -44,19 +38,8 @@ export interface CoverageInput {
    * the program compiles, but these sites can behave differently natively.
    * Never blockers; `--fail-on=divergences` opts into failing on them. */
   divergences?: ScrDiagnostic[];
-  /** --dynamic only: every Node builtin the embedded npm graph imports —
-   * what the island must provide for this program (unshimmed ones also
-   * appear as SC2030 blockers, EXCEPT lazily-reached ones, which embed
-   * the island's call-time throw instead of failing the build). */
-  npmBuiltins?: NpmBuiltinUse[];
-  /** --dynamic only: unresolvable specifiers reached ONLY by require()/
-   * import() edges — embedded as runtime traps with Node's call-time
-   * error shape; listed in the builtins table so the build output stays
-   * honest about what the binary cannot reach. */
-  npmLazyTraps?: NpmLazyTrap[];
-  /** --npm-static: each requested (or auto-detected) package's outcome —
-   * compiled statically as program modules, or fallen back to the island
-   * with the first refusal reason. */
+  /** Each dependency's native compilation outcome, with the first refusal
+   * reason for a refused package. */
   npmStatic?: NpmStaticStatus[];
   /** --provenance-sources: the resolved source-mapped packages and the
    * fallback notes — the report renders per-package attribution from
@@ -64,7 +47,7 @@ export interface CoverageInput {
   provenance?: ProvenanceSources;
   /** --provenance-sources: per-file statement attribution from the emit
    * pass (LowerResult.statsByFile). */
-  statsByFile?: Map<string, { total: number; failed: number; island: number }>;
+  statsByFile?: Map<string, { total: number; failed: number }>;
   /** --provenance-sources: diagnostics of elided pure-annotated dead
    * consts (off the build; the provenance section names them). */
   provenanceElided?: ScrDiagnostic[];
@@ -72,11 +55,11 @@ export interface CoverageInput {
   preflightFailed: boolean;
 }
 
-/** One --npm-static package's outcome for the report. */
+/** One dependency's native compilation outcome. */
 export interface NpmStaticStatus {
   package: string;
-  status: "static" | "fallback";
-  /** The fallback's first refusal reason (fallback rows only). */
+  status: "static" | "refused";
+  /** The first refusal reason for a refused package. */
   detail?: string;
 }
 
@@ -88,10 +71,6 @@ const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
 
 const MILESTONE_ORDER: Milestone[] = ["M1", "M2", "M3", "M4", "M5", "later"];
-
-/** Codes whose construct RUNS under --dynamic (the embedded engine) — the
- * report separates "one flag away" from "cannot compile at all". */
-const DYNAMIC_CAPABLE = DYNAMIC_CAPABLE_CODES;
 
 /** Human rows cap their message: long embedded type text would otherwise
  * push lines past several hundred columns. The full message is in the
@@ -190,28 +169,18 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
     return out.join("\n");
   }
 
-  // Top-line numbers stay whole-program: reached statements plus the
-  // unreached remainder the analysis lowered anyway. Under --dynamic the
-  // island-lowered statements split out as "compile dynamically" — they
-  // BUILD, but their work runs in the embedded engine, and counting them
-  // as static would overstate how native the program is.
+  // Whole-program totals include reached and unreached statements.
   const un = input.unreached;
   const total = input.stats.statementsTotal + (un?.stats.statementsTotal ?? 0);
   const failed = input.stats.statementsFailed + (un?.stats.statementsFailed ?? 0);
-  const island = input.stats.statementsIsland + (un?.stats.statementsIsland ?? 0);
   const skipped = input.stats.functionsSkipped + (un?.stats.functionsSkipped ?? 0);
-  const ok = total - failed - island;
+  const ok = total - failed;
   const pct = total === 0 ? 100 : Math.floor((ok / total) * 100);
   const pctColor = pct === 100 ? GREEN : pct >= 75 ? YELLOW : RED;
 
   out.push(`  statements analyzed   ${total}`);
   out.push(`  compile statically    ${ok}  ${c(pctColor, c(BOLD, `(${pct}%)`))}`);
-  if (input.dynamic) {
-    const ipct = total === 0 ? 0 : Math.floor((island / total) * 100);
-    out.push(
-      `  compile dynamically   ${island}  ${c(YELLOW, c(BOLD, `(${ipct}%)`))} ${c(DIM, "(island sites — the embedded engine runs them)")}`,
-    );
-  }
+
   if (skipped > 0) {
     out.push(
       `  ${c(DIM, `(${skipped} function${skipped === 1 ? "" : "s"} not analyzed — signature blocked; their statements count as not static)`)}`,
@@ -219,68 +188,17 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
   }
   out.push("");
 
-  // --npm-static outcomes: which opted-in packages compiled statically as
-  // program modules and which fell back to the island (with the first
-  // refusal reason) — the flag's honesty section.
+  // Report native package compilation and the first reason for each refusal.
   const npmStatic = input.npmStatic ?? [];
   if (npmStatic.length > 0) {
-    out.push(`  ${c(DIM, "npm packages compiled statically (--npm-static):")}`);
+    out.push(`  ${c(DIM, "npm package compilation:")}`);
     const widestP = Math.max(...npmStatic.map((s) => s.package.length));
     for (const s of npmStatic) {
       const status =
         s.status === "static"
           ? c(GREEN, "static")
-          : c(YELLOW, "island fallback") +
-            (s.detail !== undefined ? ` ${c(DIM, `(${s.detail})`)}` : "");
+          : c(RED, "refused") + (s.detail !== undefined ? ` ${c(DIM, `(${s.detail})`)}` : "");
       out.push(`    ${s.package.padEnd(widestP)}  ${status}`);
-    }
-    out.push("");
-  }
-
-  // What the embedded npm code asks of the island: every Node builtin the
-  // graph imports, with its shim status, plus every unresolvable specifier
-  // only require()/import() edges reach. Eagerly-blocked builtins also
-  // surface as SC2030 blockers below; "lazy trap" rows DON'T fail the
-  // build — the binary embeds Node's call-time error and the call throws
-  // at runtime, exactly where Node would have failed.
-  const builtins = input.dynamic ? (input.npmBuiltins ?? []) : [];
-  const traps = input.dynamic ? (input.npmLazyTraps ?? []) : [];
-  if (builtins.length > 0 || traps.length > 0) {
-    out.push(
-      `  ${c(DIM, traps.length > 0 ? "embedded npm code imports Node builtins and unresolved specifiers:" : "embedded npm code imports Node builtins:")}`,
-    );
-    const widestB = Math.max(
-      ...[...builtins.map((b) => b.builtin.length), ...traps.map((t) => t.specifier.length)],
-    );
-    // Pad the plain words before coloring — escape codes have no width.
-    const widestS = Math.max(
-      ...[...builtins.map((b) => (b.shimmed ? 7 : b.lazy ? 23 : 11)), ...traps.map(() => 24)],
-    );
-    for (const b of builtins) {
-      const status = b.shimmed
-        ? c(GREEN, "shimmed".padEnd(widestS))
-        : b.lazy
-          ? c(YELLOW, "not shimmed — lazy trap".padEnd(widestS))
-          : c(RED, "not shimmed".padEnd(widestS));
-      out.push(
-        `    ${b.builtin.padEnd(widestB)}  ${status}  ${c(DIM, `(${b.packages.join(", ")})`)}`,
-      );
-    }
-    for (const t of traps) {
-      // A native .node addon RESOLVED — the island cannot dlopen it, so
-      // the build embedded a throwing ERR_DLOPEN_FAILED stub instead of
-      // the addon's machine code; unresolvable rows keep Node's not-found
-      // error shapes.
-      const what = t.native ? "native addon — lazy trap" : "unresolvable — lazy trap";
-      out.push(
-        `    ${t.specifier.padEnd(widestB)}  ${c(YELLOW, what.padEnd(widestS))}  ` +
-          c(DIM, `(${t.via.join("/")} in ${t.packages.join(", ")})`),
-      );
-    }
-    if (builtins.some((b) => b.lazy) || traps.length > 0) {
-      out.push(
-        `    ${c(DIM, "(lazy trap: only reachable through require()/import() boundaries — the build embeds Node's call-time error; the call throws at runtime)")}`,
-      );
     }
     out.push("");
   }
@@ -298,19 +216,17 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
     for (const pkg of prov.packages) {
       let pTotal = 0;
       let pFailed = 0;
-      let pIsland = 0;
       const dir = pkg.dir.endsWith("/") ? pkg.dir : `${pkg.dir}/`;
       for (const [file, s] of input.statsByFile ??
-        new Map<string, { total: number; failed: number; island: number }>()) {
+        new Map<string, { total: number; failed: number }>()) {
         if (!file.startsWith(dir)) continue;
         pTotal += s.total;
         pFailed += s.failed;
-        pIsland += s.island;
       }
       const elided = (input.provenanceElided ?? []).filter((d) =>
         d.loc.file.startsWith(dir),
       ).length;
-      const pOk = pTotal - pFailed - pIsland;
+      const pOk = pTotal - pFailed;
       const pPct = pTotal === 0 ? 100 : Math.floor((pOk / pTotal) * 100);
       const pColor = pPct === 100 ? GREEN : pPct >= 75 ? YELLOW : RED;
       const shortRepo = pkg.repo
@@ -321,7 +237,7 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
         `    ${pkg.name}@${pkg.version}  ${c(DIM, `${shortRepo} @ ${pkg.commit.slice(0, 12)}`)}`,
       );
       out.push(
-        `      ${pTotal} statements: ${pOk} static ${c(pColor, c(BOLD, `(${pPct}%)`))}, ${pIsland} island, ${pFailed} fenced` +
+        `      ${pTotal} statements: ${pOk} static ${c(pColor, c(BOLD, `(${pPct}%)`))}, ${pFailed} fenced` +
           (elided > 0
             ? ` ${c(DIM, `(${elided} fence${elided === 1 ? "" : "s"} elided as @__PURE__ dead consts — uses would fence per site)`)}`
             : ""),
@@ -357,11 +273,7 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
 
   const unreachedDiags = [...(un?.diagnostics ?? []), ...(un?.runtimeFences ?? [])];
   if (failed === 0 && input.diagnostics.length === 0 && unreachedDiags.length === 0) {
-    out.push(
-      island > 0
-        ? `  ${c(GREEN, "builds with --dynamic")} — no remaining blockers (the island sites above run in the embedded engine).`
-        : `  ${c(GREEN, "fully static")} — this program has no dynamic remainder.`,
-    );
+    out.push(`  ${c(GREEN, "fully static")} — all analyzed statements compile to native code.`);
     if (divergences.length > 0) {
       out.push("");
       renderDivergences();
@@ -372,12 +284,10 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
   // Ordered by internal scheduling (soonest first), then by frequency —
   // the top line is the blocker most likely to disappear next. The
   // milestone labels themselves are maintainer business and never rendered.
-  // Blockers split by what a flag can fix: sites that RUN under --dynamic
-  // (the embedded engine) versus constructs with no lowering at all.
+
   const blockers = groupBlockers(input.diagnostics);
   const unreachedBlockers = groupBlockers(unreachedDiags, "unreached");
-  const dynamic = blockers.filter((b) => DYNAMIC_CAPABLE.has(b.code));
-  const rejected = blockers.filter((b) => !DYNAMIC_CAPABLE.has(b.code));
+  const rejected = blockers;
   const renderGroup = (group: Blocker[], dim = false) => renderRows(group, RED, dim);
   if (
     failed > 0 &&
@@ -390,14 +300,6 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
     out.push(
       `  ${c(RED, "blockers:")} ${failed} statement${failed === 1 ? "" : "s"} failed without a diagnostic (a compiler bug — please report it)`,
     );
-  }
-  if (dynamic.length > 0) {
-    const sites = dynamic.reduce((n, b) => n + b.count, 0);
-    out.push(
-      `  ${c(YELLOW, `runs with --dynamic`)}   ${sites} site${sites === 1 ? "" : "s"} ${c(DIM, "(embeds a JS engine, ~620KB — static stays the default)")}`,
-    );
-    renderGroup(dynamic);
-    out.push("");
   }
   if (rejected.length > 0) {
     out.push(`  blockers:`);
@@ -510,9 +412,8 @@ export function coverageEnvelope(
   const un = input.unreached;
   const total = input.stats.statementsTotal + (un?.stats.statementsTotal ?? 0);
   const failed = input.stats.statementsFailed + (un?.stats.statementsFailed ?? 0);
-  const island = input.stats.statementsIsland + (un?.stats.statementsIsland ?? 0);
   const skipped = input.stats.functionsSkipped + (un?.stats.functionsSkipped ?? 0);
-  const ok = total - failed - island;
+  const ok = total - failed;
   return {
     schema: DIAGNOSTICS_SCHEMA,
     schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
@@ -531,7 +432,7 @@ export function coverageEnvelope(
           stats: {
             statementsTotal: total,
             statementsStatic: ok,
-            statementsDynamic: island,
+            statementsDynamic: 0,
             statementsFailed: failed,
             functionsSkipped: skipped,
             percentStatic: total === 0 ? 100 : Math.floor((ok / total) * 100),

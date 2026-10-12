@@ -273,9 +273,9 @@ export {
   wyhash64,
 } from "./library/wyhash.js";
 export {
-  ISLAND_SURFACE,
+  STDLIB_SURFACE,
   STATIC_MATH_PROPS,
-  type IslandFnEntry,
+  type StdlibFnEntry,
 } from "./frontend/lowering/surfaces.js";
 export {
   ambientDtsPath,
@@ -430,13 +430,12 @@ void assertCompileResultCompatibility;
 function executableNativeFeatures(
   mod: IrModule,
   backend: "llvm",
-  dynamic: boolean,
   optimization: NativeOptimization,
 ): EarlyExecutableNativeFeatures {
   return {
     backend,
     ...optimizationField(optimization),
-    ...executableLinkFeatures(mod, dynamic),
+    ...executableLinkFeatures(mod),
   };
 }
 
@@ -503,13 +502,11 @@ async function compileExecutableNative(
           programPublicSymbols: effectiveProgramSplit.publicSymbols,
         }),
     sanitize,
-    dynamic: features.dynamic,
     regex: features.regex,
     copying: features.copying,
     textDecoderLegacy: features.textDecoderLegacy,
     fileHandle: features.fileHandle,
     fetch: features.fetch,
-    netIsland: features.netIsland,
     zlib: features.zlib,
     assert: features.assert,
     inspect: features.inspect,
@@ -619,8 +616,7 @@ async function removeNativeProgramObject(
 }
 
 function usesPrecompiledRuntimePack(opts: CompileRequestOptions, backend: "llvm"): boolean {
-  if (backend !== "llvm" || opts.sanitize === true || process.env["SCRIPTC_FETCH_CURL"] === "1")
-    return false;
+  if (backend !== "llvm" || opts.sanitize === true) return false;
   return nativeCodegenTarget() !== null;
 }
 
@@ -732,12 +728,7 @@ async function prepareExecutableInput(
           nativeLinkInfo: await createNativeLinkInfo({
             programObject: opts.outPath,
             target,
-            features: executableNativeFeatures(
-              mod,
-              "llvm",
-              opts.dynamic ?? false,
-              opts.optimization ?? "release",
-            ),
+            features: executableNativeFeatures(mod, "llvm", opts.optimization ?? "release"),
             ffi,
             optimization: opts.optimization ?? "release",
           }),
@@ -777,12 +768,7 @@ async function prepareExecutableInput(
     await writeTextParts(irPath, serializeModuleParts(mod));
   }
 
-  const nativeFeatures = executableNativeFeatures(
-    mod,
-    backend,
-    opts.dynamic ?? false,
-    opts.optimization ?? "release",
-  );
+  const nativeFeatures = executableNativeFeatures(mod, backend, opts.optimization ?? "release");
   timing("link-features");
   const programSplit =
     !useRuntimePack &&
@@ -912,7 +898,7 @@ async function compileTracked(
       };
     }
   }
-  if (outputKind === "exe" && opts.sanitize !== true && process.env["SCRIPTC_FETCH_CURL"] !== "1") {
+  if (outputKind === "exe" && opts.sanitize !== true) {
     const refusal = nativeCodegenTargetRefusal();
     if (refusal !== null)
       return {
@@ -1026,7 +1012,6 @@ async function compileTracked(
       outPath: opts.outPath,
       emitIr: opts.emitIr ?? false,
       sanitize: opts.sanitize ?? false,
-      dynamic: opts.dynamic ?? false,
       backend: "llvm",
       ...optimizationField(opts.optimization),
       ...(opts.strip ? { strip: true as const } : {}),

@@ -1,77 +1,3 @@
-/* --npm-static's bundler-emitted-CJS export surface: the getter-table
- * shapes. A bundler-emitted CJS dist exports through runtime plumbing the
- * checker cannot model — the `__export(target, { name: () => value, ... })`
- * getter table behind `module.exports = __toCommonJS(target)`, the
- * `Object.defineProperty(exports, 'n', { get })` family, and the
- * transpiler star re-exports (`__exportStar(require('./x'), exports)`,
- * `__reExport(target, require('./x'), module.exports)`). Node's CJS lexer
- * SEES those named exports (cjs-lexer.ts mirrors it exactly), so named
- * imports link under Node — but the inferred surface the opted-in
- * resolution feeds the checker is an opaque object, and every import site
- * reports "X has no exported member" (the SC0001 storm that used to gate
- * the whole build).
- *
- * THE REWRITE. For an opted-in package's CJS file whose exports come from
- * these shapes, the fs shadow (npm-static.ts) serves BOTH worlds — the
- * checker and the lowering ride one program — a text rewrite that spells
- * the same export surface in the plain CJS the whole existing machinery
- * already models:
- *
- *   - the recognized plumbing statements are SPACE-PADDED in place
- *     (newlines kept, so every original line/offset survives): the
- *     `module.exports = __toCommonJS(target)` assignment, the
- *     `__export(target, {...})` call, the star-pattern calls, the
- *     recognized defineProperty exports, and the dead esbuild annotation
- *     `0 && (module.exports = {...})` (left live it poisons the checker's
- *     alias resolution — multiple module.exports assignments make import
- *     aliases land on properties no lowering path resolves);
- *   - one canonical export table is APPENDED at the tail:
- *     `module.exports = { ...require("./star"), own: local, ... };`
- *     Each getter body the chase can follow types the export by its
- *     resolved VALUE (`() => localBinding` resolves to the binding's
- *     inferred type; member chains and scalar literals hoist to a tail
- *     const first), and every lexer-visible name the chase cannot follow
- *     falls back to a checked-dynamic `any` binding (value undefined —
- *     exactly what Node's import binds for a lexer-visible name the
- *     runtime export object never carries).
- *
- * LEXER PARITY IS THE CONTRACT: the rewritten text must answer the SAME
- * name set to cjs-lexer.ts that the original answers to Node — named
- * imports must link exactly where Node's would. The table is formatted
- * for merve's byte rules (`name: IDENT,` — value ident runs directly
- * followed by ','), star re-exports ride spread entries (recorded as
- * reexports and resolved recursively, exactly Node's union), and the
- * esbuild `__esModule: !0` marker is spelled as a deliberate SCAN STOPPER
- * so it stays lexer-invisible (Node never lexes __esModule out of
- * __toCommonJS) while member-access star entries after it are covered by
- * the spread records.
- *
- * SNAPSHOT SEMANTICS (the documented divergence): the getter table reads
- * its locals LIVE at every access; the canonical table captures values
- * ONCE, at module tail — after every top-level statement ran, so ordinary
- * modules see identical values, and only post-evaluation reassignment of
- * an exported local (the lazy-cache counter idiom) can diverge. Star
- * re-export targets load at module tail instead of their original
- * statement positions (visible only to load-order-sensitive side
- * effects). Node's __esModule marker survives on the rewritten object.
- *
- * THE IMPORT-SIDE TWIN: the same pass erases esbuild's __toESM interop
- * wrapper around EXTERNAL dependencies (`var import_x =
- * __toESM(require("x"))`, the `, 1` node-mode variant, inline
- * member-accessed forms) — see the section header at planToEsmInterop.
- * The wrapper pads down to the bare require it wraps and module-valued
- * `.default` accesses pad down to their binding, so member accesses model
- * on the required package's canonical table through the ordinary require
- * machinery. Interop the recognizers cannot finish answers `{ degrade }`:
- * the caller reports the package as an offender (naming the construct)
- * and it serves from the island — never a failed build.
- *
- * Everything here is SYNTACTIC (the owned native TypeScript AST): the chase decides only what TEXT to emit — the
- * checker then infers the types from the emitted spellings. A file whose
- * export mechanism the recognizers cannot fully account for is left
- * untouched (null): its import-site errors stay, and the frontend's
- * offender attribution degrades the PACKAGE to the island with a note. */
-
 import * as ts from "./ts7/syntax.js";
 import {
   bareRequireSpecOf,
@@ -245,28 +171,6 @@ function isPlainName(name: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name);
 }
 
-/* ── the __toESM(require(…)) interop import ──────────────────────────────
- * esbuild's CJS output wraps every import of an EXTERNAL (unbundled)
- * dependency in its __toESM helper: `var import_x = __toESM(require("x"))`
- * (a trailing `, 1` in node mode). The wrapper's runtime semantics are
- * static facts the required target decides: `default` binds the required
- * module.exports itself (node mode, or a target whose __esModule is not
- * truthy — the plain-CJS answer) or passes through to the target's own
- * `default` export (the transpiled-ESM stamps), and every other member is
- * a getter passthrough of the target's export. So the wrapper ERASES: the
- * call pads down to the bare `require("x")` it wraps (a require binding
- * the whole existing machinery models — the edge, the inline %init, the
- * canonical-table member reads), and `.default` accesses on the binding
- * pad down to the binding itself exactly where Node's answer is the
- * module. The helper is recognized BY STRUCTURE (the cjs-lexer precedent:
- * a quirk-faithful recognizer over the vendored text, never a general
- * JS-semantics engine); a file whose interop deviates beyond recognition
- * answers a DEGRADE reason and the package falls back to the island with
- * the note — never a failed build, and never the silent alternative (an
- * unrecognized-but-live helper keeps `var __create = Object.create;`
- * alive, whose value declaration fences AT MODULE LOAD — the package
- * would crash on its first import while the report claimed it static). */
-
 interface ToEsmPlan {
   /** Wrapper/`.default` spans to space-pad (they join `neutralize`, so the
    * helper sweep sees the erased call sites as dead references). */
@@ -276,8 +180,7 @@ interface ToEsmPlan {
    * and TEXT COPIED off the source (the canonical table's hoisted getter
    * bodies) must drop the member spelling the same way. */
   moduleBindings: Set<string>;
-  /** Non-null: the file's interop deviates beyond recognition — the reason
-   * the offender note carries (the package degrades to the island). */
+
   degrade: string | null;
 }
 
@@ -354,17 +257,15 @@ function recognizedToEsmDecl(stmt: ts.Statement): boolean {
 
 const TO_ESM_SHAPE_DEGRADE =
   "its shipped JS calls the __toESM bundler-interop helper but spells it in a shape the " +
-  "recognizer cannot verify — the package serves from the island instead";
+  "recognizer cannot verify";
 const TO_ESM_ESCAPE_DEGRADE =
   "a __toESM(require(…)) bundler-interop object escapes into a use the static rewrite cannot " +
-  "follow (only module-scope bindings and direct member reads compile) — the package serves " +
-  "from the island instead";
+  "follow (only module-scope bindings and direct member reads compile)";
 const TO_ESM_ARG_DEGRADE =
   "it calls the __toESM bundler-interop helper on something other than require(…) of a string " +
-  "literal — the package serves from the island instead";
+  "literal";
 const TO_ESM_MIXED_DEGRADE =
-  "its bundler-emitted export surface cannot be respelled around its __toESM interop imports " +
-  "— the package serves from the island instead";
+  "its bundler-emitted export surface cannot be respelled around its __toESM interop imports";
 
 /** The interop-erasure plan for one CJS file (see the section header). */
 function planToEsmInterop(sf: ts.SourceFile, filePath: string, host: CjsRewriteHost): ToEsmPlan {
@@ -554,7 +455,7 @@ const RESERVED_KEYS = new Set(["__proto__"]);
  * nothing to fix) — serve the file untouched. A `{ degrade }` answer means
  * the file carries a bundler-interop construct the recognizers cannot
  * finish: the caller reports the PACKAGE as an offender with the reason
- * and the fallback loop islands it — never a failed build. */
+ * and the selection loop records a package refusal. */
 export function rewriteBundlerCjsSyntax(
   sf: ts.SourceFile,
   filePath: string,
@@ -572,8 +473,7 @@ export function rewriteBundlerCjsSyntax(
       ? {
           degrade:
             "its ES-module dist routes an external dependency through the __toESM " +
-            "bundler-interop helper, which has no static story in ESM output — the " +
-            "package serves from the island instead",
+            "bundler-interop helper, which cannot compile natively in ESM output",
         }
       : null;
   }

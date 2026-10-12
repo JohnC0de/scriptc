@@ -19,7 +19,6 @@ for (const backend of ["llvm"] as const) {
       );
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
         optimization: "dev",
         outDir: scratch,

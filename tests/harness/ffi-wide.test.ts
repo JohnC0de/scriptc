@@ -90,7 +90,6 @@ describe.each(["llvm"] as const)("native FFI wide integers and pointers, %s", (b
     const entry = join(fixture, "wide.ts");
     const result = await compile(entry, {
       backend,
-      dynamic: false,
       sanitize,
       outDir,
       outPath: join(outDir, "program"),

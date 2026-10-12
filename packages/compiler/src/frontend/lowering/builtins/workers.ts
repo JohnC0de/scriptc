@@ -56,7 +56,7 @@ export function lowerWorkerNew(lowerer: Lowerer, expression: ts.NewExpression): 
       "the worker entry must resolve to a statically compiled source file",
     );
   }
-  if (lowerer.dynamic || lowerer.targetPlatform === "wasi") {
+  if (lowerer.targetPlatform === "wasi") {
     lowerer.noLowering(
       "Worker execution in this target",
       expression,

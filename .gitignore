@@ -2,6 +2,7 @@ node_modules/
 .pnpm-store/
 # test-fixture packages are TEST DATA, committed on purpose
 !tests/diagnostics/npm-imports/node_modules/
+!tests/diagnostics/retired-engine-import-refusal/node_modules/
 !tests/fixtures/commander-calc/node_modules/
 !tests/fixtures/npm/node_modules/
 !tests/corpus/*/node_modules/
@@ -25,7 +26,6 @@ output/
 /packages/runtime-*/artifacts/
 /packages/runtime-*/runtime-pack.json
 /packages/runtime-*/.runtime-pack-*
-!tests/fixtures/fetch/node_modules/eventsource-parser/dist/
 !tests/fixtures/npm/node_modules/*/dist/
 !tests/fixtures/npm/workspace/*/dist/
 !tests/fixtures/npm/cases/workspace-copied/members/*/dist/
@@ -35,7 +35,7 @@ output/
 *.log
 .DS_Store
 packages/runtime/test/build/
-# lazily built engine archives for --dynamic (see packages/runtime/vendor/README.md)
+# Cached build-time evaluator archives (see packages/runtime/vendor/README.md)
 packages/runtime/vendor/.cache/
 # fs corpus scratch directories (created in the test cwd, removed on clean runs)
 tmp-*/

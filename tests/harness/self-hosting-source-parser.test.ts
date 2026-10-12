@@ -134,15 +134,13 @@ for (const backend of ["llvm"] as const) {
           libraries: [object],
         }),
       );
-      const coverage = await analyzeInChild(entry, { dynamic: false, ffiProfilePath: profile });
+      const coverage = await analyzeInChild(entry, { ffiProfilePath: profile });
       expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.stats.functionsSkipped).toBe(0);
       const built = await compileInChild(entry, {
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize,
         ffiProfilePath: profile,

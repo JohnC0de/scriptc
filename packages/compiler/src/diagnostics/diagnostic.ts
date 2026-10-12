@@ -18,8 +18,8 @@
  *   SC4xxx  library-mode/profile refusals (the library-emission mode): profile
  *            malformed (SC4001), export unresolved (SC4002), unmappable
  *            signature (SC4003), async/generator export (SC4004), the
- *            async_free graph requirement (SC4005), island/dynamic on the
- *            library path (SC4006), generic export signatures (SC4007),
+ *            async_free graph requirement (SC4005), generic export
+ *            signatures (SC4007; SC4006 is retired),
  *            contract-sidecar projection (SC4009), multi-site type
  *            declarations feeding a tabled type (SC4010), conditional/
  *            mapped types producing a tabled type (SC4011), the
@@ -272,7 +272,7 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
     hint:
       "relative imports (./file, ../dir/file), package.json-mediated project " +
       "imports (#alias via the imports field, self-name references via " +
-      "exports), installed npm packages (their code runs under --dynamic), " +
+      "exports), statically compiled npm packages, " +
       "and the built-in fs, fs/promises, path, os, url, crypto, zlib, " +
       "child_process, net, http, tls, https, http2, dgram, dns, util, " +
       "util/types, string_decoder, querystring, readline, events, stream, " +
@@ -412,76 +412,69 @@ export const UNSUPPORTED: Record<string, UnsupportedEntry> = {
  * of UNSUPPORTED): the other half of the enumerable code registry, indexed
  * so the surface manifest (coverage/surface-manifest.ts) can catalog every
  * refusal code a program's constructs can meet. `status` says what the
- * refusal means for the construct: "dynamic-only" codes mark constructs
- * that RUN under --dynamic (the report's dynamic-capable family —
- * SC2010/SC2011/SC2012/SC2013); "unsupported" codes mark constructs with
- * no lowering on either tier. Process-level codes are deliberately absent:
+ * refusal means for the construct. Process-level codes are deliberately absent:
  * preflight gates (SC0001–SC0004), comptime evaluation failures (SC1110),
  * backend/target refusals (SC3001/SC3002), and internal errors
- * (SC9001/SC9002) report problems or engine tiers, not language/stdlib
+ * (SC9001/SC9002) report compilation problems, not language/stdlib
  * surface. */
-export const FENCE_CODES: Record<string, { name: string; status: "unsupported" | "dynamic-only" }> =
-  {
-    // SC2001 is the residual type fence: the named type-shape families each
-    // carry their own code (SC2005 generic signatures, SC2006 index
-    // signatures, SC2007 overloads, SC2008 intersections, SC2009 component
-    // fences; standard-library types with no lowering report SC2020). What
-    // remains here is the remainder the name enumerates.
-    SC2001: {
-      name: "values of types outside the compilable set (constructor objects and library-derived or unresolved generic shapes)",
-      status: "unsupported",
-    },
-    SC2002: {
-      name: "record shape flows outside the width-copy rules (shapes must match exactly or width-coerce)",
-      status: "unsupported",
-    },
-    SC2003: {
-      name: "union-to-union conversions outside the re-tagging rule",
-      status: "unsupported",
-    },
-    SC2004: {
-      name: "uses of a binding whose declaration did not compile (cascade marker)",
-      status: "unsupported",
-    },
-    SC2005: {
-      name: "values whose type keeps a generic call signature (a compiled function is one concrete signature)",
-      status: "unsupported",
-    },
-    SC2006: {
-      name: "index-signature object types outside the supported shape",
-      status: "unsupported",
-    },
-    SC2007: {
-      name: "values of overloaded function type (a compiled function value is one signature)",
-      status: "unsupported",
-    },
-    SC2008: { name: "intersection types with no resolved lowering", status: "unsupported" },
-    SC2009: {
-      name: "supported container and function shapes over a component type outside its slot",
-      status: "unsupported",
-    },
-    SC2010: {
-      name: "constructs that exist only in the embedded dynamic engine",
-      status: "dynamic-only",
-    },
-    SC2011: { name: "'any'-typed values and the operations on them", status: "dynamic-only" },
-    SC2012: {
-      name: "standard-library surface that runs in the embedded dynamic engine",
-      status: "dynamic-only",
-    },
-    SC2013: {
-      name: "npm package imports and values (the package's implementation runs in the embedded engine)",
-      status: "dynamic-only",
-    },
-    SC2020: {
-      name: "standard-library or @types/node surface with no lowering",
-      status: "unsupported",
-    },
-    SC2030: {
-      name: "npm package code that cannot be embedded for the dynamic engine",
-      status: "unsupported",
-    },
-  };
+export const FENCE_CODES: Record<string, { name: string; status: "unsupported" }> = {
+  // SC2001 is the residual type fence: the named type-shape families each
+  // carry their own code (SC2005 generic signatures, SC2006 index
+  // signatures, SC2007 overloads, SC2008 intersections, SC2009 component
+  // fences; standard-library types with no lowering report SC2020). What
+  // remains here is the remainder the name enumerates.
+  SC2001: {
+    name: "values of types outside the compilable set (constructor objects and library-derived or unresolved generic shapes)",
+    status: "unsupported",
+  },
+  SC2002: {
+    name: "record shape flows outside the width-copy rules (shapes must match exactly or width-coerce)",
+    status: "unsupported",
+  },
+  SC2003: {
+    name: "union-to-union conversions outside the re-tagging rule",
+    status: "unsupported",
+  },
+  SC2004: {
+    name: "uses of a binding whose declaration did not compile (cascade marker)",
+    status: "unsupported",
+  },
+  SC2005: {
+    name: "values whose type keeps a generic call signature (a compiled function is one concrete signature)",
+    status: "unsupported",
+  },
+  SC2006: {
+    name: "index-signature object types outside the supported shape",
+    status: "unsupported",
+  },
+  SC2007: {
+    name: "values of overloaded function type (a compiled function value is one signature)",
+    status: "unsupported",
+  },
+  SC2008: { name: "intersection types with no resolved lowering", status: "unsupported" },
+  SC2009: {
+    name: "supported container and function shapes over a component type outside its slot",
+    status: "unsupported",
+  },
+  SC2010: {
+    name: "runtime JavaScript execution",
+    status: "unsupported",
+  },
+  SC2011: { name: "'any'-typed values and the operations on them", status: "unsupported" },
+  SC2012: {
+    name: "standard-library forms without native lowering",
+    status: "unsupported",
+  },
+  SC2013: {
+    name: "npm package imports and values without native lowering",
+    status: "unsupported",
+  },
+  SC2020: {
+    name: "standard-library or @types/node surface with no lowering",
+    status: "unsupported",
+  },
+  // SC2030 (npm embedding failure) is retired; do not reuse.
+};
 
 export function unsupportedDiag(
   code: keyof typeof UNSUPPORTED & `SC${number}`,
@@ -603,21 +596,15 @@ export function strictNullChecksFloorDiag(configFile: string): ScrDiagnostic {
 }
 
 export function unsupportedTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
-  // `any` gets its own wording AND its own code: it is not an unsupported
-  // value type but a construct with a DYNAMIC lowering — under --dynamic,
-  // any-typed code runs in the embedded engine. This build didn't opt in,
-  // so each site reports the choice: pay ~620KB, or stay static with
-  // 'unknown' + a checked cast. The distinct code lets the coverage report
-  // separate "runs with --dynamic" from "cannot compile". One voice with
-  // SC2010/SC2012: same message shape, same cost figure, same
-  // stay-static alternative shape.
+  // `any` has a distinct diagnostic so coverage can identify operations
+  // that need a represented type or an explicit checked cast.
   if (typeText === "any") {
     return {
       code: "SC2011",
-      message: `values of type 'any' run in the embedded dynamic engine, which this build does not include`,
+      message: `values of type 'any' have no native representation at this site`,
       loc,
       milestone: "M4",
-      hint: "build with --dynamic to run 'any'-typed code in the embedded engine (adds ~620KB to the binary), or stay static with 'unknown' and a checked cast ('x as T')",
+      hint: "use a supported typed value, or 'unknown' with a checked cast ('x as T')",
     };
   }
   // The RESIDUAL type fence: the named families (generic signatures —
@@ -633,24 +620,6 @@ export function unsupportedTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnosti
       `(supported: number, string, boolean, arrays, Maps, Sets, RegExp, read-only Date values, functions, classes, records, unions of those, and 'unknown')`,
     loc,
     milestone: "M2",
-  };
-}
-
-/** A type with a DYNAMIC representation but no static one — `any[]`,
- * records/functions with `any`-typed members, or a shipped-.d.ts type whose
- * values are island handles. The caller PROVED the claim by re-running
- * mapType with `dynamic: true` before choosing this wording, so the message
- * is a measured fact, not a guess. SC2011 like the bare-`any` arm of
- * unsupportedTypeDiag (one dynamic-family code per story: this is the
- * "values of this TYPE run in the engine" story), and "runs in" voice like
- * SC2012 — the value exists under --dynamic; the build just didn't opt in. */
-export function requiresDynamicTypeDiag(typeText: string, loc: SrcLoc): ScrDiagnostic {
-  return {
-    code: "SC2011",
-    message: `values of type '${typeText}' have no static representation but run in the embedded dynamic engine, which this build does not include`,
-    loc,
-    milestone: "M4",
-    hint: "build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)",
   };
 }
 
@@ -773,13 +742,12 @@ export function noLoweringDiag(
   };
 }
 
-/** A resolved native addon needs Node's embedding ABI, even when the
- * caller opts into scriptc's dynamic engine. The migration uses the
+/** A resolved native addon needs Node's embedding ABI. The migration uses the
  * underlying native operation through an ordinary C ABI declaration. */
 export function nativeAddonDiag(specifier: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC2020",
-    message: `native addon '${specifier}' requires Node's addon runtime, which is unavailable in static and --dynamic builds`,
+    message: `native addon '${specifier}' requires Node's addon runtime, which is unavailable in scriptc`,
     loc,
     milestone: "later",
     hint: "expose the native operation as a plain C ABI function in an object or static archive, then bind a signature-only TypeScript declaration with --ffi; Node-API callbacks themselves require Node (https://scriptc.dev/ffi#replacing-a-node-api-addon)",
@@ -849,95 +817,64 @@ export function blockedBindingUseDiag(name: string, loc: SrcLoc): ScrDiagnostic 
   };
 }
 
-/** An OPERATION on an `any`-typed value with no static lowering, in a
- * static build. The honest static subset of `any` compiles (bindings ride
- * the checked-dynamic tree — declarations, assignments, reads, equality,
- * typeof, truthiness, templates, calls through boxed functions), but the
- * operations that need JS's full coercion/mutation semantics (operators,
- * expando writes, computed member names, iteration) execute only in the
- * engine. Same code as the `any` type fence (SC2011) so the coverage
- * report and the two-tier retry treat both as one dynamic-capable family:
- * the island lifts exactly these sites. */
-export function anyOpRequiresDynamicDiag(feature: string, loc: SrcLoc): ScrDiagnostic {
+/** Unsupported native operations keep stable diagnostic codes for tooling. */
+export function unsupportedAnyOperationDiag(feature: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC2011",
-    message: `${feature} on 'any'-typed values runs in the embedded dynamic engine, which this build does not include`,
-    loc,
-    milestone: "M4",
-    hint: "build with --dynamic to run 'any'-typed code in the embedded engine (adds ~620KB to the binary), or stay static with 'unknown' and a checked cast ('x as T')",
-  };
-}
-
-/** A construct that needs the embedded dynamic-island engine was used in a
- * static build. Static is the default and never silently embeds the engine
- * (~620KB); the fix is spelled out in the hint, not applied implicitly.
- * "Requires" (vs SC2011/SC2012's "runs in"): the construct is engine-only
- * — it has no static form to stay with, so the hint offers no alternative. */
-export function requiresDynamicDiag(feature: string, loc: SrcLoc): ScrDiagnostic {
-  return {
-    code: "SC2010",
-    message: `${feature} requires the embedded dynamic engine, which this build does not include`,
-    loc,
-    milestone: "M4",
-    hint: "build with --dynamic to embed the engine (adds ~620KB to the binary); static builds never include it",
-  };
-}
-
-/** An ambient API with an island-backed lowering (Math.*, number/string
- * methods beyond the static set, parseFloat, ...) was used in a static
- * build. Same contract as SC2010, its own code so the coverage report can
- * name the construct: the call RUNS under --dynamic (the engine executes
- * it with JS-exact semantics); without the flag each use site reports the
- * choice instead of ICEing or failing at link time. */
-export function requiresDynamicApiDiag(feature: string, loc: SrcLoc, hint?: string): ScrDiagnostic {
-  return {
-    code: "SC2012",
-    message: `${feature} runs in the embedded dynamic engine, which this build does not include`,
-    loc,
-    milestone: "M4",
-    hint:
-      hint ??
-      "build with --dynamic to run this call in the embedded engine (adds ~620KB to the binary); static builds never include it",
-  };
-}
-
-/** An npm package import in a static build. The package's shipped JS has
- * exactly one execution home — the embedded engine — so the import itself
- * "requires" (SC2010's voice); its own code so the coverage report can
- * attribute sites per package. */
-export function requiresDynamicImportDiag(pkg: string, loc: SrcLoc): ScrDiagnostic {
-  return {
-    code: "SC2013",
-    message: `importing '${pkg}' requires the embedded dynamic engine, which this build does not include — the package's implementation runs there`,
-    loc,
-    milestone: "M4",
-    hint: "build with --dynamic to run npm package code in the embedded engine (adds ~620KB to the binary), or try --npm-static auto to compile eligible packages' JavaScript statically; static builds never include the engine",
-  };
-}
-
-/** A USE SITE of a value whose type the package's .d.ts declares, in a
- * static build. Message names ONLY the package (never the type) so the
- * coverage report groups all of a package's sites into one line. */
-export function requiresDynamicPackageDiag(pkg: string, loc: SrcLoc): ScrDiagnostic {
-  return {
-    code: "SC2013",
-    message: `values from the '${pkg}' package run in the embedded dynamic engine, which this build does not include`,
-    loc,
-    milestone: "M4",
-    hint: "build with --dynamic to run npm package code in the embedded engine (adds ~620KB to the binary), or try --npm-static auto to compile eligible packages' JavaScript statically; static builds never include the engine",
-  };
-}
-
-/** Building the embedded npm runtime graph failed — the package's entry
- * or one of its internal modules can't resolve, or it needs a Node builtin
- * the island doesn't shim. Named per problem, at the import site. */
-export function npmEmbedFailedDiag(detail: string, loc: SrcLoc): ScrDiagnostic {
-  return {
-    code: "SC2030",
-    message: `cannot embed npm package code: ${detail}`,
+    message: `${feature} on 'any'-typed values cannot compile statically`,
     loc,
     milestone: "later",
-    hint: "the package's runtime JS is embedded at build time and executed in the island; packages that reach outside the shimmed builtins (events, path, fs, os, process, util, buffer, stream, crypto, zlib, url, assert, and the rest of `scriptc coverage`'s shimmed table — http/https clients and net/tls load too; http2 and worker_threads are the notable absences) do not run yet",
+    hint: "use a supported typed operation, or 'unknown' with a checked cast ('x as T')",
+  };
+}
+
+export function unsupportedNativeExecutionDiag(feature: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2010",
+    message: `${feature} cannot compile statically`,
+    loc,
+    milestone: "later",
+    hint: "scriptc compiles program code to native instructions; runtime JavaScript evaluation is unsupported",
+  };
+}
+
+export function unsupportedNativeApiDiag(
+  feature: string,
+  loc: SrcLoc,
+  hint?: string,
+): ScrDiagnostic {
+  return {
+    code: "SC2012",
+    message: `${feature} cannot compile statically`,
+    loc,
+    milestone: "later",
+    hint: hint ?? "use a supported API or rewrite this operation for native compilation",
+  };
+}
+
+export function unsupportedPackageImportDiag(pkg: string, loc: SrcLoc): ScrDiagnostic {
+  return npmStaticRefusalDiag(
+    pkg,
+    "its implementation is not part of the compiled module graph",
+    loc,
+  );
+}
+
+export function unsupportedPackageValueDiag(pkg: string, loc: SrcLoc): ScrDiagnostic {
+  return npmStaticRefusalDiag(
+    pkg,
+    "its implementation is not part of the compiled module graph",
+    loc,
+  );
+}
+
+export function npmStaticRefusalDiag(pkg: string, detail: string, loc: SrcLoc): ScrDiagnostic {
+  return {
+    code: "SC2013",
+    message: `cannot compile npm package '${pkg}' statically: ${detail}`,
+    loc,
+    milestone: "later",
+    hint: "use a dependency with supported source, or replace the unsupported operation; scriptc has no interpreter fallback",
   };
 }
 
@@ -1229,19 +1166,13 @@ export function libCallbackDiag(name: string, detail: string, loc: SrcLoc): ScrD
       "abi.callback_register_symbol before calling any entry that can reach the channel",
   };
 }
-/** SC4020 — a bare npm specifier in a library graph naming a package that
- * fails the npm-static eligibility bar (own .d.ts, unminified shipped JS,
- * no build-transform markers) or whose static compilation the preflight
- * had to refuse. Library mode is STATIC-OR-REFUSE by construction: the
- * island/dynamic tier the executable lane falls back to does not exist on
- * this path (SC4006's ground), so the refusal names the package, the
- * specific bar it missed, and the remedy. */
+
 export function libNpmIneligibleDiag(pkg: string, reason: string, loc: SrcLoc): ScrDiagnostic {
   return {
     code: "SC4020",
     message: `library mode compiles npm packages statically or not at all, and '${pkg}' cannot compile statically: ${reason}`,
     loc,
-    hint: "library artifacts have no island/dynamic tier to fall back to — vendor the code you need from the package as project modules, or drop the dependency",
+    hint: "vendor compilable code from the package as project modules, or drop the dependency",
   };
 }
 

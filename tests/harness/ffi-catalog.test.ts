@@ -45,7 +45,6 @@ describe.each(["llvm"] as const)("static node:ffi catalog, %s", (backend) => {
     const entry = join(fixture, "catalog.mjs");
     const result = await compile(entry, {
       backend,
-      dynamic: false,
       sanitize,
       outDir,
       outPath: join(outDir, "program"),

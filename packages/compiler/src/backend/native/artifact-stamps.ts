@@ -370,8 +370,6 @@ export function localArtifactIdentity(
     );
   }
   return hash
-    .update(process.env["SCRIPTC_FETCH_CURL"] === "1" ? "fetch-curl" : "fetch-native")
-    .update("\0")
     .update(JSON.stringify(normalizedOptions))
     .update("\0")
     .update(resolve(opts.cPath))

@@ -81,7 +81,6 @@ export interface RuntimePackManifest {
 export interface RuntimeFeatureSet extends NativeLinkFeatures {
   workers: boolean;
   nativeFetch: boolean;
-  netIslandEffective: boolean;
   netEffective: boolean;
   httpEffective: boolean;
   tlsEffective: boolean;
@@ -255,26 +254,17 @@ function isRuntimePackTarget(target: Record<string, unknown> | null): boolean {
 
 export function effectiveRuntimeFeatures(
   features: NativeLinkFeatures,
-  env: NodeJS.ProcessEnv = process.env,
+  _env: NodeJS.ProcessEnv = process.env,
 ): RuntimeFeatureSet {
-  const curlFetch = features.dynamic && features.fetch && env["SCRIPTC_FETCH_CURL"] === "1";
-  if (curlFetch) {
-    throw new RuntimePackError(
-      "SCRIPTC_FETCH_CURL=1 is an external developer-toolchain comparison mode and is not available with precompiled runtime packs",
-      "unsupported",
-    );
-  }
   const nativeFetch = features.fetch;
-  const netIslandEffective = features.dynamic && (features.netIsland || nativeFetch);
-  const netEffective = features.net || nativeFetch || netIslandEffective;
-  const httpEffective = features.http || nativeFetch || netIslandEffective;
-  const tlsEffective = features.tls || nativeFetch || netIslandEffective;
+  const netEffective = features.net || nativeFetch;
+  const httpEffective = features.http || nativeFetch;
+  const tlsEffective = features.tls || nativeFetch;
   const tlsCaEffective = features.tlsCa || tlsEffective;
   return {
     ...features,
     workers: features.workers === true,
     nativeFetch,
-    netIslandEffective,
     netEffective,
     httpEffective,
     tlsEffective,
@@ -380,10 +370,7 @@ export function selectRuntimePackArtifacts(
   mode: RuntimePackMode = "executable",
 ): RuntimePackArtifacts {
   const features = effectiveRuntimeFeatures(requested, env);
-  if (
-    features.workers &&
-    (mode !== "executable" || features.dynamic || manifest.target.object_format === "wasm")
-  )
+  if (features.workers && (mode !== "executable" || manifest.target.object_format === "wasm"))
     throw new RuntimePackError("worker threads require a native static executable", "unsupported");
   const key = runtimePackFlavorKey(manifest, flavor, mode);
   const selectedFlavor = manifest.flavors[key];
@@ -391,11 +378,6 @@ export function selectRuntimePackArtifacts(
     throw new RuntimePackError(
       `runtime pack has no ${key} flavor; reinstall the matching runtime package`,
       "invalid",
-    );
-  if (mode !== "executable" && requested.dynamic)
-    throw new RuntimePackError(
-      "library runtime packs do not support dynamic execution",
-      "unsupported",
     );
   return {
     features,

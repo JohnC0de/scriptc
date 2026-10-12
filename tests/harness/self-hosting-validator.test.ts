@@ -21,7 +21,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: join(dir, process.platform === "win32" ? "validator.exe" : "validator"),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });
@@ -76,7 +75,6 @@ for (const backend of ["llvm"] as const) {
           outDir: dir,
           outPath: irPath,
           outputKind: "ir",
-          dynamic: false,
         });
         if (!emitted.ok)
           throw new Error(emitted.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

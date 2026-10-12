@@ -16,7 +16,6 @@ async function lower(source: string): Promise<IrModule> {
       outDir: dir,
       outPath: output,
       outputKind: "ir",
-      dynamic: false,
     });
     if (!result.ok)
       throw new Error(result.diagnostics.map((item) => `${item.code}: ${item.message}`).join("\n"));

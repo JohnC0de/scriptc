@@ -13,7 +13,7 @@ function emit(type: IrType, tests: (IrExpr | null)[], pointerBits: 32 | 64 = 64)
 function emitWith(disc: IrExpr, tests: (IrExpr | null)[], pointerBits: 32 | 64 = 64): string {
   const type = disc.kind === "varRef" ? disc.type : F64;
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [

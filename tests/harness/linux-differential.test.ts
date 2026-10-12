@@ -1,40 +1,3 @@
-/* The Linux differential lane — env-gated (SCRIPTC_LINUX=1), skipped everywhere
- * else so the macOS lanes never see it. The workflow (docs/linux-port.md):
- * corpus programs are CROSS-COMPILED on the host via `zig cc`
- * (SCRIPTC_CC=zigcc, SCRIPTC_TARGET=<linux triple>) and both sides run
- * inside one Linux container — the binary, and a LINUX Node as the oracle.
- * GNU targets use node:<.node-version>-bookworm (whose glibc matches the
- * triple's pin); <arch>-linux-musl uses the matching Alpine Node image.
- * Same contract as differential.test.ts: stdout byte-equal, stderr
- * byte-equal for exit-0 programs, exit codes agree with the `// @exit:`
- * directive.
- *
- * Scope: the whole corpus plus the LISTENING harnesses — `// @dynamic`
- * programs included (the engine archive cross-builds per target). NO
- * feature is cross-gated to Linux anymore (fetch, the last one, links
- * through the vendored curl headers + soname stub and binds the
- * container's system libcurl at load time); the compile-time skip arm
- * below stays as the honest surface for any future gate. Everything runs
- * for real: the loop-portable surfaces (timers/async, signals/stdin,
- * process/fs, child_process), the dynamic island (per-target libqjs.a),
- * regex (per-target libregexp objects),
- * zlib (per-target vendored objects), fs.watch (the inotify arm), the
- * net/http/tls and dgram/dns fixtures (tests/fixtures/{server,dgram},
- * mbedTLS built per target), three legs compared byte-exactly with BOTH
- * lanes and the per-case driver all running inside the container
- * (server.test.ts's contract), the fetch fixtures
- * (tests/fixtures/fetch) — the identical servers.mjs routes running
- * standalone in the container, both lanes under the poisoned proxy env,
- * fetch.test.ts's whole contract including the NODE_USE_ENV_PROXY
- * opt-in's relay count — the npm differential (npm-cases.ts: the
- * resolution matrix plus the commander acceptance CLI), the node:test
- * differential (node-test-normalize.ts's documented scrub), and the
- * piped-stdin differential (event-loop-cases.ts's scripts through
- * docker exec -i). macOS's known flake classes apply here
- * too (event-loop
- * timing, child reap-order — 1466 has been seen swapping exit order
- * under the Linux reap poll). SCRIPTC_LINUX_FILTER=<regex> narrows a run
- * to matching corpus/fixture names for triage. */
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, globSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -64,21 +27,10 @@ const muslTarget = target.includes("linux-musl");
 const mountPoint = repoRoot;
 const containerName = `scr-linux-lane-${process.pid}`;
 
-// The lane attempts the WHOLE corpus — `// @dynamic` programs included
-// (the engine archive cross-builds per target since
-// buildEngineArchiveCross). Nothing in the corpus is cross-gated to
-// Linux today (fetch, the last gate, lifted with the curl soname stub);
-// the compile-time skip arm below is the visible surface any FUTURE gate
-// would take. Everything must PASS against the Linux Node oracle.
+// The lane compiles the whole corpus natively and compares it with the
+// Linux Node oracle. Any future target capability refusal is visible below.
 function directiveHead(file: string): string[] {
   return readFileSync(file, "utf8").split("\n", 2);
-}
-
-/** `// @dynamic` (differential.test.ts's directive): compile with the
- * island engine embedded. The Node side needs no flag — the island shim
- * covers the surface. */
-function wantsDynamic(file: string): boolean {
-  return directiveHead(file).some((l) => /^\/\/ @dynamic\s*$/.test(l));
 }
 
 /** `// @transform-types` (differential.test.ts's directive): the Node
@@ -249,12 +201,7 @@ async function runLinuxNode(file: string): Promise<RunResult> {
       : []),
     ...(directiveHead(file).includes("// @no-node-shims")
       ? []
-      : [
-          "--import",
-          inContainer(join(repoRoot, "tests/harness/comptime-shim.mjs")),
-          "--import",
-          inContainer(join(repoRoot, "tests/harness/island-shim.mjs")),
-        ]),
+      : ["--import", inContainer(join(repoRoot, "tests/harness/comptime-shim.mjs")), "--import"]),
     inContainer(nodeOracleFile(file)),
   ]);
 }
@@ -277,7 +224,6 @@ async function crossCompileAndRun(file: string): Promise<RunResult> {
   const result = await compile(file, {
     outPath: join(outDir, "program"),
     outDir,
-    dynamic: wantsDynamic(file),
     backend: "llvm",
   });
   if (!result.ok) {
@@ -395,28 +341,8 @@ function fixtureCases(root: string): { name: string; entry: string; driver: stri
 const serverCases = fixtureCases(join(repoRoot, "tests/fixtures/server"));
 const dgramCases = fixtureCases(join(repoRoot, "tests/fixtures/dgram"));
 
-/* ── the fetch fixtures (tests/fixtures/fetch) — fetch.test.ts's contract
- * with everything in the container: servers.mjs runs standalone under the
- * container's Node (the IDENTICAL routes the macOS harness runs
- * in-process) and prints BASE/REFUSED/PROXY on stderr; each case then runs
- * under the container's Node AND cross-compiled --dynamic, both lanes
- * inheriting the POISONED proxy env that Node's fetch and libcurl-backed
- * fetch must BOTH ignore (fetch.test.ts's parity regression — libcurl's
- * default is to honor it); stdout byte-equal, exit codes agree. The
- * proxy-optin case opts in with NODE_USE_ENV_PROXY=1 pointing at the
- * counting proxy and must relay exactly one request per lane (the count
- * read over the wire via the proxy's /__count query). */
-
 const fetchCases = fixtureCases(join(repoRoot, "tests/fixtures/fetch"));
 const fetchServersScript = join(repoRoot, "tests/fixtures/fetch/servers.mjs");
-
-/* ── the npm differential (tests/harness/npm-cases.ts — npm.test.ts's
- * exact case table: the embedded-npm resolution matrix plus the commander
- * acceptance CLI with its argv lists). No servers, no drivers: each argv
- * runs under the container's Node (resolving the committed fixture
- * node_modules from the repo mount) and cross-compiled --dynamic (the
- * package sources embedded at build time); stdout byte-equal, exit codes
- * agree. */
 
 const linuxNpmCases = enabled
   ? npmCases(join(repoRoot, "tests/fixtures")).filter(
@@ -499,8 +425,6 @@ function runWithStdinInContainer(
   });
 }
 
-/** Cross-compiles one npm case — npm.test.ts's build(): always --dynamic,
- * the cache key hashing the program and its fixture packages. */
 async function crossCompileNpmCase(entry: string): Promise<string> {
   const hash = createHash("sha256");
   const fixtureDir = join(entry, "../..");
@@ -515,7 +439,6 @@ async function crossCompileNpmCase(entry: string): Promise<string> {
   const result = await compile(entry, {
     outPath: join(outDir, "program"),
     outDir,
-    dynamic: true,
     backend: "llvm",
   });
   if (!result.ok) {
@@ -527,9 +450,6 @@ async function crossCompileNpmCase(entry: string): Promise<string> {
   return result.binaryPath;
 }
 
-/** Cross-compiles one fetch fixture — fetch.test.ts's build(): always
- * --dynamic (the ambient fetch is island-backed), the cache key covering
- * the fixture-tree node_modules the embedded npm graphs resolve from. */
 async function crossCompileFetchFixture(entry: string): Promise<string> {
   const hash = createHash("sha256");
   const inputs = [
@@ -545,7 +465,6 @@ async function crossCompileFetchFixture(entry: string): Promise<string> {
   const result = await compile(entry, {
     outPath: join(outDir, "program"),
     outDir,
-    dynamic: true,
     backend: "llvm",
   });
   if (!result.ok) {

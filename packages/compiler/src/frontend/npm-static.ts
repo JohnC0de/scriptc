@@ -1,65 +1,7 @@
-/* The --npm-static opt-in: compile a named npm package's shipped JS
- * STATICALLY, as ordinary program modules, instead of island-running it
- * under --dynamic.
- *
- * The doctrine (slice 2 of the npm story): a package that ships readable,
- * unminified JS alongside its .d.ts can compile through the same
- * JS/CommonJS frontend the program's own JS files use — inference (JSDoc
- * included) types the bodies, and every statement the lowering cannot
- * honor becomes the standard JS runtime fence (the trap throws AT the
- * statement if the program ever drives it — trust-but-verify, never
- * silent trust). The .d.ts is deliberately DROPPED from module resolution:
- * a declaration is a CLAIM about the body, and the compiled artifact must
- * be built from what the body provably is, not from declaration-only
- * values. One bounded part of that claim survives: complete non-generic
- * overload groups over representation-safe types and zero-argument
- * string/number/boolean return contracts project as JSDoc onto their
- * matching exported runtime class. Calls retain authored overload
- * precision while the implementation body, its union ABI, and every
- * runtime fence still come from JavaScript.
- *
- * MECHANISM. Resolution is the single lever:
- *   - tsgo's server-side resolution reads package.json and probes sibling
- *     .d.ts files through the host's virtual-FS hooks, so an opted-in
- *     package's package.json is SHADOWED (its "types"/"typings" fields and
- *     every "types" condition inside "exports" removed), its shipped
- *     declaration files are HIDDEN (fileExists answers false), and its
- *     @types twin is hidden whole — the bundler resolution then lands on
- *     the shipped JS, which allowJs + maxNodeModuleJsDepth admit into the
- *     program as checkable source.
- *   - Before that shadow is enabled, the package's own declaration entry
- *     and relative declaration barrels are scanned for safe overload groups.
- *     The runtime entry binds each class to its direct or one-hop re-export
- *     file, including named ESM aliases; only that class in that file
- *     receives the generated JSDoc projection.
- *   - scriptc's own resolver (resolve.ts) mirrors the same answer: for an
- *     opted-in package the types pass is skipped, the "types" export
- *     condition is dropped, and the @types mangling never runs.
- * Both worlds agreeing, the package's entry (and its internal relative
- * graph) joins userFiles/moduleOrder exactly like program JS, and the
- * whole existing CJS/ESM module machinery — require discipline, the CJS
- * lexer link check, export-identity analysis, %init ordering — applies
- * unchanged.
- *
- * FAILURE MODE: all-or-nothing per package, island fallback. A preflight
- * diagnostic anchored in an opted-in package's files (an unsupported
- * require form, an unshimmed builtin, a resolution miss) marks the
- * package as an OFFENDER; the frontend rebuilds without it and the
- * import takes today's island path (--dynamic) or the requires-dynamic
- * diagnostic (static builds). The fallback is reported in the coverage
- * report, never as a build failure. Checker errors inside opted-in
- * package files do NOT fail preflight and do NOT trigger fallback: the
- * package's author checked it under a different tsconfig, the program's
- * author cannot fix it, and the JS design already says where inference
- * gaps land — the per-statement runtime fences.
- *
- * STATE. One compile at a time: the active set is module state, written
- * by loadProgram (empty when the flag is off) and read by resolve.ts,
- * program.ts, and the lowering. The CLI and the test harness both drive
- * whole compiles sequentially per process, and every loadProgram resets
- * the state, so a flagless compile after a flagged one sees a clean
- * slate. */
-
+/** Compile selected package implementations as program modules. The filesystem
+ * shadow hides declaration-only entry points so lowering sees runtime source;
+ * safe declaration contracts are projected onto that source before inference.
+ * Eligibility failures and package preflight errors become explicit refusals. */
 import { dirname } from "node:path";
 import type { FrontendServices } from "./services.js";
 import type {
@@ -120,7 +62,7 @@ export function isNpmStaticPackage(name: string | null): boolean {
  * node_modules (the symlinked-install shape), and they are that package's
  * files for every consumer of this answer: the fallback loop's offender
  * attribution, the checker-error suppression, and the program-source
- * classification (islandJsFile/userFiles) all agree the opt-in claims
+ * classification (unselectedPackageJsFile/userFiles) all agree the opt-in claims
  * them. */
 export function npmStaticPackageOfPath(path: string): string | null {
   const pkg = npmPackageNameOf(path);
@@ -382,7 +324,7 @@ export function npmStaticFsShadow(services: FrontendServices): NpmStaticFsShadow
       // diagnostics rendering; original line offsets survive by
       // construction). A `degrade` answer (a __toESM interop construct the
       // recognizers cannot finish) marks the PACKAGE an offender with the
-      // reason — the fallback loop islands it, never a failed build — and
+      // reason — the selection loop records a package refusal — and
       // the file serves untouched for the doomed load.
       if (path.endsWith(".js") || path.endsWith(".cjs")) {
         const hit = rewriteCache.get(path);
@@ -441,15 +383,6 @@ export function npmStaticFsShadow(services: FrontendServices): NpmStaticFsShadow
     },
   };
 }
-
-/* ── auto-detection (--npm-static=auto) ─────────────────────────────────
- * The criteria the design doc names: the package ships its OWN .d.ts (a
- * declaration surface its author maintains against the JS — @types twins
- * are third-party claims and do not qualify), the runtime JS is readable
- * (unminified: real lines, ordinary line lengths), and the source shows
- * no build-transform markers (a bundled/transpiled dist is not the code
- * the author checked). Best-effort: a package that slips through and
- * fails preflight falls back to the island like any offender. */
 
 /* Only a bundler RUNTIME disqualifies now: webpack's module registry has
  * no static story (the graph lives in numbered closures). The tsc/babel
