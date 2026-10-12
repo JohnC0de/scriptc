@@ -250,8 +250,55 @@ export function classInstanceOf(
   };
 }
 
+const READ_PROPERTIES = "%dyn.class.readProperties";
+
+function isEmptyBag(value: IrExpr): boolean {
+  return value.kind === "dynObjLit" && value.fields?.length === 0;
+}
+
+/** The property-bag dispatch's class branches without their lazy stores:
+ * `if (bag === undefined) bag = init` becomes nothing for an empty bag and
+ * `return init` for a prototype-backed one. */
+function readOnlyBagBody(body: IrStmt[]): IrStmt[] {
+  for (const branch of body) {
+    if (branch.kind !== "if") continue;
+    const absent = branch.then[0];
+    const store = absent?.kind === "if" ? absent.then[0] : undefined;
+    if (
+      absent?.kind !== "if" ||
+      absent.cond.kind !== "dynTest" ||
+      absent.cond.test !== "undefined" ||
+      absent.then.length !== 1 ||
+      store?.kind !== "fieldSet" ||
+      store.field !== PROPERTY_BAG
+    )
+      continue;
+    if (isEmptyBag(store.value)) branch.then.shift();
+    else absent.then = [{ kind: "return", value: store.value, loc: store.loc }];
+  }
+  return body;
+}
+
+/** A key test on a read-only bag, which is undefined while the object has no
+ * own dynamic properties. */
+function readBagHas(
+  fn: "dyn.hasKey" | "dyn.hasOwnComputed",
+  bag: IrExpr,
+  key: IrExpr,
+  loc: SrcLoc,
+): IrExpr {
+  return {
+    kind: "ternary",
+    cond: { kind: "dynTest", test: "undefined", value: bag, type: BOOL, loc },
+    then: { kind: "boolLit", value: false, type: BOOL, loc },
+    else_: { kind: "libCall", fn, args: [bag, key], type: BOOL, loc },
+    type: BOOL,
+    loc,
+  };
+}
+
 export function classPropertiesHelper(lowerer: Lowerer, loc: SrcLoc, readOnly = false): IrFunction {
-  const name = readOnly ? "%dyn.class.readProperties" : "%dyn.class.properties";
+  const name = readOnly ? READ_PROPERTIES : "%dyn.class.properties";
   const existing = lowerer.liftedFns.find((fn) => fn.name === name);
   if (existing) return existing;
   const helper: IrFunction = {
@@ -1472,13 +1519,15 @@ export class ClassDynamicDispatch {
                 ...(reflect ? [{ localId: "p.reflectReceiver", name: "receiver", type: DYN }] : []),
               ];
               const keyLocal = dynamicKey ? "key.string" : "p.key";
-              const bag: IrExpr = {
-                kind: "call",
-                callee: this.propertyBag!.name,
-                args: [varRef("p.0", DYN, loc)],
-                type: DYN,
-                loc,
-              };
+              const bag: IrExpr = computedWrite
+                ? {
+                    kind: "call",
+                    callee: this.propertyBag!.name,
+                    args: [varRef("p.0", DYN, loc)],
+                    type: DYN,
+                    loc,
+                  }
+                : this.readPropertyBagOrEmpty(lowerer, varRef("p.0", DYN, loc), loc);
               const reflectionFallback = (target: IrExpr, property: IrExpr): IrExpr => ({
                 kind: "libCall",
                 fn: computedWrite ? "dyn.reflectSet" : "dyn.reflectGet",
@@ -1715,13 +1764,15 @@ export class ClassDynamicDispatch {
                 name: `p${i}`,
                 type: DYN,
               }));
-              const instanceBag: IrExpr = {
-                kind: "call",
-                callee: this.propertyBag!.name,
-                args: [varRef("p.0", DYN, loc)],
-                type: DYN,
-                loc,
-              };
+              const instanceBag: IrExpr = read
+                ? this.readPropertyBagOrEmpty(lowerer, varRef("p.0", DYN, loc), loc)
+                : {
+                    kind: "call",
+                    callee: this.propertyBag!.name,
+                    args: [varRef("p.0", DYN, loc)],
+                    type: DYN,
+                    loc,
+                  };
               const bag: IrExpr =
                 read && !["name", "length", "apply"].includes(name)
                   ? {
@@ -2117,13 +2168,7 @@ export class ClassDynamicDispatch {
         if (isClassCallback(lowerer, info, dispatch.source.method)) {
           const prototypeMethod = lowerer.prototypeMethodAccesses.has(dispatch.source.method);
           if (prototypeMethod) classPrototypeData(lowerer, info, loc);
-          const bag: IrExpr = {
-            kind: "call",
-            callee: this.propertyBag!.name,
-            args: [value],
-            type: DYN,
-            loc,
-          };
+          const bag = this.readPropertyBagOrEmpty(lowerer, value, loc);
           dispatch.callback.body.unshift({
             kind: "if",
             cond: condition,
@@ -2365,13 +2410,11 @@ export class ClassDynamicDispatch {
           const prototypeMethod = lowerer.prototypeMethodAccesses.has(name);
           if (info.fields.has(name) || (dispatch.probe === "in" && !prototypeMethod)) {
             if (info.fields.has(name) && info.def.tracksOwnFields) {
-              const bag: IrExpr = {
-                kind: "call",
-                callee: this.propertyBag!.name,
-                args: [lowerer.coerceToExpected(receiver, DYN)],
-                type: DYN,
+              const bag = this.readPropertyBagOrEmpty(
+                lowerer,
+                lowerer.coerceToExpected(receiver, DYN),
                 loc,
-              };
+              );
               const symbol = symbolMemberKey(lowerer, info, name, loc);
               const fn =
                 dispatch.probe === "in"
@@ -2398,13 +2441,11 @@ export class ClassDynamicDispatch {
             ];
           }
           if (prototypeMethod) classPrototypeData(lowerer, info, loc, receiver);
-          const bag: IrExpr = {
-            kind: "call",
-            callee: this.propertyBag!.name,
-            args: [lowerer.coerceToExpected(receiver, DYN)],
-            type: DYN,
+          const bag = this.readPropertyBagOrEmpty(
+            lowerer,
+            lowerer.coerceToExpected(receiver, DYN),
             loc,
-          };
+          );
           const symbol = name.startsWith("sym:") || name.startsWith("%symbol:");
           const fn =
             dispatch.probe === "in"
@@ -2474,13 +2515,7 @@ export class ClassDynamicDispatch {
           if (!dispatch.write && !dispatch.reflect && !info.def.tracksOwnFields) {
             const value = varRef("p.0", DYN, loc);
             const key = varRef("p.key", DYN, loc);
-            const bag: IrExpr = {
-              kind: "call",
-              callee: this.propertyBag!.name,
-              args: [value],
-              type: DYN,
-              loc,
-            };
+            const bag = this.readPropertyBagOrEmpty(lowerer, value, loc);
             branches.push({
               kind: "if",
               cond: {
@@ -2674,13 +2709,7 @@ export class ClassDynamicDispatch {
         this.enumerationClasses.add(plan.key);
         const loc = this.enumeration.loc;
         const { condition } = this.propertyReceiver(plan, loc);
-        const bag: IrExpr = {
-          kind: "call",
-          callee: this.propertyBag!.name,
-          args: [varRef("p.0", DYN, loc)],
-          type: DYN,
-          loc,
-        };
+        const bag = this.readPropertyBagOrEmpty(lowerer, varRef("p.0", DYN, loc), loc);
         this.enumeration.body.unshift({
           kind: "if",
           cond: condition,
@@ -2787,6 +2816,35 @@ export class ClassDynamicDispatch {
     return changed;
   }
 
+  /** The receiver's own dynamic properties for a read: undefined while it has
+   * none, and never stored, so reads stay valid on published objects. */
+  private readPropertyBag(lowerer: Lowerer, receiver: IrExpr, loc: SrcLoc): IrExpr {
+    const helper = classPropertiesHelper(lowerer, loc, true);
+    this.generated.add(helper);
+    return {
+      kind: "call",
+      callee: helper.name,
+      args: [receiver.type.kind === "dyn" ? receiver : lowerer.coerceToExpected(receiver, DYN)],
+      type: DYN,
+      loc,
+    };
+  }
+
+  /** The bag a read looks a key up in: the receiver's own properties, or a
+   * fresh empty object (not stored) while it has none, so inherited
+   * Object.prototype members still resolve as on an empty bag. */
+  private readPropertyBagOrEmpty(lowerer: Lowerer, receiver: IrExpr, loc: SrcLoc): IrExpr {
+    const bag = this.readPropertyBag(lowerer, receiver, loc);
+    return {
+      kind: "ternary",
+      cond: { kind: "dynTest", test: "undefined", value: bag, type: BOOL, loc },
+      then: { kind: "dynObjLit", fields: [], type: DYN, loc },
+      else_: this.readPropertyBag(lowerer, receiver, loc),
+      type: DYN,
+      loc,
+    };
+  }
+
   /** A known native class can access its shared bag directly. Keep the
    * receiver as an owned parameter so calls and temporary instances retain
    * their ordinary evaluation and lifetime rules without a boxed capsule. */
@@ -2850,13 +2908,24 @@ export class ClassDynamicDispatch {
     return helper;
   }
 
-  /** Prototype state may appear in a later reachable body. Only after the
-   * dispatch worklist closes can an empty bag initializer be omitted; a
-   * prototype-backed bag must still be initialized before inherited reads. */
-  finalize(): void {
+  /** Prototype state may appear in a later reachable body, so read-only bags
+   * settle only after the dispatch worklist closes. A read never stores: an
+   * absent empty bag stays undefined (callers test it), and an absent
+   * prototype-backed bag is produced for this read only. A published object
+   * cannot take the store, and Node's reads never write. */
+  finalize(lowerer?: Lowerer): void {
     for (const { helper, initialize } of this.readPropertyBags) {
-      if (initialize.value.kind === "dynObjLit" && initialize.value.fields?.length === 0)
-        helper.body.shift();
+      const absent = helper.body[0];
+      if (isEmptyBag(initialize.value)) helper.body.shift();
+      else if (absent?.kind === "if")
+        absent.then = [{ kind: "return", value: initialize.value, loc: initialize.loc }];
+    }
+    // The untyped read-only accessor selects the receiver's class as the
+    // complete property-bag dispatch does, without its lazy stores.
+    const read = lowerer?.liftedFns.find((fn) => fn.name === READ_PROPERTIES);
+    if (read && this.propertyBag) {
+      read.locals = structuredClone(this.propertyBag.locals);
+      read.body = readOnlyBagBody(structuredClone(this.propertyBag.body));
     }
   }
 
@@ -3291,20 +3360,14 @@ export class ClassDynamicDispatch {
       ) {
         this.constructors.set(info.def.name, info);
         const cls = lowerer.coerceToExpected(classValueRef(lowerer, info, info.decl), DYN);
-        const bag: IrExpr = {
-          kind: "call",
-          callee: this.propertyBag!.name,
-          args: [lowerer.coerceToExpected(receiver, DYN)],
-          type: DYN,
-          loc,
-        };
+        const bag = this.readPropertyBag(lowerer, receiver, loc);
         const key: IrExpr = { kind: "strLit", value: name, type: STRING, loc };
         return [
           {
             kind: "return",
             value: {
               kind: "ternary",
-              cond: { kind: "libCall", fn: "dyn.hasKey", args: [bag, key], type: BOOL, loc },
+              cond: readBagHas("dyn.hasKey", bag, key, loc),
               then: {
                 kind: "libCall",
                 fn: "dyn.bagGet",
@@ -3375,23 +3438,12 @@ export class ClassDynamicDispatch {
           if (symbol || (isClassOwnEnumerableFieldName(name) && !name.startsWith("sym:"))) {
             const prototypeMethod = lowerer.prototypeMethodAccesses.has(name);
             if (prototypeMethod) classPrototypeData(lowerer, info, loc, receiver);
-            const bag: IrExpr = {
-              kind: "call",
-              callee: this.propertyBag!.name,
-              args: [lowerer.coerceToExpected(receiver, DYN)],
-              type: DYN,
-              loc,
-            };
+            // Selecting the method must not give the object own storage.
+            const bag = this.readPropertyBag(lowerer, receiver, loc);
             const key: IrExpr = symbol ?? { kind: "strLit", value: name, type: STRING, loc };
             body.push({
               kind: "if",
-              cond: {
-                kind: "libCall",
-                fn: symbol ? "dyn.hasOwnComputed" : "dyn.hasKey",
-                args: [bag, key],
-                type: BOOL,
-                loc,
-              },
+              cond: readBagHas(symbol ? "dyn.hasOwnComputed" : "dyn.hasKey", bag, key, loc),
               then: [
                 {
                   kind: "return",
@@ -3449,13 +3501,7 @@ export class ClassDynamicDispatch {
       }
       if (!field && !accessor) {
         const instance = lowerer.coerceToExpected(receiver, DYN);
-        const bag: IrExpr = {
-          kind: "call",
-          callee: this.propertyBag!.name,
-          args: [instance],
-          type: DYN,
-          loc,
-        };
+        const bag = this.readPropertyBagOrEmpty(lowerer, instance, loc);
         return [
           {
             kind: "return",
@@ -3481,13 +3527,11 @@ export class ClassDynamicDispatch {
         (t.kind === "union" && (getUnion(t.unionId)?.arms.some(mutable) ?? false));
       if (boxed.kind === "dynFrom" && mutable(boxed.value.type)) boxed.liveRef = true;
       if (accessor) {
-        const bag: IrExpr = {
-          kind: "call",
-          callee: this.propertyBag!.name,
-          args: [lowerer.coerceToExpected(receiver, DYN)],
-          type: DYN,
+        const bag = this.readPropertyBagOrEmpty(
+          lowerer,
+          lowerer.coerceToExpected(receiver, DYN),
           loc,
-        };
+        );
         const key: IrExpr = { kind: "strLit", value: name, type: STRING, loc };
         return [
           {
@@ -3514,13 +3558,7 @@ export class ClassDynamicDispatch {
       }
       if (field && info.def.tracksOwnFields) {
         const instance = lowerer.coerceToExpected(receiver, DYN);
-        const bag: IrExpr = {
-          kind: "call",
-          callee: this.propertyBag!.name,
-          args: [instance],
-          type: DYN,
-          loc,
-        };
+        const bag = this.readPropertyBagOrEmpty(lowerer, instance, loc);
         const symbol = symbolMemberKey(lowerer, info, name, loc);
         const key: IrExpr = symbol ?? { kind: "strLit", value: name, type: STRING, loc };
         return [

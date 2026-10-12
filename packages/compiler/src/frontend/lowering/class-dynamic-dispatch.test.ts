@@ -9,7 +9,7 @@ import {
   type IrFunction,
   type IrStmt,
 } from "../../ir/ir.js";
-import { ClassDynamicDispatch } from "./class-dynamic-dispatch.js";
+import { ClassDynamicDispatch, classPropertiesHelper } from "./class-dynamic-dispatch.js";
 import type { Lowerer } from "./lowerer.js";
 import type { ClassInfo } from "./lower-classes.js";
 
@@ -101,7 +101,9 @@ test.each([
     kind: "call",
     callee: expect.stringMatching(/^%dyn\.class\.(property|computed)\./),
   });
-  expect(liftedFns).toHaveLength(2);
+  // The bag dispatch and the member helper; reads also use the read-only bag.
+  expect(liftedFns).toHaveLength(read ? 3 : 2);
+  if (read) expect(liftedFns.map((item) => item.name)).toContain("%dyn.class.readProperties");
   const transformed = target.body;
   expect(dispatch.process(lowerer, [boxed, target, ...liftedFns])).toBe(false);
   expect(target.body).toBe(transformed);
@@ -304,7 +306,7 @@ test("unknown receivers keep checked class property dispatch", () => {
   expect(target.body).toBe(body);
 });
 
-test("read-only class bags stay absent unless the settled prototype requires storage", () => {
+test("read-only class bags are never stored; a settled prototype bag is made per read", () => {
   for (const prototype of [false, true]) {
     const { lowerer, liftedFns } = context();
     const type = { kind: "object" as const, className: "Widget" };
@@ -344,13 +346,51 @@ test("read-only class bags stay absent unless the settled prototype requires sto
     if (prototype)
       expect(helper.body[0]).toMatchObject({
         kind: "if",
-        then: [{ value: { kind: "libCall", fn: "dyn.objCreate" } }],
+        then: [{ kind: "return", value: { kind: "libCall", fn: "dyn.objCreate" } }],
       });
     else
       expect(helper.body).toMatchObject([
         { kind: "return", value: { kind: "fieldGet", className: "Widget" } },
       ]);
   }
+});
+
+test("the untyped read-only bag selects classes as the bag dispatch does, without storing", () => {
+  const { lowerer, liftedFns } = context();
+  const type = { kind: "object" as const, className: "Widget" };
+  lowerer.classes.set("Widget", {
+    def: { name: "Widget", fields: [] },
+    fields: new Map(),
+    methods: new Map(),
+    subclasses: [],
+    base: null,
+  } as unknown as ClassInfo);
+  const read = classPropertiesHelper(lowerer, loc, true);
+  const target = fn("target", [
+    statement({
+      kind: "call",
+      callee: "%dyn.class.properties",
+      args: [
+        {
+          kind: "dynFrom",
+          value: { kind: "varRef", localId: "instance", type, loc },
+          type: DYN,
+          loc,
+        },
+      ],
+      type: DYN,
+      loc,
+    }),
+    statement({ kind: "call", callee: read.name, args: [variable("value")], type: DYN, loc }),
+  ]);
+  const dispatch = new ClassDynamicDispatch();
+  expect(dispatch.process(lowerer, [target, ...liftedFns])).toBe(true);
+  const bag = liftedFns.find((item) => item.name === "%dyn.class.properties")!;
+  dispatch.finalize(lowerer);
+  const text = (body: IrStmt[]) => JSON.stringify(body);
+  expect(text(bag.body)).toContain('"kind":"fieldSet"');
+  expect(text(read.body)).not.toContain('"kind":"fieldSet"');
+  expect(text(read.body)).toContain('"className":"Widget","field":"%dynProperties"');
 });
 
 test("normalizes base capsules before dispatching each derived member once", () => {
