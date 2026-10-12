@@ -1,14 +1,15 @@
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
-import { analyze, compile, compileC, deserializeModule, serializeModule } from "@scriptc/compiler";
+import { compile, compileC, deserializeModule, serializeModule } from "@scriptc/compiler";
 import { emitLlvmModule } from "../../packages/compiler/src/backend/llvm/emitter.js";
 import { scalarizeNumericRecords } from "../../packages/compiler/src/ir/scalar-records.js";
 import { everyStmtList } from "../../packages/compiler/src/ir/traverse.js";
 import { type IrModule } from "../../packages/compiler/src/ir/ir.js";
+import { analyzeInChild, compileInChild } from "./self-hosting-compiler-process.js";
+import { spawnResult } from "./spawn-result.js";
 import {
   moduleUsesCopying,
   moduleUsesDynInvoke,
@@ -53,8 +54,8 @@ interface Emission {
   block: string;
 }
 
-test("the production layout and metadata stage lowers statically", () => {
-  const { coverage } = analyze(entry, { dynamic: false });
+test("the production layout and metadata stage lowers statically", async () => {
+  const coverage = await analyzeInChild(entry, { dynamic: false });
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.diagnostics).toEqual([]);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(1200);
@@ -72,7 +73,7 @@ for (const backend of ["llvm"] as const) {
     const executable = (name: string): string =>
       join(dir, name + (process.platform === "win32" ? ".exe" : ""));
     try {
-      const built = await compile(entry, {
+      const built = await compileInChild(entry, {
         outDir: dir,
         outPath: executable("stage"),
         backend,
@@ -83,14 +84,23 @@ for (const backend of ["llvm"] as const) {
       if (!built.ok)
         throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
       expect(built.backend).toBe(backend);
-      const run = (mod: IrModule, request: EmissionRequest, name: string, status = 0): string => {
+      const run = async (
+        mod: IrModule,
+        request: EmissionRequest,
+        name: string,
+        status = 0,
+      ): Promise<string> => {
         const input = join(dir, "input.json");
         const config = join(dir, "config.json");
         writeFileSync(input, serializeModule(mod));
         writeFileSync(config, JSON.stringify(request));
         const args = [input, config];
-        const oracle = spawnSync(process.execPath, ["--import", "tsx", entry, ...args], options);
-        const native = spawnSync(built.binaryPath, args, options);
+        const oracle = await spawnResult(
+          process.execPath,
+          ["--import", "tsx", entry, ...args],
+          options,
+        );
+        const native = await spawnResult(built.binaryPath, args, options);
         for (const result of [oracle, native]) {
           expect(result.error, name).toBeUndefined();
           expect(result.signal, `${name}: ${result.stderr}`).toBeNull();
@@ -106,7 +116,7 @@ for (const backend of ["llvm"] as const) {
       };
 
       for (const item of emissionCases()) {
-        const text = run(item.module, item.request, item.name);
+        const text = await run(item.module, item.request, item.name);
         const emitted = JSON.parse(text) as Emission;
         const definitions = [
           ...emitted.declarations,
@@ -143,12 +153,12 @@ for (const backend of ["llvm"] as const) {
           loc: { file: invalid.sourceFile, start: 0, end: 0 },
         },
       ];
-      expect(run(invalid, emissionRequest(), "missing base", 1)).toContain(
+      expect(await run(invalid, emissionRequest(), "missing base", 1)).toContain(
         "undeclared base class Missing",
       );
       const absent = emissionRequest();
       absent.classObjects = ["Missing"];
-      expect(run(emissionModule(), absent, "missing class object", 1)).toContain(
+      expect(await run(emissionModule(), absent, "missing class object", 1)).toContain(
         "class object for unknown class Missing",
       );
 
@@ -176,7 +186,7 @@ for (const backend of ["llvm"] as const) {
         },
       ];
       for (const { request, message } of invalidRequests) {
-        expect(run(emissionModule(), request, message, 1)).toContain(message);
+        expect(await run(emissionModule(), request, message, 1)).toContain(message);
       }
       const unsupported = emissionModule();
       unsupported.unions = [
@@ -186,7 +196,7 @@ for (const backend of ["llvm"] as const) {
         },
       ];
       expect(
-        run(
+        await run(
           unsupported,
           { ...emissionRequest(), joinUnions: ["containers"] },
           "unsupported union join",
@@ -225,7 +235,7 @@ for (const backend of ["llvm"] as const) {
               return true;
             },
           });
-        const native = JSON.parse(run(mod, request, source)) as Emission;
+        const native = JSON.parse(await run(mod, request, source)) as Emission;
         // Splice the native-generated sections into the real program. The
         // full emitter still runs on Node; these type and helper definitions
         // are supplied by the compiled production stage under test.
@@ -256,8 +266,8 @@ for (const backend of ["llvm"] as const) {
           regex: moduleUsesRegex(mod),
           copying: moduleUsesCopying(mod),
         });
-        const oracle = spawnSync(process.execPath, [sourcePath], options);
-        const program = spawnSync(outPath, [], options);
+        const oracle = await spawnResult(process.execPath, [sourcePath], options);
+        const program = await spawnResult(outPath, [], options);
         for (const result of [oracle, program]) {
           expect(result.error, source).toBeUndefined();
           expect(result.signal, `${source}: ${result.stderr}`).toBeNull();

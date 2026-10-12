@@ -1,5 +1,6 @@
 import type { IrExpr, IrStmt } from "../../ir/ir.js";
-import { f64Lit } from "./common.js";
+import { withinInt32 } from "../../ir/integer-ranges.js";
+import { exactInteger, widenInteger } from "./integer-values.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 
 type SwitchCase = Extract<IrStmt, { kind: "switch" }>["cases"][number];
@@ -16,6 +17,7 @@ function integerLiteral(expr: IrExpr): number | null {
 function emitIntegerSwitch(
   host: LlvmEmitterContext,
   disc: LlValue,
+  discExpr: IrExpr | undefined,
   cases: readonly SwitchCase[],
   labels: readonly string[],
   fallback: string,
@@ -36,30 +38,49 @@ function emitIntegerSwitch(
   if (targets.size < 4) return false;
 
   const B = host.B;
-  const unsigned = min >= 0 && max > 2147483647 && max <= 4294967295;
-  const bits = unsigned || (min >= -2147483648 && max <= 2147483647) ? "i32" : "i64";
-  const low = B.tmp();
-  const high = B.tmp();
-  const inside = B.tmp();
-  const convert = B.newLabel("sw.convert");
-  const dispatch = B.newLabel("sw.integer");
-  B.line(`${low} = fcmp oge double ${disc.name}, ${f64Lit(min)}`);
-  B.line(`${high} = fcmp ole double ${disc.name}, ${f64Lit(max)}`);
-  B.line(`${inside} = and i1 ${low}, ${high}`);
-  B.condBr(inside, convert, fallback);
-  B.startBlock(convert);
-  const integer = B.tmp();
+  const bits = min >= -2147483648 && max <= 2147483647 ? "i32" : "i64";
+  let selector: string;
+  const integer = exactInteger(host, disc, discExpr);
+  if (integer) {
+    // A proven exact integer selects directly. Narrowing is exact when its
+    // range fits the case width; otherwise dispatch on the full value.
+    const wide = widenInteger(host, integer);
+    if (bits === "i64" || !withinInt32(integer.range)) {
+      selector = wide;
+      return terminateSwitch(host, "i64", selector, targets, fallback);
+    }
+    selector = B.tmp();
+    B.line(`${selector} = trunc i64 ${wide} to i32`);
+    return terminateSwitch(host, bits, selector, targets, fallback);
+  }
+  // freeze keeps NaN and out-of-range conversions from producing poison.
+  // The exact round trip then rejects every value that is not an integer
+  // of the case width: NaN and infinities compare unordered, a frozen
+  // out-of-range conversion converts back to a different value, and -0
+  // selects case 0 exactly like strict equality.
+  const raw = B.tmp();
   const restored = B.tmp();
   const exact = B.tmp();
-  // Ordered range checks dominate conversion: NaN and out-of-range values
-  // must not produce poison. The round trip rejects fractional inputs.
-  B.line(`${integer} = ${unsigned ? "fptoui" : "fptosi"} double ${disc.name} to ${bits}`);
-  B.line(`${restored} = ${unsigned ? "uitofp" : "sitofp"} ${bits} ${integer} to double`);
+  const dispatch = B.newLabel("sw.integer");
+  selector = B.tmp();
+  B.line(`${raw} = fptosi double ${disc.name} to ${bits}`);
+  B.line(`${selector} = freeze ${bits} ${raw}`);
+  B.line(`${restored} = sitofp ${bits} ${selector} to double`);
   B.line(`${exact} = fcmp oeq double ${disc.name}, ${restored}`);
   B.condBr(exact, dispatch, fallback);
   B.startBlock(dispatch);
-  B.terminate(
-    `switch ${bits} ${integer}, label %${fallback} [ ${[...targets]
+  return terminateSwitch(host, bits, selector, targets, fallback);
+}
+
+function terminateSwitch(
+  host: LlvmEmitterContext,
+  bits: "i32" | "i64",
+  selector: string,
+  targets: ReadonlyMap<number, string>,
+  fallback: string,
+): true {
+  host.B.terminate(
+    `switch ${bits} ${selector}, label %${fallback} [ ${[...targets]
       .map(([value, label]) => `${bits} ${value}, label %${label}`)
       .join(" ")} ]`,
   );
@@ -121,11 +142,13 @@ function emitStringSwitch(
 export function emitLiteralSwitch(
   host: LlvmEmitterContext,
   disc: LlValue,
+  discExpr: IrExpr | undefined,
   cases: readonly SwitchCase[],
   labels: readonly string[],
   fallback: string,
 ): boolean {
-  if (disc.type.kind === "f64") return emitIntegerSwitch(host, disc, cases, labels, fallback);
+  if (disc.type.kind === "f64")
+    return emitIntegerSwitch(host, disc, discExpr, cases, labels, fallback);
   if (disc.type.kind === "string") return emitStringSwitch(host, disc, cases, labels, fallback);
   return false;
 }

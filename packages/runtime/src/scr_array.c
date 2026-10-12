@@ -275,33 +275,77 @@ static void scr_arr_sparse_drop_prefix(ScrArr *a, size_t count) {
   x->sparse_len -= count;
 }
 
+/* Bytes per dense slot: the 8-byte value and its state byte. */
+#define SCR_ARR_SLOT_BYTES (sizeof(uint64_t) + sizeof(uint8_t))
+/* Appends to an array smaller than this grow straight to it. */
+#define SCR_ARR_MIN_GROWTH ((size_t)4)
+
+/* How a dense allocation is sized. */
+typedef enum {
+  SCR_ARR_GROW_APPEND, /* geometric headroom for further appends */
+  SCR_ARR_GROW_SPAN,   /* a densified sparse tail: exact above the cutoff */
+  SCR_ARR_GROW_EXACT,  /* construction with a known element count */
+} ScrArrGrow;
+
+/* The small-object allocator rounds blocks up to SCR_SA_STEP bytes, so an
+ * exactly sized array can use the whole block for slots: a one-element
+ * literal keeps a 16-byte block rather than reserving 4 slots in a 48-byte
+ * one. Growth keeps its own sequence (4, 8, 16, ...): rounding it as well
+ * moves array storage into other size classes and measured slower. */
+static size_t scr_arr_block_cap(size_t cap) {
+#if SCR_SMALL_ALLOC
+  size_t bytes = cap * SCR_ARR_SLOT_BYTES;
+  if (bytes <= SCR_SA_MAX) {
+    size_t block = (bytes + SCR_SA_STEP - 1) / SCR_SA_STEP * SCR_SA_STEP;
+    return block / SCR_ARR_SLOT_BYTES;
+  }
+#endif
+  return cap;
+}
+
 /* Grow dense storage to cover at least [0, need). Callers decide whether the
  * range is populated enough (scr_arr_dense_ok); this only allocates. Sparse
  * entries below the new capacity move into the packed slots, preserving the
  * invariant every reader (including emitted code) relies on: indices below
- * cap live in dense storage and sparse entries all lie at or above cap. */
-static void scr_arr_grow_dense_to(ScrArr *a, size_t need, bool exact) {
+ * cap live in dense storage and sparse entries all lie at or above cap. New
+ * capacity always starts as holes; slot payloads past len stay unwritten. */
+static void scr_arr_grow_dense_to(ScrArr *a, size_t need, ScrArrGrow mode) {
   if (need <= a->cap) return;
   if (need > SCR_ARR_MAX_LENGTH) scr_arr_oom();
-  size_t cap = a->cap ? a->cap : 4;
-  while (cap < need) {
-    /* Double below the cutoff; grow by half above it to bound overshoot. */
-    size_t step = cap < SCR_ARR_DENSE_LIMIT ? cap : cap / 2;
-    cap = cap > SCR_ARR_MAX_LENGTH - step ? SCR_ARR_MAX_LENGTH : cap + step;
+  size_t cap;
+  if (mode == SCR_ARR_GROW_EXACT) {
+    cap = scr_arr_block_cap(need);
+  } else {
+    cap = a->cap < SCR_ARR_MIN_GROWTH ? SCR_ARR_MIN_GROWTH : a->cap;
+    while (cap < need) {
+      /* Double below the cutoff; grow by half above it to bound overshoot. */
+      size_t step = cap < SCR_ARR_DENSE_LIMIT ? cap : cap / 2;
+      cap = cap > SCR_ARR_MAX_LENGTH - step ? SCR_ARR_MAX_LENGTH : cap + step;
+    }
+    if (need <= SCR_ARR_DENSE_LIMIT && cap > SCR_ARR_DENSE_LIMIT) cap = SCR_ARR_DENSE_LIMIT;
+    /* Densifying an arbitrary sparse tail sizes to the populated span; only
+     * appends benefit from geometric headroom. */
+    if (mode == SCR_ARR_GROW_SPAN && need > SCR_ARR_DENSE_LIMIT) cap = need;
   }
-  if (need <= SCR_ARR_DENSE_LIMIT && cap > SCR_ARR_DENSE_LIMIT) cap = SCR_ARR_DENSE_LIMIT;
-  /* Densifying an arbitrary sparse tail sizes to the populated span; only
-   * appends benefit from geometric headroom. */
-  if (exact && need > SCR_ARR_DENSE_LIMIT) cap = need;
+  if (cap > SIZE_MAX / SCR_ARR_SLOT_BYTES) scr_arr_oom();
+  if (!a->data && SCR_AX(a)->sparse_len == 0) {
+    /* First storage: nothing to copy, move or absorb. */
+    uint64_t *data = scr_mem_alloc(cap * SCR_ARR_SLOT_BYTES);
+    if (!data) scr_arr_oom();
+    a->data = data;
+    a->present = (uint8_t *)(data + cap);
+    memset(a->present, SCR_ARR_HOLE, cap);
+    a->cap = cap;
+    return;
+  }
   /* Values and states share one allocation. Move the old states before
    * publishing the larger capacity: their previous location is now part
    * of the value area. Existing data and state pointers keep their ABI. */
-  if (cap > SIZE_MAX / (sizeof(uint64_t) + sizeof(uint8_t))) scr_arr_oom();
-  uint64_t *data = scr_mem_realloc(a->data, cap * (sizeof(uint64_t) + sizeof(uint8_t)));
+  uint64_t *data = scr_mem_realloc(a->data, cap * SCR_ARR_SLOT_BYTES);
   if (!data) scr_arr_oom();
   uint8_t *present = (uint8_t *)(data + cap);
   if (a->cap) memmove(present, (uint8_t *)(data + a->cap), a->cap);
-  memset(present + a->cap, 0, cap - a->cap);
+  memset(present + a->cap, SCR_ARR_HOLE, cap - a->cap);
   a->data = data;
   a->present = present;
   a->cap = cap;
@@ -314,7 +358,7 @@ static void scr_arr_grow_dense_to(ScrArr *a, size_t need, bool exact) {
 }
 
 static void scr_arr_grow_dense(ScrArr *a, size_t need) {
-  scr_arr_grow_dense_to(a, need, false);
+  scr_arr_grow_dense_to(a, need, SCR_ARR_GROW_APPEND);
 }
 
 /* Is the top of the dense prefix populated like an append or forward fill?
@@ -360,7 +404,7 @@ static void scr_arr_grow_for_index(ScrArr *a, size_t index) {
   if (SCR_AX(a)->sparse_len > 0 && SCR_AX(a)->sparse[SCR_AX(a)->sparse_len - 1].index >= need) {
     need = SCR_AX(a)->sparse[SCR_AX(a)->sparse_len - 1].index + 1;
   }
-  if (scr_arr_dense_ok(a, need, 1)) scr_arr_grow_dense_to(a, need, true);
+  if (scr_arr_dense_ok(a, need, 1)) scr_arr_grow_dense_to(a, need, SCR_ARR_GROW_SPAN);
 }
 
 static uint8_t scr_arr_state_at_storage(const ScrArrStorage *s, size_t index,
@@ -622,7 +666,7 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
   a->data = NULL;
   a->present = NULL;
   a->ext = NULL;
-  if (initial_cap > 0) scr_arr_grow_dense(a, initial_cap);
+  if (initial_cap > 0) scr_arr_grow_dense_to(a, initial_cap, SCR_ARR_GROW_EXACT);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
 #endif
@@ -711,7 +755,7 @@ ScrArr *scr_arr_new_ops(const ScrArrOps *ops, size_t initial_cap) {
   a->data = NULL;
   a->present = NULL;
   a->ext = NULL;
-  if (initial_cap > 0) scr_arr_grow_dense(a, initial_cap);
+  if (initial_cap > 0) scr_arr_grow_dense_to(a, initial_cap, SCR_ARR_GROW_EXACT);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
 #endif

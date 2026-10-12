@@ -176,6 +176,7 @@ import {
   completeArgs,
 } from "./call-arguments.js";
 import { isThisParameter, type ParamShape } from "./call-signatures.js";
+import { checkedArmExtraction } from "./coercions/unions.js";
 import {
   requireObjLitGenericReceiver,
   objLitGenericFnNodeOf,
@@ -8996,8 +8997,19 @@ export function lowerObjectMethodCall(
       });
       let callee = target ? lowerer.fieldGetExpr(target, locOf(access), access) : null;
       if (callee?.type.kind === "union" && callableType !== null) {
-        const helper = lowerer.narrowedArmHelper(callee.type.unionId, callableType, locOf(access));
-        if (helper !== null) {
+        // Calling a cleared callback field throws Node's call TypeError.
+        const inPlace = checkedArmExtraction(
+          lowerer,
+          callee,
+          lowerer.armTag(callee.type.unionId, callableType),
+          callableType,
+          () => `${access.getText()} is not a function`,
+        );
+        const helper = inPlace
+          ? null
+          : lowerer.narrowedArmHelper(callee.type.unionId, callableType, locOf(access));
+        if (inPlace) callee = inPlace;
+        else if (helper !== null) {
           callee = lowerer.checkedNarrowCall(helper, callee, callableType, locOf(access));
         }
       }
