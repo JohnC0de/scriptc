@@ -62,7 +62,7 @@ void scr_init(void);
 /* Program objects emitted by the bundled LLVM helper reference this symbol.
  * Its versioned spelling makes a mismatched manual runtime link fail before
  * the program can start. */
-void scr_runtime_abi_v12(void);
+void scr_runtime_abi_v13(void);
 void scr_runtime_workers_v8(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -1564,8 +1564,8 @@ typedef enum {
   SCR_ELEM_BYTES, /* slots are ScrBytes* — released with the array */
   /* Slots are void* to values the runtime cannot lay out itself — records,
    * class instances, unions, and cycle-capable inner arrays. The element
-   * type's RC entry points arrive at construction (scr_arr_new_ref) and are
-   * stored ONCE per array, the SCR_BOX_OBJ / map-value technique; every
+   * type's RC entry points arrive at construction (scr_arr_new_ops) as one
+   * constant descriptor per element type, stored once per array; every
    * array is still monomorphic (one element type, one set of entry points). */
   SCR_ELEM_REF,
 } ScrElemKind;
@@ -1576,21 +1576,32 @@ typedef enum {
   SCR_ARR_UNDEFINED = 2,
 } ScrArrState;
 
+/* The RC entry points of an SCR_ELEM_REF array's element type: one constant
+ * per element type (emitted by the compiler, or static in the runtime),
+ * shared by every array of that type. retain/release are the type's `_v`
+ * adapters; trace is non-NULL exactly when the element type carries a cycle
+ * header. */
+typedef struct ScrArrOps {
+  void *(*retain)(void *);
+  void (*release)(void *);
+  ScrTraceFn trace;
+} ScrArrOps;
+
 typedef struct ScrArr {
   size_t rc; /* SIZE_MAX = immortal (unused for arrays; kept per convention) */
   size_t len;
   size_t cap; /* dense capacity; sparse entries cover indices >= cap */
   ScrElemKind elem;
-  /* SCR_ELEM_REF only; NULL for every other element kind. elem_trace is
-   * non-NULL exactly when the element type carries a cycle header: such
-   * arrays are CYCLE-CAPABLE (an element can point back at the array that
-   * owns it) and allocate with the hidden collector header — their trace
-   * visits every element, and the collector teardown frees only the slot
-   * storage (all elements are traced children). Arrays of acyclic ref
-   * elements and the historic element kinds keep the lean 1-word header. */
-  void *(*elem_retain)(void *);
-  void (*elem_release)(void *);
-  ScrTraceFn elem_trace;
+  /* 1 exactly when ops->trace is non-NULL: the element type carries a cycle
+   * header, so the array is CYCLE-CAPABLE (an element can point back at the
+   * array that owns it) and allocates with the hidden collector header —
+   * its trace visits every element, and the collector teardown frees only
+   * the slot storage (all elements are traced children). Arrays of acyclic
+   * ref elements and the historic element kinds keep the lean 1-word
+   * header. Kept beside `elem` so the RC fast paths test it with one load. */
+  uint32_t cyc;
+  /* SCR_ELEM_REF only; NULL for every other element kind. */
+  const ScrArrOps *ops;
   uint64_t *data;
   uint8_t *present; /* one state per dense slot; heap arrays share data allocation */
   /* Rarely used storage (sparse indices, noncanonical numeric properties,
@@ -1608,11 +1619,15 @@ typedef struct ScrArrExt {
   size_t prop_cap;
   struct ScrDyn *metadata; /* heterogeneous named properties of match results */
 } ScrArrExt;
-/* The LLVM backend's inline retain/release read elem_trace through its
- * mirrored %ScrArr type (field 6) to decide mark-live / candidate buffering
- * exactly like scr_arr_retain and scr_arr_release. */
-_Static_assert(offsetof(ScrArr, elem_trace) == 3 * sizeof(size_t) + 3 * sizeof(void *),
-               "inline RC fast paths read ScrArr.elem_trace as %ScrArr field 6");
+/* The LLVM backend's inline retain/release read `cyc` through its mirrored
+ * %ScrArr type (field 4, i32) to decide mark-live / candidate buffering
+ * exactly like scr_arr_retain and scr_arr_release; its inline element reads
+ * use data (field 6) and present (field 7). */
+_Static_assert(sizeof(ScrElemKind) == sizeof(uint32_t), "ScrArr.elem is an i32 (%ScrArr field 3)");
+_Static_assert(offsetof(ScrArr, cyc) == 3 * sizeof(size_t) + sizeof(uint32_t),
+               "inline RC fast paths read ScrArr.cyc as %ScrArr field 4");
+_Static_assert(offsetof(ScrArr, data) == 3 * sizeof(size_t) + 2 * sizeof(uint32_t) + sizeof(void *),
+               "inline element reads use ScrArr.data as %ScrArr field 6");
 
 typedef struct ScrArrSparseSlot {
   size_t index;
@@ -1629,13 +1644,12 @@ typedef struct ScrArrProp {
 
 ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap); /* returns +1 */
 
-/* SCR_ELEM_REF construction: retain/release must be non-NULL (the compiler
- * passes the element type's `_v` adapters); trace is non-NULL iff the
- * element type carries a cycle header (the array then allocates with the
- * collector header — see the struct comment). Returns +1. */
-ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
-                         void (*elem_release)(void *),
-                         ScrTraceFn elem_trace, size_t initial_cap);
+/* SCR_ELEM_REF construction: `ops` must outlive the array (a constant; the
+ * compiler emits one per element type) and its retain/release must be
+ * non-NULL; ops->trace is non-NULL iff the element type carries a cycle
+ * header (the array then allocates with the collector header — see the
+ * struct comment). Returns +1. */
+ScrArr *scr_arr_new_ops(const ScrArrOps *ops, size_t initial_cap);
 
 static inline ScrArr *scr_arr_retain(ScrArr *a) {
   if (a->rc != SIZE_MAX) {
@@ -1645,8 +1659,8 @@ static inline ScrArr *scr_arr_retain(ScrArr *a) {
 }
 
 /* Releases ref elements (SCR_ELEM_STR/ARR/BYTES/REF) recursively at rc == 0.
- * NULL-tolerant (uninitialized locals). Cycle-capable arrays (elem_trace
- * non-NULL) feed the candidate-root buffer like every headered type. */
+ * NULL-tolerant (uninitialized locals). Cycle-capable arrays (`cyc`) feed
+ * the candidate-root buffer like every headered type. */
 void scr_arr_release(ScrArr *a);
 void scr_arr_copy_metadata(ScrArr *a, struct ScrDyn *target);
 /* The array's out-of-line storage, allocated (zeroed) on first use. */
@@ -2032,6 +2046,10 @@ _Static_assert(sizeof(ScrMapEntry) == 24 && offsetof(ScrMapEntry, val) == 8,
 /* Entry for a number key, or NULL when absent. The pointer is valid until
  * the next mutation; generated code reads the value slot through it. */
 const ScrMapEntry *scr_map_entry_f64(const ScrMap *m, double key);
+/* Entry for a string key, or NULL when absent, on the same terms. Typed
+ * reference reads retain the value with its static type's retain instead
+ * of the collection's adapter. */
+const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key);
 
 /* Called once on a fresh UNION_VALUE collection, before its first insert. */
 void scr_map_union_keys(ScrMap *map, const uint8_t *kinds);
@@ -2148,12 +2166,12 @@ void scr_set_add_all(ScrMap *set, ScrArr *values);
 ScrArr *scr_set_to_arr_f64(const ScrMap *s);
 ScrArr *scr_set_to_arr_bool(const ScrMap *s);
 ScrArr *scr_set_to_arr_str(const ScrMap *s);
-ScrArr *scr_set_to_arr_ref(const ScrMap *s);
+ScrArr *scr_set_to_arr_ref(const ScrMap *s, const ScrArrOps *ops);
 ScrArr *scr_set_to_arr_dyn(const ScrMap *s);
 
 /* REF-element Set construction: a set-shaped map whose keys are refcounted
  * pointers under identity hashing (see SCR_MAP_KEY_REF above). The element
- * type's `_v` adapters arrive once, the scr_arr_new_ref technique. */
+ * type's `_v` adapters arrive once, as for arrays (scr_arr_new_ops). */
 ScrMap *scr_set_new_ref(void *(*elem_retain)(void *), void (*elem_release)(void *));
 
 /* The live STRING keys of a map in JS OWN-KEY ORDER (Object.keys/values/

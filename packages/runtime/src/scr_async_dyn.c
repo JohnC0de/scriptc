@@ -888,9 +888,12 @@ static void scr_dyn_all_result(ScrPromise *destination, ScrPromise *source) {
   scr_promise_fulfill_ref(destination, result, scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v);
 }
 
+static const ScrArrOps scr_promise_arr_ops = { scr_promise_retain_v, scr_promise_release_v, scr_promise_trace_v };
+static const ScrArrOps scr_dyn_arr_ops = { scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v };
+
 ScrPromise *scr_dyn_promise_all(const ScrDyn *entries) {
-  ScrArr *promises = scr_arr_new_ref(scr_promise_retain_v, scr_promise_release_v, scr_promise_trace_v, entries->v.arr.len);
-  ScrArr *values = scr_arr_new_ref(scr_dyn_retain_v, scr_dyn_release_v, scr_dyn_trace_v, entries->v.arr.len);
+  ScrArr *promises = scr_arr_new_ops(&scr_promise_arr_ops, entries->v.arr.len);
+  ScrArr *values = scr_arr_new_ops(&scr_dyn_arr_ops, entries->v.arr.len);
   for (size_t i = 0; i < entries->v.arr.len; i++) {
     ScrDyn *value = entries->v.arr.items[i];
     ScrPromise *source;

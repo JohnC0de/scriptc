@@ -11095,8 +11095,8 @@ ScrArr *scr_jsval_exit_jsval_arr(ScrJsval *v) {
   int64_t len = 0;
   JS_ToInt64(isl_ctx, &len, lv);
   JS_FreeValue(isl_ctx, lv);
-  ScrArr *out = scr_arr_new_ref(&scr_jsval_retain_v, &scr_jsval_release_v, NULL,
-                                len > 0 ? (size_t)len : 0);
+  static const ScrArrOps jsval_ops = { &scr_jsval_retain_v, &scr_jsval_release_v, NULL };
+  ScrArr *out = scr_arr_new_ops(&jsval_ops, len > 0 ? (size_t)len : 0);
   for (int64_t i = 0; i < len; i++) {
     JSValue e = JS_GetPropertyUint32(isl_ctx, v->v, (uint32_t)i); /* getters run */
     if (JS_IsException(e)) {
