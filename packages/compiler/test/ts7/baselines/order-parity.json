@@ -15743,21 +15743,9 @@
    ],
    "diags": []
   },
-  "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts": {
+  "<repo>/tests/corpus/4651-map-string-get-entry.ts": {
    "order": [
-    "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/native-worker-exception-state.ts": {
-   "order": [
-    "<repo>/tests/corpus/native-worker-exception-state.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/native-worker-terminate-exception-state.ts": {
-   "order": [
-    "<repo>/tests/corpus/native-worker-terminate-exception-state.ts"
+    "<repo>/tests/corpus/4651-map-string-get-entry.ts"
    ],
    "diags": []
   },
@@ -15847,6 +15835,24 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-tested-loops.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-exception-state.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/native-worker-terminate-exception-state.ts": {
+   "order": [
+    "<repo>/tests/corpus/native-worker-terminate-exception-state.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/4598-os-available-parallelism.ts": {
    "order": [
     "<repo>/tests/corpus/4598-os-available-parallelism.ts"
@@ -15857,12 +15863,6 @@
    "order": [
     "<repo>/tests/corpus/constant-module-globals/consts.ts",
     "<repo>/tests/corpus/constant-module-globals/main.ts"
-   ],
-   "diags": []
-  },
-  "<repo>/tests/corpus/switch-integer-dispatch.ts": {
-   "order": [
-    "<repo>/tests/corpus/switch-integer-dispatch.ts"
    ],
    "diags": []
   },
@@ -15887,6 +15887,12 @@
   "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts": {
    "order": [
     "<repo>/tests/corpus/4671-scoped-array-read-borrows.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/switch-integer-dispatch.ts": {
+   "order": [
+    "<repo>/tests/corpus/switch-integer-dispatch.ts"
    ],
    "diags": []
   }

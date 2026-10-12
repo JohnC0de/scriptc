@@ -301,7 +301,7 @@ import { LlWalkers } from "./walkers.js";
 import { isObjectArm, NULLABLE_ABSENT, NULLABLE_NULL, NullableUnions } from "./nullable-unions.js";
 import { emitNullablePresent, emitUnionPeek, emitUnionTag } from "./union-repr.js";
 import { literalCapWord, literalCapWord32 } from "./string-key-hash.js";
-import { NUMBER_MAP_ENTRY_DECL } from "./map-number-lookup.js";
+import { NUMBER_MAP_ENTRY_DECL, STRING_MAP_ENTRY_DECL } from "./map-number-lookup.js";
 import { STRING_READ_HELPERS } from "./string-reads.js";
 import {
   emitConcatInputs,
@@ -1899,8 +1899,12 @@ export class LlEmitter {
       ...(this.decls.has(NUMBER_MAP_ENTRY_DECL)
         ? [
             `%ScrMapIx = type { ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ${this.sizeType}, ptr, ptr, ptr, ${this.sizeType} }`,
-            `%ScrMapEntry = type { i64, i64, i64 }`,
           ]
+        : []),
+      // String-keyed reference reads load the value slot of the entry
+      // scr_map_entry_str returns (map-number-lookup.ts).
+      ...(this.decls.has(NUMBER_MAP_ENTRY_DECL) || this.decls.has(STRING_MAP_ENTRY_DECL)
+        ? [`%ScrMapEntry = type { i64, i64, i64 }`]
         : []),
       // The runtime error prefix { rc, vt, name, message, code, cause } and the
       // class-object shape { rc, pre, post, ctor, name } — field reads on
