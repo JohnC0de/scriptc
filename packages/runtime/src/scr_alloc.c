@@ -43,6 +43,24 @@ ScrSaState scr_sa = {0};
 #define SCR_SA_HUGE_AFTER ((size_t)8 << 20)
 #endif
 
+#if defined(SCR_SA_THP) && defined(__GLIBC__)
+#include <stdio.h>
+#include <string.h>
+/* The system's THP mode: 'a' (always), 'm' (madvise), 'n' (never), or 0
+ * when the kernel has no THP setting to read. */
+static char scr_sa_thp_mode(void) {
+  FILE *f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+  if (!f) return 0;
+  char buf[96] = {0};
+  size_t n = fread(buf, 1, sizeof buf - 1, f);
+  fclose(f);
+  buf[n] = 0;
+  if (strstr(buf, "[always]")) return 'a';
+  if (strstr(buf, "[madvise]")) return 'm';
+  return strstr(buf, "[never]") ? 'n' : 0;
+}
+#endif
+
 /* Maps span bytes of address space for slices (huge-page aligned where the
  * policy above applies), or NULL. */
 static void *scr_sa_map(size_t span) {
@@ -126,7 +144,16 @@ static void scr_sa_pf_populate(char *lo, char *hi) {
  * only delays a fault-in, and a shrunk break (malloc trimming its top)
  * restarts the watermarks there. Past the threshold the pad costs at most
  * SCR_SA_PF_TOP_PAD of committed memory beyond what malloc would have;
- * SCR_SA_PREFAULT_HEAP=0 keeps glibc's defaults and no polling. */
+ * SCR_SA_PREFAULT_HEAP=0 keeps glibc's defaults and no polling.
+ *
+ * Where THP is in madvise mode none of this runs. The heap policy below
+ * moves the heap to huge pages at the same 32 MiB, so the owner takes one
+ * fault per 2 MiB and faulting ahead saves it little, while the helper's
+ * populates cost more: ranges it reaches before the owner advises them (and
+ * the partial huge pages at the ends of each extension) stay on small pages,
+ * 230-620 MB on large type checks; the owner's brk and madvise
+ * wait for the mmap lock a multi-megabyte populate holds; and the helper's
+ * top pad would replace the heap policy's larger one. */
 #if defined(__GLIBC__)
 #include <malloc.h>
 #include <time.h>
@@ -226,8 +253,9 @@ static void scr_sa_prefault(char *lo, char *hi) {
      * the helper's polls (no polls without it). */
     const char *v = getenv("SCR_SA_PREFAULT_HEAP");
     long page = sysconf(_SC_PAGESIZE);
+    char thp = scr_sa_thp_mode();
     pthread_condattr_t ca;
-    if (!(v && v[0] == '0') && page > 0 && pthread_condattr_init(&ca) == 0) {
+    if (!(v && v[0] == '0') && thp != 'm' && page > 0 && pthread_condattr_init(&ca) == 0) {
       if (pthread_condattr_setclock(&ca, CLOCK_MONOTONIC) == 0) {
         pthread_cond_destroy(&scr_sa_pf_cond);
         pthread_cond_init(&scr_sa_pf_cond, &ca);
@@ -320,8 +348,6 @@ static char *scr_sa_extend(char *start, char *lim, char *end) {
 #if defined(SCR_SA_THP) && defined(__GLIBC__)
 #include <malloc.h>
 #include <stdatomic.h>
-#include <stdio.h>
-#include <string.h>
 #include <unistd.h>
 #define SCR_SA_HEAP_HUGE_AFTER ((uintptr_t)32 << 20)
 #define SCR_SA_HEAP_TOP_PAD (32 << 20)
@@ -340,16 +366,6 @@ static _Atomic(uintptr_t) scr_sa_heap_page; /* the page size, read with the mode
  * These loads run only on blocks too large for the small allocator, next to
  * a glibc malloc call: plain loads on x86-64, LDAR (or LDAPR) on arm64. */
 
-static bool scr_sa_thp_madvise_mode(void) {
-  FILE *f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
-  if (!f) return false;
-  char buf[96] = {0};
-  size_t n = fread(buf, 1, sizeof buf - 1, f);
-  fclose(f);
-  buf[n] = 0;
-  return strstr(buf, "[madvise]") != NULL;
-}
-
 static void scr_sa_large_note(void *p, size_t n) {
   int state = atomic_load_explicit(&scr_sa_heap_state, memory_order_relaxed);
   if (state == 2 || !p) return;
@@ -358,7 +374,7 @@ static void scr_sa_large_note(void *p, size_t n) {
     uintptr_t lo = atomic_load_explicit(&scr_sa_heap_lo, memory_order_acquire);
     if (!lo) {
       long page = sysconf(_SC_PAGESIZE);
-      if (page <= 0 || !scr_sa_thp_madvise_mode()) {
+      if (page <= 0 || scr_sa_thp_mode() != 'm') {
         atomic_store_explicit(&scr_sa_heap_state, 2, memory_order_relaxed);
         return;
       }
