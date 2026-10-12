@@ -6,7 +6,14 @@ import { byteNumberAccess } from "../../ir/byte-numbers.js";
  * consumers in loops can reuse it. The number remains authoritative for floating
  * arithmetic, signed zero, returns and zero-iteration loops. Only explicit
  * local stores maintain these views; captures and implicit binders stay on
- * the ordinary path. No range or integer assumption is made about inputs. */
+ * the ordinary path. No range or integer assumption is made about inputs.
+ *
+ * A declared local that only ever holds bitwise results (`c = units[i] | 0`)
+ * also gets a view when a loop compares it: its stores already have the
+ * integer, and compares of the view stay integer compares. Without it each
+ * compare converts the stored number back, and LLVM moves that number's
+ * conversion into the join of a NaN-coded typed-array read (`phi [sitofp x,
+ * 0.0]`), where nothing folds it back to the integer. */
 export function findIntegerViews(fn: IrFunction): Set<string> {
   const wanted = new Set<string>();
   if (fn.async || fn.generator) return wanted;
@@ -19,7 +26,19 @@ export function findIntegerViews(fn: IrFunction): Set<string> {
     if (loopDepth > 0 && expr.kind === "varRef" && expr.type.kind === "f64")
       wanted.add(expr.localId);
   };
+  const declared = new Set<string>();
+  const compared = new Set<string>();
+  const nonBitwise = new Set<string>(fn.params.map((p) => p.localId));
+  const stored = (localId: string, value: IrExpr | null | undefined): void => {
+    if (!value || !bitwiseValue(value)) nonBitwise.add(localId);
+  };
   const expr = (node: IrExpr): boolean => {
+    if (node.kind === "assignExpr") stored(node.localId, node.value);
+    else if (node.kind === "incDec") nonBitwise.add(node.localId);
+    else if (loopDepth > 0 && node.kind === "bin" && COMPARES.has(node.op)) {
+      for (const side of [node.left, node.right])
+        if (side.kind === "varRef" && side.type.kind === "f64") compared.add(side.localId);
+    }
     if (
       node.kind === "bin" &&
       (node.op === "&" ||
@@ -48,7 +67,11 @@ export function findIntegerViews(fn: IrFunction): Set<string> {
       node.kind === "while" ||
       node.kind === "doWhile";
     if (loop) loopDepth++;
-    if (node.kind === "varDecl") initialized.add(node.localId);
+    if (node.kind === "varDecl") {
+      initialized.add(node.localId);
+      declared.add(node.localId);
+      stored(node.localId, node.init);
+    } else if (node.kind === "assign") stored(node.localId, node.value);
     if (node.kind === "forOf") excluded.add(node.localId);
     // Canonical induction is maintained separately by the loop emitter.
     if (node.kind === "for" && node.init?.kind === "varDecl") excluded.add(node.init.localId);
@@ -67,6 +90,7 @@ export function findIntegerViews(fn: IrFunction): Set<string> {
   // A conversion observed only after a floating loop must not add work to
   // each iteration. Expression results still carry their existing views.
   fn.body.every(stmt);
+  for (const id of compared) if (declared.has(id) && !nonBitwise.has(id)) wanted.add(id);
   const eligible = new Set(
     fn.locals
       .filter(
@@ -81,4 +105,21 @@ export function findIntegerViews(fn: IrFunction): Set<string> {
   );
   for (const id of wanted) if (!eligible.has(id)) wanted.delete(id);
   return wanted;
+}
+
+const COMPARES = new Set(["===", "!==", "<", "<=", ">", ">="]);
+
+/** Whether a value is always a bitwise result, whose ToUint32 view is free. */
+function bitwiseValue(value: IrExpr): boolean {
+  if (value.kind === "bin")
+    return (
+      value.op === "&" ||
+      value.op === "|" ||
+      value.op === "^" ||
+      value.op === "<<" ||
+      value.op === ">>" ||
+      value.op === ">>>"
+    );
+  if (value.kind === "unary") return value.op === "~";
+  return value.kind === "libCall" && (value.fn === "math.imul" || value.fn === "math.clz32");
 }

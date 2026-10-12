@@ -269,13 +269,29 @@ function emitBytesGetLocal(
   B.br(done);
   B.startBlock(done);
   const out = B.tmp();
-  B.line(`${out} = phi double [ ${loaded.name}, %${ok} ], [ ${f64Lit(NaN)}, %${invalid} ]`);
+  if (loaded.uint32 === undefined) {
+    B.line(`${out} = phi double [ ${loaded.name}, %${ok} ], [ ${f64Lit(NaN)}, %${invalid} ]`);
+    return { name: out, type: F64 };
+  }
   // The hint is ToUint32 of the value, and ToUint32(NaN) is 0, so it holds
   // for an invalid index too. Integer ranges (which would claim more) are
   // never derived for NaN-coded reads.
-  if (loaded.uint32 === undefined) return { name: out, type: F64 };
-  const u32 = B.tmp();
+  //
+  // An integer element joins as an integer and a validity bit, and the
+  // number converts after the join. A join of the numbers, `phi [sitofp x,
+  // NaN]`, hides the integer from LLVM: compares of the number stay floating,
+  // and once `| 0` makes the NaN arm 0, InstCombine moves the conversion into
+  // that join (`phi [sitofp x, 0.0]`) and never folds it back. Converting
+  // the joined integer gives it two users (this conversion and the ToUint32
+  // consumers), so a compare of `x | 0` stays an integer compare.
+  const u32 = B.tmp(),
+    valid = B.tmp(),
+    number = B.tmp();
   B.line(`${u32} = phi i32 [ ${loaded.uint32}, %${ok} ], [ 0, %${invalid} ]`);
+  B.line(`${valid} = phi i1 [ true, %${ok} ], [ false, %${invalid} ]`);
+  const signed = elem === "i8" || elem === "i16" || elem === "i32";
+  B.line(`${number} = ${signed ? "sitofp" : "uitofp"} i32 ${u32} to double`);
+  B.line(`${out} = select i1 ${valid}, double ${number}, double ${f64Lit(NaN)}`);
   return { name: out, type: F64, uint32: u32 };
 }
 

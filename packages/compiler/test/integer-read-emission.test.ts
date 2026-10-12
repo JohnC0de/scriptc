@@ -5,7 +5,7 @@ import { expect, test } from "vitest";
 import { compile, deserializeModule } from "../src/index.js";
 import { emitLlvmModule } from "../src/backend/llvm/emitter.js";
 
-test("int32 counters stay 32-bit integer arithmetic", async () => {
+test("int32 counters and typed-array reads keep integers visible to LLVM", async () => {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-integer-reads-"));
   try {
     const entry = join(dir, "main.ts");
@@ -56,6 +56,14 @@ console.log(text.skip(), text.sum(3), text.sum(9));
     // converts from i32, so LLVM folds the double round trip of the local.
     expect(skip).toMatch(/ = add nsw i32 /);
     expect(skip).not.toMatch(/ = sitofp i64 /);
+    // The read joins its integer and a validity bit; the number converts after the join.
+    expect(skip).toMatch(/ = phi i32 \[ %\w+, %bytes\.read\.ok\d+ \], \[ 0, %bytes\.read\.invalid\d+ \]/);
+    expect(skip).toMatch(/ = phi i1 \[ true, %bytes\.read\.ok\d+ \], \[ false, %bytes\.read\.invalid\d+ \]/);
+    expect(skip).not.toMatch(/ = phi double \[ %\w+, %bytes\.read\.ok/);
+    // A floating element has no integer view and keeps the joined number.
+    const sum = body("_x25_Text_sum");
+    expect(sum).toMatch(/ = phi double \[ %\w+, %bytes\.read\.ok\d+ \], \[ 0x7FF8000000000000/);
+    expect(sum).toMatch(/ = phi i1 \[ true, %bytes\.read\.ok/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
