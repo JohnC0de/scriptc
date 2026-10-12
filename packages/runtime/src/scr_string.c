@@ -1202,13 +1202,51 @@ static const char *scr_byte_find(const char *hay, size_t hay_len,
   if (nee_len == 0) return hay;
   if (nee_len > hay_len) return NULL;
   if (nee_len == 1) return memchr(hay, (unsigned char)nee[0], hay_len);
-  size_t remaining = hay_len - nee_len + 1;
-  while (remaining) {
-    const char *found = memchr(hay, (unsigned char)nee[0], remaining);
+  const unsigned char first = (unsigned char)nee[0];
+  const unsigned char second = (unsigned char)nee[1];
+  /* The last possible match start. */
+  const char *last = hay + (hay_len - nee_len);
+  const char *p = hay;
+  if (hay_len <= 256) {
+    /* Short haystacks (paths, names, keys) often repeat the first needle
+     * byte ('/' in "//" or "/../"), so one memchr per occurrence costs more
+     * than the scan. Test eight candidate starts per step: a start matches
+     * the first two needle bytes where both XORed words have a zero byte.
+     * The zero-byte test has no false negatives; its rare false positives
+     * (a 0x01 byte above a zero byte) are filtered by the byte checks. Each
+     * step reads p[0..8], within the haystack because p + 8 <= last. */
+    const uint64_t ones = UINT64_C(0x0101010101010101);
+    const uint64_t highs = UINT64_C(0x8080808080808080);
+    const uint64_t want0 = ones * first, want1 = ones * second;
+    while ((size_t)(last - p) >= 8) {
+      uint64_t w0, w1;
+      memcpy(&w0, p, 8);
+      memcpy(&w1, p + 1, 8);
+      uint64_t z = (w0 ^ want0) | (w1 ^ want1);
+      if ((z - ones) & ~z & highs) {
+        for (int k = 0; k < 8; k++) {
+          const char *c = p + k;
+          if ((unsigned char)c[0] == first && (unsigned char)c[1] == second &&
+              memcmp(c + 2, nee + 2, nee_len - 2) == 0)
+            return c;
+        }
+      }
+      p += 8;
+    }
+    for (; p <= last; p++) {
+      if ((unsigned char)p[0] == first && (unsigned char)p[1] == second &&
+          memcmp(p + 2, nee + 2, nee_len - 2) == 0)
+        return p;
+    }
+    return NULL;
+  }
+  while (p <= last) {
+    const char *found = memchr(p, first, (size_t)(last - p) + 1);
     if (!found) return NULL;
-    if (memcmp(found + 1, nee + 1, nee_len - 1) == 0) return found;
-    remaining -= (size_t)(found - hay) + 1;
-    hay = found + 1;
+    if ((unsigned char)found[1] == second &&
+        memcmp(found + 2, nee + 2, nee_len - 2) == 0)
+      return found;
+    p = found + 1;
   }
   return NULL;
 }
