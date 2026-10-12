@@ -4,6 +4,7 @@ import { isStableReceiverOperand, undefinedArmTag } from "../../ir/analysis.js";
 import { type IrExpr, type IrType, isRefCounted, typeEquals, typeKey } from "../../ir/ir.js";
 import { mangleResolveThunk } from "../mangle.js";
 import {
+  arrOps,
   elemAccess,
   FN_ATTRS,
   mapKeyAccess,
@@ -23,15 +24,22 @@ import {
   borrowsMapReadInputs,
   borrowsMapMutationReceiver,
   inlineNumberKey,
+  entryStringKey,
 } from "./map-read-lifetimes.js";
 import {
   emitNumberMapGetRef,
   emitNumberMapGetScalar,
   emitNumberMapHas,
+  emitStringMapGetRef,
 } from "./map-number-lookup.js";
 import { emitBorrowedInput } from "./borrowed-inputs.js";
 import { emitStringSliceRead } from "./string-slices.js";
-import { STRING_CHAR_CODE_AT_DECL, STRING_UTF16_LEN_DECL } from "./string-reads.js";
+import {
+  STRING_CHAR_CODE_AT_DECL,
+  STRING_CHAR_CODE_AT_INT_MARKER,
+  STRING_UTF16_LEN_DECL,
+} from "./string-reads.js";
+import { exactInteger, widenInteger } from "./integer-values.js";
 import { emitDenseArrayNumber, emitDenseArrayPush } from "./dense-array-access.js";
 import { emitUnionWiden } from "./expr-records.js";
 
@@ -293,6 +301,13 @@ export function emitStrIntrinsic(
     case "charCodeAt": {
       host.declare(STRING_CHAR_CODE_AT_DECL);
       const t = B.tmp();
+      const index = e.args[0] ? exactInteger(host, args[0]!, e.args[0]) : null;
+      if (index) {
+        host.declare(STRING_CHAR_CODE_AT_INT_MARKER);
+        const wide = widenInteger(host, index);
+        B.line(`${t} = call double @sc_str_char_code_at_int(ptr ${r.name}, i64 ${wide})`);
+        return { name: t, type: e.type };
+      }
       B.line(`${t} = call double @sc_str_char_code_at(ptr ${r.name}, double ${args[0]!.name})`);
       return { name: t, type: e.type };
     }
@@ -1119,12 +1134,15 @@ export function emitMapLikeIntrinsic(
         return host.own({ name: t, type: e.type });
       }
       const numberKey = inlineNumberKey(k);
+      const stringKey = entryStringKey(k);
       if (value.kind === "union") {
         const isnull = B.tmp();
         const t = B.tmp();
         let raw: string;
         if (numberKey !== null) {
           raw = emitNumberMapGetRef(host, r.name, numberKey, value);
+        } else if (stringKey !== null) {
+          raw = emitStringMapGetRef(host, r.name, stringKey, value);
         } else {
           host.declare(`declare ptr @scr_map_get_${kAcc}_ref(ptr, ${kTy})`);
           raw = B.tmp();
@@ -1195,6 +1213,10 @@ export function emitMapLikeIntrinsic(
       }
       if (numberKey !== null && isRefCounted(value)) {
         const raw = emitNumberMapGetRef(host, r.name, numberKey, value);
+        return host.wrapNullable(raw, raw, value, valueTag, e.type, undefTag);
+      }
+      if (stringKey !== null && isRefCounted(value)) {
+        const raw = emitStringMapGetRef(host, r.name, stringKey, value);
         return host.wrapNullable(raw, raw, value, valueTag, e.type, undefTag);
       }
       host.declare(`declare ptr @scr_map_get_${kAcc}_ref(ptr, ${kTy})`);
@@ -1290,10 +1312,18 @@ export function emitMapLikeIntrinsic(
       return { name: "", type: e.type };
     case "toArray": {
       if (receiverType.kind !== "set") throw new InternalCompilerError("unreachable");
-      // Fresh +1 elem[] of the live entries in insertion order.
-      host.declare(`declare ptr @scr_set_to_arr_${kAcc}(ptr)`);
+      // Fresh +1 elem[] of the live entries in insertion order; a REF result
+      // takes its element type's array descriptor.
       const t = B.tmp();
-      B.line(`${t} = call ptr @scr_set_to_arr_${kAcc}(ptr ${r.name})`);
+      if (kAcc === "ref") {
+        host.declare(`declare ptr @scr_set_to_arr_ref(ptr, ptr)`);
+        B.line(
+          `${t} = call ptr @scr_set_to_arr_ref(ptr ${r.name}, ptr ${arrOps(host.shapeHost, receiverType.elem)})`,
+        );
+      } else {
+        host.declare(`declare ptr @scr_set_to_arr_${kAcc}(ptr)`);
+        B.line(`${t} = call ptr @scr_set_to_arr_${kAcc}(ptr ${r.name})`);
+      }
       return host.own({ name: t, type: e.type });
     }
     default: {

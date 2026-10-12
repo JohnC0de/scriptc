@@ -269,6 +269,7 @@
         "packages/compiler/src/frontend/lowering/**",
         "packages/compiler/src/backend/llvm/**",
         "packages/compiler/src/backend/loop-polls.test.ts",
+        "packages/compiler/src/backend/may-throw.test.ts",
         "packages/compiler/src/ir/**",
         "packages/compiler/src/library/*.test.ts",
         "packages/compiler/test/**",

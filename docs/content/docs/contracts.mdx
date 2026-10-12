@@ -29,6 +29,11 @@ Contract types are type aliases that mean nothing to TypeScript or Node.js but a
       <td>A module constant built from literals becomes immortal data: never reference counted, never traced by the collector.</td>
     </tr>
     <tr>
+      <td><code>Acyclic</code></td>
+      <td>No chain of references leads from an object of the class or type back to itself.</td>
+      <td>Its objects carry no cycle-collector header and are freed by reference counting alone.</td>
+    </tr>
+    <tr>
       <td><code>ProgramLifetime</code></td>
       <td>Instances of the class are kept until the program exits.</td>
       <td>Instances are immortal from construction: no reference counting, no cycle collection, never freed.</td>
@@ -115,6 +120,8 @@ scriptc recognizes a contract where it is written as the annotation of a declara
   <dd>Parameters, variables, class instance fields and function results whose type is a plain <code>number</code>.</dd>
   <dt><code>Immutable&lt;T&gt;</code></dt>
   <dd>Parameters, variables, class instance fields and function results.</dd>
+  <dt><code>Acyclic</code></dt>
+  <dd>Classes (<code>class C implements Acyclic</code>), interfaces (<code>interface I extends Acyclic</code>) and object type aliases (<code>type T = Acyclic&lt;...&gt;</code> over an object type).</dd>
   <dt><code>ProgramLifetime</code></dt>
   <dd>The <code>implements</code> clause of a class declaration: <code>class Node implements ProgramLifetime</code>.</dd>
 </dl>
@@ -125,7 +132,36 @@ A contract anywhere else (a type alias, an interface member, an element or type 
 
 A `NoThrow` function must not contain a path to a throwing operation: a `throw`, a call to a function that may throw, a call through a function value that may hold such a function, an operation that throws in Node.js (such as reading a property of `undefined`), or recursion, whose stack guard can throw `RangeError`. scriptc already computes this for every function to omit exception checks; the contract turns the result into a guarantee and reports the first throwing path when it does not hold.
 
-In this version a surrounding `try`/`catch` does not discharge the contract, and `async` functions and generators cannot be `NoThrow`.
+A `try` statement discharges what its handlers take. A throwing call inside a `try` with a `catch`, or inside a `try` whose `finally` always ends with `return`, `break` or `continue` (which discards the pending exception), cannot leave the function:
+
+```ts:digits.ts
+import type { NoThrow } from "@scriptc/types";
+
+function parseDigit(ch: number): number {
+  if (ch < 48 || ch > 57) throw new RangeError("not a digit");
+  return ch - 48;
+}
+
+function digitOr(text: string, i: number, fallback: number): NoThrow<number> {
+  try {
+    return parseDigit(text.charCodeAt(i));
+  } catch {
+    return fallback;
+  }
+}
+
+console.log(digitOr("7", 0, -1), digitOr("x", 0, -1));
+```
+
+```console
+$ node digits.ts
+7 -1
+$ scriptc build digits.ts -o digits >/dev/null
+$ ./digits
+7 -1
+```
+
+The `catch` and `finally` bodies are checked like any other code: a rethrow, a throwing call in the `catch`, or a `try`/`finally` without `catch` whose `finally` can complete normally (and so re-raises the exception) still fails the contract. A recursive function cannot be `NoThrow`, because its stack guard throws on entry, outside any handler. In programs that use worker threads, `try` does not discharge the contract, since a termination request unwinds through `catch`. `async` functions and generators cannot be `NoThrow`.
 
 ## Int32
 
@@ -151,6 +187,77 @@ scriptc refuses an `Int32` slot whose writes it cannot all see (SC7003): a param
 
 A value stored into an `Immutable` slot must be fresh: a literal, a `new` expression whose constructor keeps `this` to itself, or a function that returns what it builds. Values that reach dynamic code, or functions scriptc cannot see, are refused.
 
+## Acyclic
+
+scriptc frees objects by reference counting and finds unreachable reference cycles with a cycle collector. Objects of a type that can never lie on a cycle need neither the collector's object header nor its bookkeeping. scriptc already proves this for many types; `Acyclic` turns the proof into a guarantee and shows the cycle when it does not hold.
+
+A reference can close a cycle when it is stored after its object was constructed (a later write can point an older object at a newer one), when it sits in an array, `Map` or `Set` (whose contents change), or when a field holds a function, a promise or a dynamic value (which can reference anything). Scalar fields never matter. A subclass shares its base class's object layout, so a class hierarchy is acyclic only as a whole.
+
+```ts:tree.ts
+import type { Acyclic } from "@scriptc/types";
+
+class Tree implements Acyclic {
+  readonly left: Tree | null;
+  readonly right: Tree | null;
+  constructor(left: Tree | null, right: Tree | null) {
+    this.left = left;
+    this.right = right;
+  }
+  count(): number {
+    return 1 + (this.left?.count() ?? 0) + (this.right?.count() ?? 0);
+  }
+}
+
+function build(depth: number): Tree {
+  return depth === 0 ? new Tree(null, null) : new Tree(build(depth - 1), build(depth - 1));
+}
+
+console.log(build(20).count());
+```
+
+```console
+$ node tree.ts
+2097151
+$ scriptc build tree.ts -o tree >/dev/null
+$ ./tree
+2097151
+```
+
+When a cycle can form, the diagnostic shows its path:
+
+```ts:graph.ts
+import type { Acyclic } from "@scriptc/types";
+
+class Graph implements Acyclic {
+  readonly nodes: GraphNode[] = [];
+}
+
+class GraphNode {
+  readonly graph: Graph;
+  constructor(graph: Graph) {
+    this.graph = graph;
+  }
+}
+
+const graph = new Graph();
+graph.nodes.push(new GraphNode(graph));
+console.log(graph.nodes.length);
+```
+
+```console
+$ scriptc build graph.ts
+/tmp/app/graph.ts:3:24 - error SC7007: 'Graph' is declared Acyclic but can lie on a reference cycle: Graph.nodes → GraphNode.graph → Graph (Graph.nodes is an array, whose contents can change)
+
+  2 | 
+  3 | class Graph implements Acyclic {
+    |                        ^~~~~~~
+  4 |   readonly nodes: GraphNode[] = [];
+
+  hint: an array, Map or Set can come to hold an object that refers back; make the element type unable to reach this type, or remove Acyclic
+
+1 error.
+```
+
 ## ProgramLifetime
 
 `ProgramLifetime` marks a class whose instances a program keeps until it exits, such as the nodes of a syntax tree, the symbols of a symbol table or interned types. scriptc then never reference counts, collects or frees instances of the class and of its subclasses: they are created immortal, every retain and release on them compiles to nothing, and the cycle collector neither walks them nor needs to trace the objects that point to them. Node.js behavior is unchanged; only memory use differs, because an instance the program drops is never reclaimed.
@@ -171,11 +278,13 @@ class Identifier extends SyntaxNode {
 }
 ```
 
-scriptc checks that the promise cannot change what the program computes (SC7007):
+scriptc checks that the promise cannot change what the program computes (SC7008):
 
 - the class is the root of its hierarchy, so every value of any class type in the hierarchy is program-lifetime; built-in bases such as `Error`, `EventEmitter` and streams are refused because they hold runtime state that is released with the object;
 - the build is an executable: a library's host decides when the objects it receives are released;
 - no instance can be published to other threads with `@scriptc/threads`.
+
+A class can be both `ProgramLifetime` and `Acyclic`. `Acyclic` is still checked against the references the program writes, so a chain of references that passes through a program-lifetime instance and leads back is still a cycle (SC7007).
 
 Static code has no `WeakRef` or `FinalizationRegistry`, and a `WeakMap` or `WeakSet` entry whose key is never freed is never observable as removed, so nothing else can tell the difference.
 
@@ -227,7 +336,7 @@ $ scriptc build reject.ts
      |                                            ^~~~~~~~~~~~~~~
   15 |   return parseDigit(text.charCodeAt(i));
 
-  hint: remove the throwing operation from the path (or the recursion), or remove NoThrow; a surrounding try/catch does not discharge the contract in this version
+  hint: remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow
 
 /tmp/app/reject.ts:19:10 - error SC7002: the value returned from 'middle' (Int32) is not provably an int32: '(start + end) / 2'
 
@@ -275,6 +384,10 @@ $ scriptc build reject.ts
     </tr>
     <tr>
       <td>SC7007</td>
+      <td>An <code>Acyclic</code> class or type can lie on a reference cycle; the message shows the cycle.</td>
+    </tr>
+    <tr>
+      <td>SC7008</td>
       <td>A <code>ProgramLifetime</code> class is not the root of its hierarchy, is part of a library build, or can be published to other threads.</td>
     </tr>
   </tbody>

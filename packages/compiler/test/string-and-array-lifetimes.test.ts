@@ -217,15 +217,39 @@ test("a throwing later source argument releases the retained snapshot on its exc
   const module = await lower(`
 class Item { value = 7; }
 function read(item: Item, ignored: number): number { return item.value + ignored; }
+function fail(items: Item[]): number { items.pop(); throw new Error("failed"); }
+function work(items: Item[]): number { return read(items[0], fail(items)); }
+try { console.log(work([new Item()])); } catch {}
+`);
+  // The later argument removes the element, so the snapshot must own it.
+  const work = body(emitLlvmModule(module), "sc_bf_work");
+  const failure = work.indexOf("@sc_bf_fail");
+  expect(failure).toBeGreaterThan(0);
+  expect(work.slice(0, failure)).toContain("@sc_retain_Item");
+  expect(work.slice(failure)).toMatch(PENDING_CHECK);
+  const exceptionEdge = work.slice(failure, work.indexOf("@sc_bf_read"));
+  expect(exceptionEdge).toContain("@sc_release_Item");
+  expect(work).not.toContain("@scr_union_release");
+});
+
+test("a throwing later source argument that writes no element leaves the snapshot borrowed", async () => {
+  const module = await lower(`
+class Item { value = 7; }
+function read(item: Item, ignored: number): number { return item.value + ignored; }
 function fail(): number { throw new Error("failed"); }
 function work(items: Item[]): number { return read(items[0], fail()); }
 try { console.log(work([new Item()])); } catch {}
 `);
+  // Neither the callee nor the later argument writes an array element (the
+  // Error constructor's stores into its own fresh object do not count), so
+  // the borrowed parameter's array keeps the element alive and no edge,
+  // normal or exceptional, owes a release.
   const work = body(emitLlvmModule(module), "sc_bf_work");
   const failure = work.indexOf("@sc_f_fail");
   expect(failure).toBeGreaterThan(0);
   expect(work.slice(failure)).toMatch(PENDING_CHECK);
-  expect(work.slice(failure)).toContain("@sc_release_Item");
+  expect(work).not.toContain("@sc_retain_Item");
+  expect(work).not.toContain("@sc_release_Item");
   expect(work).not.toContain("@scr_union_release");
 });
 

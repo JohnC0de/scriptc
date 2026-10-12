@@ -61,3 +61,13 @@ const copy = TABLE.slice(0, 4);
 copy.push(99);
 console.log("copy", copy.join(","), "original", TABLE.length);
 for (const [text, keyword] of KEYWORDS) console.log("entry", text, keyword.kind);
+
+// Element writes at provable array indexes keep a factory's result fresh.
+function squares(): number[] {
+  const table: number[] = [];
+  for (let i = 0; i < 6; i++) table[i] = i * i;
+  return table;
+}
+
+const SQUARES: Immutable<number[]> = squares();
+console.log(SQUARES.join(","), classify(SQUARES, 5));

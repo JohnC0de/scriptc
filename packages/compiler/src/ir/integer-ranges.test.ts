@@ -1,6 +1,12 @@
 import { expect, test } from "vitest";
-import { analyzeIntegerRanges } from "./integer-ranges.js";
-import { BOOL, F64, type IrExpr, type IrFunction, type IrStmt } from "./ir.js";
+import {
+  analyzeIntegerRanges,
+  bitwiseIdentityOperand,
+  bitwiseRange,
+  type BitwiseOp,
+  type BitwiseOperand,
+} from "./integer-ranges.js";
+import { BOOL, F64, STRING, type IrExpr, type IrFunction, type IrStmt } from "./ir.js";
 
 const loc = { file: "test.ts", start: 0, end: 0 };
 const num = (value: number): IrExpr => ({ loc, kind: "numLit", value, type: F64 });
@@ -29,7 +35,11 @@ test("tracks exact additions and bitwise conversions through assignments", () =>
   const sum = bin("+", ref(), bin("<<", ref(), num(3)));
   const unsigned = bin(">>>", ref(), num(0));
   const ranges = analyzeIntegerRanges(
-    fn([assign(bin("|", num(0), num(0))), assign(sum), { loc, kind: "return", value: unsigned }]),
+    fn([
+      assign(bin("|", ref("unknown"), num(0))),
+      assign(sum),
+      { loc, kind: "return", value: unsigned },
+    ]),
   );
   expect(ranges.get(sum)).toEqual({ min: -4294967296, max: 4294967294 });
   expect(ranges.get(unsigned)).toEqual({ min: 0, max: 4294967295 });
@@ -418,4 +428,153 @@ test("whole-program slot facts seed parameters, field reads and call results", (
     call: (callee) => (callee === "bits" ? INT32 : null),
   });
   expect([seeded.get(field), seeded.get(result), seeded.get(param)]).toEqual([INT32, INT32, INT32]);
+});
+
+test("string lengths and found indices are int32, other string reads stay unknown", () => {
+  const text: IrExpr = { loc, kind: "strLit", value: "abc", type: STRING };
+  const read = (method: "length" | "indexOf" | "charCodeAt", args: IrExpr[] = []): IrExpr => ({
+    loc,
+    kind: "strIntrinsic",
+    method,
+    receiver: text,
+    args,
+    type: F64,
+  });
+  const length = read("length");
+  const found = read("indexOf", [{ loc, kind: "strLit", value: "b", type: STRING }]);
+  const code = read("charCodeAt", [num(0)]);
+  const next = bin("+", length, num(1));
+  const ranges = analyzeIntegerRanges(
+    fn([observe(length), observe(found), observe(code), observe(next)]),
+  );
+  expect(ranges.get(length)).toEqual({ min: 0, max: 2147483647 });
+  expect(ranges.get(found)).toEqual({ min: -1, max: 2147483647 });
+  // charCodeAt can be NaN.
+  expect(ranges.get(code)).toBeNull();
+  expect(ranges.get(next)).toEqual({ min: 1, max: 2147483648 });
+});
+
+const BITWISE: Record<BitwiseOp, (left: number, right: number) => number> = {
+  "&": (left, right) => left & right,
+  "|": (left, right) => left | right,
+  "^": (left, right) => left ^ right,
+  "<<": (left, right) => left << right,
+  ">>": (left, right) => left >> right,
+  ">>>": (left, right) => left >>> right,
+};
+
+test("bitwise result ranges contain every JS result over their operands", () => {
+  const ranges: { min: number; max: number }[] = [
+    { min: 0, max: 0 },
+    { min: 0, max: 1 },
+    { min: 0, max: 100 },
+    { min: 3, max: 5 },
+    { min: -1, max: -1 },
+    { min: -7, max: -2 },
+    { min: -5, max: 9 },
+    { min: 0, max: 31 },
+    { min: 30, max: 33 },
+    { min: 2 ** 31 - 2, max: 2 ** 31 + 1 },
+    { min: 2 ** 31, max: 2 ** 32 - 1 },
+    { min: 2 ** 32 - 1, max: 2 ** 32 + 1 },
+    { min: -(2 ** 31) - 1, max: -(2 ** 31) + 1 },
+    { min: -(2 ** 31), max: 2 ** 31 - 1 },
+    { min: 0, max: 2 ** 32 - 1 },
+    { min: -(2 ** 53), max: 2 ** 53 },
+  ];
+  const literals = [
+    -0,
+    0.5,
+    -1.5,
+    NaN,
+    Infinity,
+    -Infinity,
+    2 ** 31,
+    2 ** 32,
+    2 ** 32 + 3,
+    2 ** 53 + 2,
+  ];
+  const samples = (operand: BitwiseOperand): number[] => {
+    if (typeof operand === "number") return [operand];
+    if (operand === null) return [...literals, 7, -7, 2 ** 31 - 1, -(2 ** 31)];
+    const { min, max } = operand;
+    const values = new Set([min, max, Math.floor((min + max) / 2), min + 1, max - 1]);
+    if (max - min <= 64) for (let value = min; value <= max; value++) values.add(value);
+    return [...values].filter((value) => value >= min && value <= max);
+  };
+  const operands: BitwiseOperand[] = [null, ...ranges, ...literals, 0, -1, 3, 31, 32, 255];
+  for (const op of Object.keys(BITWISE) as BitwiseOp[])
+    for (const left of operands)
+      for (const right of operands) {
+        const range = bitwiseRange(op, left, right);
+        for (const a of samples(left))
+          for (const b of samples(right)) {
+            const result = BITWISE[op](a, b);
+            if (result < range.min || result > range.max || Object.is(result, -0))
+              throw new Error(
+                `${a} ${op} ${b} = ${result} outside [${range.min}, ${range.max}] (operands ${JSON.stringify(left)}, ${JSON.stringify(right)})`,
+              );
+          }
+      }
+});
+
+test("bitwise ranges keep known operand ranges", () => {
+  const small = { min: 0, max: 100 };
+  expect(bitwiseRange("|", small, 0)).toEqual(small);
+  expect(bitwiseRange("|", 0, small)).toEqual(small);
+  expect(bitwiseRange("^", small, 2 ** 32)).toEqual(small);
+  expect(bitwiseRange("&", small, -1)).toEqual(small);
+  expect(bitwiseRange("&", null, 255)).toEqual({ min: 0, max: 255 });
+  expect(bitwiseRange("|", small, { min: 1, max: 2 })).toEqual({ min: 1, max: 127 });
+  expect(bitwiseRange(">>", small, 1)).toEqual({ min: 0, max: 50 });
+  expect(bitwiseRange(">>", { min: -9, max: 9 }, null)).toEqual({ min: -9, max: 9 });
+  expect(bitwiseRange("<<", small, 2)).toEqual({ min: 0, max: 400 });
+  expect(bitwiseRange(">>>", null, 1)).toEqual({ min: 0, max: 2 ** 31 - 1 });
+  expect(bitwiseRange(">>>", { min: -1, max: -1 }, 0)).toEqual({
+    min: 2 ** 32 - 1,
+    max: 2 ** 32 - 1,
+  });
+  expect(bitwiseRange("|", { min: 2 ** 31, max: 2 ** 31 }, 0)).toEqual({
+    min: -(2 ** 31),
+    max: -(2 ** 31),
+  });
+  expect(bitwiseRange("|", null, 0)).toEqual(INT32);
+  expect(bitwiseRange("|", NaN, 0)).toEqual({ min: 0, max: 0 });
+  // The analysis carries operand ranges through `| 0` and shifts.
+  const length: IrExpr = {
+    loc,
+    kind: "strIntrinsic",
+    method: "length",
+    receiver: { loc, kind: "varRef", localId: "s", type: STRING },
+    args: [],
+    type: F64,
+  };
+  const truncated = bin("|", length, num(0));
+  const half = bin(">>", length, num(1));
+  const analyzed = analyzeIntegerRanges(
+    fn([observe(truncated), observe(half), observe(bin("|", ref("unknown"), num(0)))]),
+  );
+  expect(analyzed.get(truncated)).toEqual({ min: 0, max: 2 ** 31 - 1 });
+  expect(analyzed.get(half)).toEqual({ min: 0, max: 2 ** 30 - 1 });
+});
+
+test("bitwise identity operands follow ToInt32 and the shift-count mask", () => {
+  const x = ref();
+  const identity = (op: BitwiseOp, left: IrExpr, right: IrExpr) =>
+    bitwiseIdentityOperand(bin(op, left, right) as IrExpr & { kind: "bin" });
+  expect(identity("|", x, num(0))).toBe("left");
+  expect(identity("|", num(0), x)).toBe("right");
+  expect(identity("|", x, num(-0))).toBe("left");
+  expect(identity("|", x, num(2 ** 32))).toBe("left");
+  expect(identity("^", x, num(NaN))).toBe("left");
+  expect(identity("&", x, num(-1))).toBe("left");
+  expect(identity("&", num(2 ** 32 - 1), x)).toBe("right");
+  expect(identity("<<", x, num(0))).toBe("left");
+  expect(identity(">>", x, num(32))).toBe("left");
+  expect(identity(">>>", x, num(0))).toBe("left");
+  expect(identity("|", x, num(1))).toBeNull();
+  expect(identity("&", x, num(0))).toBeNull();
+  expect(identity(">>", x, num(1))).toBeNull();
+  expect(identity("<<", num(0), x)).toBeNull();
+  expect(identity(">>>", num(0), x)).toBeNull();
 });

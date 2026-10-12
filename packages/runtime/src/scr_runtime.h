@@ -53,6 +53,18 @@ void arc4random_buf(void *buf, size_t n);
 #define SCR_TL
 #endif
 
+/* Entry points that only run when a JS exception is being raised. noinline
+ * keeps the throw machinery out of every caller: the LLVM helper never
+ * imports noinline runtime bodies into program code, so a compiled function
+ * whose only slow path throws stays small enough to inline and needs no
+ * callee-saved registers on its fast path. cold tells the C compiler that
+ * runtime paths reaching them are unlikely. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SCR_COLD __attribute__((cold, noinline))
+#else
+#define SCR_COLD
+#endif
+
 /* ── process ──────────────────────────────────────────────────────────── */
 
 /* Called once at the top of main: private stdout formatter buffer,
@@ -62,7 +74,7 @@ void scr_init(void);
 /* Program objects emitted by the bundled LLVM helper reference this symbol.
  * Its versioned spelling makes a mismatched manual runtime link fail before
  * the program can start. */
-void scr_runtime_abi_v12(void);
+void scr_runtime_abi_v13(void);
 void scr_runtime_workers_v8(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -336,7 +348,7 @@ bool scr_context_is_main(void);
  * report. Zero (the default) disables the check on that stack. */
 extern SCR_TL uintptr_t scr_stack_guard;
 void scr_stack_guard_init(void);
-void scr_stack_overflow(void);
+SCR_COLD void scr_stack_overflow(void);
 #if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(__APPLE__) && \
     (defined(__aarch64__) || defined(__x86_64__))
 /* Darwin worker executables: reading a thread-local variable calls its TLV
@@ -797,9 +809,9 @@ void scr_publish_refuse(const char *message);
  * TypeErrors. scr_throw_published_array answers false (and throws nothing)
  * when Node's operation would not write the array. */
 struct ScrArr;
-void scr_throw_published_field(const char *prop, const char *owner);
+SCR_COLD void scr_throw_published_field(const char *prop, const char *owner);
 bool scr_throw_published_array(int op, const struct ScrArr *a, double index, double n);
-void scr_throw_published_collection(bool set);
+SCR_COLD void scr_throw_published_collection(bool set);
 
 /* ── class hierarchies (single inheritance) ───────────────────────────
  * Classes in an `extends` hierarchy share a two-word object prefix: the
@@ -1170,8 +1182,8 @@ ScrError *scr_domex_clone(ScrError *e, const struct ScrDyn *options);
 /* Throw a fresh DOMException through the exception cell (atob/btoa's
  * InvalidCharacterError sites). Copies both C strings; the _str form
  * takes ownership of the message. */
-void scr_throw_domex(const char *name, const char *message);
-void scr_throw_domex_str(const char *name, ScrStr *message);
+SCR_COLD void scr_throw_domex(const char *name, const char *message);
+SCR_COLD void scr_throw_domex_str(const char *name, ScrStr *message);
 
 /* Switch runtime-side error allocation to collector-headered (called from
  * main() when the compiler's cycle fixpoint marks the hierarchy). */
@@ -1179,7 +1191,7 @@ void scr_error_set_traced(void);
 
 /* Allocate + initialize (name = the kind's builtin name, message retained
  * from the borrowed argument; NULL means ""). Returns +1. */
-ScrError *scr_error_new(int kind, ScrStr *message);
+SCR_COLD ScrError *scr_error_new(int kind, ScrStr *message);
 /* Initialize the error prefix of an already-allocated (zeroed) object —
  * the super(message) call of a compiled `extends Error` constructor. Both
  * arguments are borrowed. */
@@ -1219,22 +1231,22 @@ bool scr_error_is(const void *obj);
  * takes ownership of message; the _msg form copies the C string. The _named
  * form (island bridge) takes ownership of both strings and picks the
  * builtin vtable whose class name matches `name` (Error otherwise). */
-void scr_throw_error(int kind, ScrStr *message);
-void scr_throw_error_msg(int kind, const char *message, size_t len);
-void scr_throw_error_named(ScrStr *name, ScrStr *message);
+SCR_COLD void scr_throw_error(int kind, ScrStr *message);
+SCR_COLD void scr_throw_error_msg(int kind, const char *message, size_t len);
+SCR_COLD void scr_throw_error_named(ScrStr *name, ScrStr *message);
 /* A read of a declare-d const nothing defines: throws Node's catchable
  * ReferenceError "<name> is not defined". Borrows name; always throws. */
-void scr_undef_global_read(ScrStr *name);
+SCR_COLD void scr_undef_global_read(ScrStr *name);
 /* The `code` slot (NodeJS.ErrnoException's .code): set stamps a fresh
  * string from the C literal (replacing any previous value); get answers
  * +1 or NULL when absent (the compiler's undefined arm). The _msg_code
  * thrower is scr_throw_error_msg with the code stamped on the payload. */
 void scr_error_set_code(ScrError *e, const char *code);
 ScrStr *scr_error_code(ScrError *e);
-void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
+SCR_COLD void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
  * error of `kind`, `code` stamped when non-empty. Borrows both. */
-void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
+SCR_COLD void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
 
 /* ── string methods ─────────────────────────────────────────────────
  * ECMA-262 observable semantics over UTF-8 storage with UTF-16 code-unit
@@ -1564,8 +1576,8 @@ typedef enum {
   SCR_ELEM_BYTES, /* slots are ScrBytes* — released with the array */
   /* Slots are void* to values the runtime cannot lay out itself — records,
    * class instances, unions, and cycle-capable inner arrays. The element
-   * type's RC entry points arrive at construction (scr_arr_new_ref) and are
-   * stored ONCE per array, the SCR_BOX_OBJ / map-value technique; every
+   * type's RC entry points arrive at construction (scr_arr_new_ops) as one
+   * constant descriptor per element type, stored once per array; every
    * array is still monomorphic (one element type, one set of entry points). */
   SCR_ELEM_REF,
 } ScrElemKind;
@@ -1576,21 +1588,32 @@ typedef enum {
   SCR_ARR_UNDEFINED = 2,
 } ScrArrState;
 
+/* The RC entry points of an SCR_ELEM_REF array's element type: one constant
+ * per element type (emitted by the compiler, or static in the runtime),
+ * shared by every array of that type. retain/release are the type's `_v`
+ * adapters; trace is non-NULL exactly when the element type carries a cycle
+ * header. */
+typedef struct ScrArrOps {
+  void *(*retain)(void *);
+  void (*release)(void *);
+  ScrTraceFn trace;
+} ScrArrOps;
+
 typedef struct ScrArr {
   size_t rc; /* SIZE_MAX = immortal (unused for arrays; kept per convention) */
   size_t len;
   size_t cap; /* dense capacity; sparse entries cover indices >= cap */
   ScrElemKind elem;
-  /* SCR_ELEM_REF only; NULL for every other element kind. elem_trace is
-   * non-NULL exactly when the element type carries a cycle header: such
-   * arrays are CYCLE-CAPABLE (an element can point back at the array that
-   * owns it) and allocate with the hidden collector header — their trace
-   * visits every element, and the collector teardown frees only the slot
-   * storage (all elements are traced children). Arrays of acyclic ref
-   * elements and the historic element kinds keep the lean 1-word header. */
-  void *(*elem_retain)(void *);
-  void (*elem_release)(void *);
-  ScrTraceFn elem_trace;
+  /* 1 exactly when ops->trace is non-NULL: the element type carries a cycle
+   * header, so the array is CYCLE-CAPABLE (an element can point back at the
+   * array that owns it) and allocates with the hidden collector header —
+   * its trace visits every element, and the collector teardown frees only
+   * the slot storage (all elements are traced children). Arrays of acyclic
+   * ref elements and the historic element kinds keep the lean 1-word
+   * header. Kept beside `elem` so the RC fast paths test it with one load. */
+  uint32_t cyc;
+  /* SCR_ELEM_REF only; NULL for every other element kind. */
+  const ScrArrOps *ops;
   uint64_t *data;
   uint8_t *present; /* one state per dense slot; heap arrays share data allocation */
   /* Rarely used storage (sparse indices, noncanonical numeric properties,
@@ -1608,11 +1631,15 @@ typedef struct ScrArrExt {
   size_t prop_cap;
   struct ScrDyn *metadata; /* heterogeneous named properties of match results */
 } ScrArrExt;
-/* The LLVM backend's inline retain/release read elem_trace through its
- * mirrored %ScrArr type (field 6) to decide mark-live / candidate buffering
- * exactly like scr_arr_retain and scr_arr_release. */
-_Static_assert(offsetof(ScrArr, elem_trace) == 3 * sizeof(size_t) + 3 * sizeof(void *),
-               "inline RC fast paths read ScrArr.elem_trace as %ScrArr field 6");
+/* The LLVM backend's inline retain/release read `cyc` through its mirrored
+ * %ScrArr type (field 4, i32) to decide mark-live / candidate buffering
+ * exactly like scr_arr_retain and scr_arr_release; its inline element reads
+ * use data (field 6) and present (field 7). */
+_Static_assert(sizeof(ScrElemKind) == sizeof(uint32_t), "ScrArr.elem is an i32 (%ScrArr field 3)");
+_Static_assert(offsetof(ScrArr, cyc) == 3 * sizeof(size_t) + sizeof(uint32_t),
+               "inline RC fast paths read ScrArr.cyc as %ScrArr field 4");
+_Static_assert(offsetof(ScrArr, data) == 3 * sizeof(size_t) + 2 * sizeof(uint32_t) + sizeof(void *),
+               "inline element reads use ScrArr.data as %ScrArr field 6");
 
 typedef struct ScrArrSparseSlot {
   size_t index;
@@ -1629,13 +1656,12 @@ typedef struct ScrArrProp {
 
 ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap); /* returns +1 */
 
-/* SCR_ELEM_REF construction: retain/release must be non-NULL (the compiler
- * passes the element type's `_v` adapters); trace is non-NULL iff the
- * element type carries a cycle header (the array then allocates with the
- * collector header — see the struct comment). Returns +1. */
-ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
-                         void (*elem_release)(void *),
-                         ScrTraceFn elem_trace, size_t initial_cap);
+/* SCR_ELEM_REF construction: `ops` must outlive the array (a constant; the
+ * compiler emits one per element type) and its retain/release must be
+ * non-NULL; ops->trace is non-NULL iff the element type carries a cycle
+ * header (the array then allocates with the collector header — see the
+ * struct comment). Returns +1. */
+ScrArr *scr_arr_new_ops(const ScrArrOps *ops, size_t initial_cap);
 
 static inline ScrArr *scr_arr_retain(ScrArr *a) {
   if (a->rc != SIZE_MAX) {
@@ -1645,8 +1671,8 @@ static inline ScrArr *scr_arr_retain(ScrArr *a) {
 }
 
 /* Releases ref elements (SCR_ELEM_STR/ARR/BYTES/REF) recursively at rc == 0.
- * NULL-tolerant (uninitialized locals). Cycle-capable arrays (elem_trace
- * non-NULL) feed the candidate-root buffer like every headered type. */
+ * NULL-tolerant (uninitialized locals). Cycle-capable arrays (`cyc`) feed
+ * the candidate-root buffer like every headered type. */
 void scr_arr_release(ScrArr *a);
 void scr_arr_copy_metadata(ScrArr *a, struct ScrDyn *target);
 /* The array's out-of-line storage, allocated (zeroed) on first use. */
@@ -2032,6 +2058,10 @@ _Static_assert(sizeof(ScrMapEntry) == 24 && offsetof(ScrMapEntry, val) == 8,
 /* Entry for a number key, or NULL when absent. The pointer is valid until
  * the next mutation; generated code reads the value slot through it. */
 const ScrMapEntry *scr_map_entry_f64(const ScrMap *m, double key);
+/* Entry for a string key, or NULL when absent, on the same terms. Typed
+ * reference reads retain the value with its static type's retain instead
+ * of the collection's adapter. */
+const ScrMapEntry *scr_map_entry_str(const ScrMap *m, const ScrStr *key);
 
 /* Called once on a fresh UNION_VALUE collection, before its first insert. */
 void scr_map_union_keys(ScrMap *map, const uint8_t *kinds);
@@ -2148,12 +2178,12 @@ void scr_set_add_all(ScrMap *set, ScrArr *values);
 ScrArr *scr_set_to_arr_f64(const ScrMap *s);
 ScrArr *scr_set_to_arr_bool(const ScrMap *s);
 ScrArr *scr_set_to_arr_str(const ScrMap *s);
-ScrArr *scr_set_to_arr_ref(const ScrMap *s);
+ScrArr *scr_set_to_arr_ref(const ScrMap *s, const ScrArrOps *ops);
 ScrArr *scr_set_to_arr_dyn(const ScrMap *s);
 
 /* REF-element Set construction: a set-shaped map whose keys are refcounted
  * pointers under identity hashing (see SCR_MAP_KEY_REF above). The element
- * type's `_v` adapters arrive once, the scr_arr_new_ref technique. */
+ * type's `_v` adapters arrive once, as for arrays (scr_arr_new_ops). */
 ScrMap *scr_set_new_ref(void *(*elem_retain)(void *), void (*elem_release)(void *));
 
 /* The live STRING keys of a map in JS OWN-KEY ORDER (Object.keys/values/
@@ -3049,23 +3079,23 @@ static inline bool scr_exc_pending_inline(void) { return scr_exc_active->kind !=
 _Static_assert(offsetof(ScrExcCell, kind) == 0 && sizeof(ScrExcKind) == 4 && SCR_EXC_NONE == 0,
                "the LLVM emitter's inline pending check loads an i32 kind at offset 0");
 
-void scr_throw_f64(double v);
-void scr_throw_bool(bool v);
-void scr_throw_str(ScrStr *v); /* takes ownership */
+SCR_COLD void scr_throw_f64(double v);
+SCR_COLD void scr_throw_bool(bool v);
+SCR_COLD void scr_throw_str(ScrStr *v); /* takes ownership */
 /* Takes ownership of v; retain/release must be non-NULL (the compiler
  * passes the payload type's `_v` adapters, like scr_union_new_ref); trace
  * is non-NULL iff the payload type carries a cycle header. */
-void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
-                   ScrTraceFn trace);
+SCR_COLD void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
+                            ScrTraceFn trace);
 /* Store a reference whose JS typeof was checked at the throw site. */
-void scr_throw_ref_classified(void *v, void *(*retain)(void *), void (*release)(void *),
-                              ScrTraceFn trace, bool object);
-void scr_throw_primitive_ref(void *v, void *(*retain)(void *), void (*release)(void *),
-                             ScrTraceFn trace);
+SCR_COLD void scr_throw_ref_classified(void *v, void *(*retain)(void *), void (*release)(void *),
+                                       ScrTraceFn trace, bool object);
+SCR_COLD void scr_throw_primitive_ref(void *v, void *(*retain)(void *), void (*release)(void *),
+                                      ScrTraceFn trace);
 /* Same ownership contract as scr_throw_ref; the payload must be a
  * hierarchy-class instance (vtable word present) — see SCR_EXC_OBJ. */
-void scr_throw_obj(void *v, void *(*retain)(void *), void (*release)(void *),
-                    ScrTraceFn trace);
+SCR_COLD void scr_throw_obj(void *v, void *(*retain)(void *), void (*release)(void *),
+                            ScrTraceFn trace);
 
 /* Catch: discard the in-flight exception (releases a refcounted payload). */
 void scr_exc_clear(void);
@@ -5285,22 +5315,22 @@ void scr_dyn_check_listener(const ScrDyn *cb, const char *argname);
 const char *scr_dyn_specific_type(const ScrDyn *v, char *buf, size_t cap);
 /* ERR_INVALID_ARG_TYPE with the runtime-rendered Received tail (the
  * error.argTypeThrow libCall). Borrows all three; always throws. */
-void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
-void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
+SCR_COLD void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
+SCR_COLD void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
 /* The property flavor ("The \"options.x\" property must be ...") — the
  * option-bag validators' gate (error.propTypeThrow). Always throws. */
-void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
-void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
+SCR_COLD void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
+SCR_COLD void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
 /* Node's ERR_INVALID_ARG_VALUE ("The argument 'encoding' is invalid
  * encoding. Received 'no'") — reason NULL renders "is invalid".
  * TypeError; always throws catchably. */
-void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
+SCR_COLD void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
 /* The ERR_INVALID_ARG_VALUE/%j "Received" renderer (inspect-lite:
  * strings quote, scalars print plain, deep shapes sketch). */
 const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap);
 /* A ladder's post-validation refuse: throws the compiler-rendered SC2020
  * statement-fence text verbatim (Node's validation errors run first). */
-void scr_throw_lowering_fence(const ScrStr *msg);
+SCR_COLD void scr_throw_lowering_fence(const ScrStr *msg);
 /* ERR_OUT_OF_RANGE's "Received" number rendering (Node's
  * addNumericalSeparator underscores past 2^32) — scr_bytes.c's renderer,
  * shared by the fs/net/tls option-ladder validators. */

@@ -33,3 +33,12 @@ contract-immutable.ts:27:3 - error SC7004: 'rows[0]!.push(4)' writes to a value 
   28 | }
 
   hint: Immutable values cannot be written through any reference; copy the value before changing it
+
+contract-immutable.ts:45:37 - error SC7004: the value stored into 'FILLED' (Immutable) may be referenced elsewhere: 'fill(-1)' is not a fresh literal, construction or factory result
+
+  44 | 
+  45 | const FILLED: Immutable<number[]> = fill(-1);
+     |                                     ^~~~~~~~
+  46 | console.log(FILLED.length);
+
+  hint: build the value in place (a literal, `new`, or a function that returns what it builds), so no mutable reference to it remains

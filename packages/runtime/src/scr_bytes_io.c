@@ -6,6 +6,9 @@
  * exact source lists). */
 #include "scr_runtime.h"
 
+static const ScrArrOps scr_bytes_io_str_ops = { scr_str_retain_v, scr_str_release_v, NULL };
+static const ScrArrOps scr_bytes_io_bytes_ops = { scr_bytes_retain_v, scr_bytes_release_v, NULL };
+
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
@@ -337,7 +340,7 @@ static void scr_fs_symlink_checked_core(const ScrDyn *target, const ScrDyn *dest
     ScrStr *source = !scr_exc_pending() ? scr_dyn_string_coerce_js(target) : NULL;
     ScrStr *absolute = NULL;
     if (link && source && !scr_exc_pending()) {
-      ScrArr *parts = scr_arr_new_ref(scr_str_retain_v, scr_str_release_v, NULL, 3);
+      ScrArr *parts = scr_arr_new_ops(&scr_bytes_io_str_ops, 3);
       scr_arr_push_ref(parts, scr_str_retain(link));
       scr_arr_push_ref(parts, scr_str_new("..", 2));
       scr_arr_push_ref(parts, scr_str_retain(source));
@@ -658,7 +661,7 @@ static ScrArr *scr_fs_cb_vectors(const ScrDyn *buffers) {
     scr_dyn_release(snapshot);
     return NULL;
   }
-  ScrArr *out = scr_arr_new_ref(scr_bytes_retain_v, scr_bytes_release_v, NULL, array->v.arr.len);
+  ScrArr *out = scr_arr_new_ops(&scr_bytes_io_bytes_ops, array->v.arr.len);
   for (size_t i = 0; i < array->v.arr.len; i++) {
     const ScrDyn *buffer = array->v.arr.items[i];
     if (!scr_dyn_bytes_is(buffer, SCR_BYTES_U8)) {

@@ -1,4 +1,4 @@
-contract-program-lifetime-publish.ts:7:23 - error SC7007: 'Tree' is declared ProgramLifetime, but its instances can be published to other threads
+contract-program-lifetime-publish.ts:7:23 - error SC7008: 'Tree' is declared ProgramLifetime, but its instances can be published to other threads
 
   6 | 
   7 | class Tree implements ProgramLifetime {
