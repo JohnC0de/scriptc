@@ -4,9 +4,29 @@ All notable changes to scriptc will be documented in this file.
 
 ## Unreleased
 
+<!-- release:start -->
+
+## 0.3.0
+
+### Breaking changes
+
 - **Compilation is native-only.** The `--dynamic` option and embedded JavaScript execution runtime have been removed. Eligible dependencies compile natively by default; unsupported packages receive build diagnostics. QuickJS remains only in the native compiler's isolated `comptime` helper and as standalone regex/Unicode libraries.
 
-<!-- release:start -->
+### Features
+
+- **`process.constrainedMemory()` and `process.availableMemory()` read the process's own cgroup limits,** as Node.js does through libuv.
+
+### Performance
+
+- **Map and string lookups do less work.** Absent string keys are rejected before the map is probed, and multi-byte substring searches no longer call `memchr` for every first-byte hit.
+- **Class property bags are read without being created.**
+- **Runtime packs for Linux musl, Windows and WASI are much smaller.** Their dev runtime objects no longer carry undefined-behavior checks, matching the glibc and macOS packs.
+
+### Fixes
+
+- **Native program objects use runtime ABI v14.** The embedded JavaScript runtime's symbols were removed, so external object consumers must link the matching v0.3.0 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
+
+<!-- release:end -->
 
 ## 0.2.10
 
@@ -25,8 +45,6 @@ All notable changes to scriptc will be documented in this file.
 
 - **Published object graphs stay immutable in more cases.** A constructor that stores `this` into its own field keeps its publication guards, and calls that may replace a field keep their own reference to arguments read from it.
 - **Native program objects use runtime ABI v13.** Array headers changed, so external object consumers must link the matching v0.2.10 runtime pack; the versioned marker rejects incompatible runtime objects at link time.
-
-<!-- release:end -->
 
 ## 0.2.9
 
