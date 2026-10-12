@@ -50,15 +50,21 @@ console.log(text.skip(), text.sum(3), text.sum(9));
     const mod = deserializeModule(await readFile(outPath, "utf8"));
     const ll = emitLlvmModule(mod);
     const body = (name: string): string =>
-      ll.match(new RegExp(`define internal [^\\n]+ @sc_bf_${name}\\([^\\n]*\\) #0 \\{([\\s\\S]*?)\\n\\}`))![1]!;
+      ll.match(
+        new RegExp(`define internal [^\\n]+ @sc_bf_${name}\\([^\\n]*\\) #0 \\{([\\s\\S]*?)\\n\\}`),
+      )![1]!;
     const skip = body("_x25_Text_skip");
     // The counter's increment is 32-bit arithmetic that cannot overflow and
     // converts from i32, so LLVM folds the double round trip of the local.
     expect(skip).toMatch(/ = add nsw i32 /);
     expect(skip).not.toMatch(/ = sitofp i64 /);
     // The read joins its integer and a validity bit; the number converts after the join.
-    expect(skip).toMatch(/ = phi i32 \[ %\w+, %bytes\.read\.ok\d+ \], \[ 0, %bytes\.read\.invalid\d+ \]/);
-    expect(skip).toMatch(/ = phi i1 \[ true, %bytes\.read\.ok\d+ \], \[ false, %bytes\.read\.invalid\d+ \]/);
+    expect(skip).toMatch(
+      / = phi i32 \[ %\w+, %bytes\.read\.ok\d+ \], \[ 0, %bytes\.read\.invalid\d+ \]/,
+    );
+    expect(skip).toMatch(
+      / = phi i1 \[ true, %bytes\.read\.ok\d+ \], \[ false, %bytes\.read\.invalid\d+ \]/,
+    );
     expect(skip).not.toMatch(/ = phi double \[ %\w+, %bytes\.read\.ok/);
     // A floating element has no integer view and keeps the joined number.
     const sum = body("_x25_Text_sum");
