@@ -110,11 +110,11 @@ test("local map results keep scalar and owned reference payloads without heap wr
           // Number keys read the entry's slot inline; booleans are stored 0/1.
           expect(ir).toContain("call ptr @sc_map_entry_f64(");
           expect(ir).not.toContain("@scr_map_get_");
-        } else if (value === BOOL) expect(ir).toMatch(/zext i8 %\w+ to i64/);
-        else if (value === STRING) {
-          // String keys read reference values through the entry and retain inline.
-          expect(ir).toContain("call ptr @scr_map_entry_str(");
-          expect(ir).not.toContain("@scr_map_get_str_ref");
+        } else {
+          // String keys read every value kind through the entry (behind the
+          // inline absent-key filter); reference values retain inline.
+          expect(ir).toContain("call ptr @sc_map_entry_str(");
+          expect(ir).not.toContain("@scr_map_get_");
         }
         if (value === STRING) expect(ir).toContain("@scr_str_release");
       }
@@ -242,4 +242,26 @@ test("reference-preserving keys borrow receivers across unrelated later assignme
   const ir = body(mod);
   expect(ir.indexOf("@scr_map_retain_v")).toBeGreaterThan(0);
   expect(ir.indexOf("@scr_map_retain_v")).toBeGreaterThan(ir.indexOf("@sc_f_key"));
+});
+
+test("string-key lookups test the absent-key filter inline on 64-bit targets only", () => {
+  const mod = keepUnionsBoxed(fixture(F64, STRING));
+  expect(validateModule(mod)).toEqual([]);
+  const helper = (bits: 32 | 64) =>
+    /^define internal ptr @sc_map_entry_str\([^]*?^}/m.exec(
+      emitLlvmModule(mod, { pointerBits: bits }),
+    )![0];
+  const wide = helper(64);
+  // The cached hash is the capacity word's high half; the filter bits are its
+  // bits 44..55 (scr_map.c scr_map_filter_bits). %ScrMapIx field 11 is the filter.
+  expect(wide).toContain("getelementptr inbounds %ScrMapIx, ptr %m, i32 0, i32 11");
+  expect(wide).toContain("icmp uge i64 %cap, 4294967296");
+  expect(wide).toContain("lshr i64 %cap, 44");
+  expect(wide).toContain("lshr i64 %cap, 50");
+  expect(wide).toContain("ret ptr null");
+  expect(wide).toContain("call ptr @scr_map_entry_str(ptr %m, ptr %k)");
+  // 32-bit strings cache no hash: every lookup takes the runtime.
+  const narrow = helper(32);
+  expect(narrow).not.toContain("%ScrMapIx");
+  expect(narrow).toContain("call ptr @scr_map_entry_str(ptr %m, ptr %k)");
 });

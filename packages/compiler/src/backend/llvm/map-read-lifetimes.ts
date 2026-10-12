@@ -12,6 +12,7 @@ import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import {
   emitNumberMapGetRef,
   emitNumberMapGetScalar,
+  emitStringMapGetScalar,
   emitStringMapGetRef,
 } from "./map-number-lookup.js";
 import { mapKeyAccess, mapKeyParamType } from "./shapes.js";
@@ -200,6 +201,7 @@ export function emitStackMapRead(host: LlvmEmitterContext, read: LocalMapRead): 
   let found = B.tmp();
   let owner: StackMapRead["owner"] = null;
   const number = inlineNumberKey(key);
+  const string = entryStringKey(key);
   if (number !== null) {
     if (isRefCounted(read.value)) {
       const raw = emitNumberMapGetRef(host, receiver.name, number, read.value);
@@ -213,6 +215,10 @@ export function emitStackMapRead(host: LlvmEmitterContext, read: LocalMapRead): 
       found = scalar.found;
       B.line(`store i64 ${scalar.bits}, ptr ${payload}`);
     }
+  } else if (string !== null && !isRefCounted(read.value)) {
+    const scalar = emitStringMapGetScalar(host, receiver.name, string);
+    found = scalar.found;
+    B.line(`store i64 ${scalar.bits}, ptr ${payload}`);
   } else if (isRefCounted(read.value)) {
     const stringKey = entryStringKey(key);
     let raw: string;
