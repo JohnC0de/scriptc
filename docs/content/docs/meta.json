@@ -10,6 +10,7 @@
     "ffi",
     "native-objects",
     "threads",
+    "contracts",
     "wasm",
     "platforms",
     "---Reference---",

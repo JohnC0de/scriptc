@@ -8,6 +8,7 @@ import {
 } from "../diagnostics/diagnostic.js";
 import type { IrModule, SrcLoc } from "../ir/ir.js";
 import { validateModule } from "../ir/validate.js";
+import { checkContracts } from "../contracts/check.js";
 import {
   fenceSpeculativeWasiFunctions,
   moduleWasiUnavailableSurface,
@@ -89,6 +90,12 @@ export function prepareExecutableModule(
       }
     }
     sourceTexts = fe.sourceTexts();
+    if (lowered.contracts) {
+      const checked = checkContracts(lowered.module, lowered.contracts, sourceTexts);
+      timing("contracts");
+      if (checked.diagnostics.length > 0) return fail(checked.diagnostics);
+      if (checked.contracts) lowered.module.contracts = checked.contracts;
+    }
   } finally {
     fe.dispose();
     timing("frontend-dispose");

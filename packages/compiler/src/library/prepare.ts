@@ -55,6 +55,7 @@ import {
 } from "../ir/ir.js";
 import { moduleLibAsyncSurface, moduleLibNondeterministicSurface } from "./ir-policy.js";
 import { validateModule } from "../ir/validate.js";
+import { checkContracts } from "../contracts/check.js";
 
 /** The marshalling-class fit over IR types (design §4.2 + the ratified
  * integer plumbing classes): number is every f64-backed class, bool/string
@@ -609,6 +610,12 @@ export function prepareLibrary(
   const fenced = evaluateLibraryFences(mod, profile);
   if (fenced.length > 0) return fail(fenced);
   mod.lib = resolved.lib;
+  if (lowered.contracts) {
+    const checked = checkContracts(mod, lowered.contracts, sourceTexts);
+    timing("contracts");
+    if (checked.diagnostics.length > 0) return fail(checked.diagnostics);
+    if (checked.contracts) mod.contracts = checked.contracts;
+  }
   if (buildPlatform === "wasi") {
     fenceSpeculativeWasiFunctions(mod);
     const unavailable = moduleWasiUnavailableSurface(mod);

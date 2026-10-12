@@ -1,0 +1,25 @@
+# @scriptc/types
+
+Contract types for scriptc: type aliases with no meaning in TypeScript or Node.js that scriptc checks as extra promises. Import them with `import type`, which TypeScript erases, so Node.js never loads this package.
+
+```ts
+import type { Immutable, Int32, NoThrow } from "@scriptc/types";
+
+const KEYWORDS: Immutable<Map<string, number>> = new Map([["const", 1]]);
+
+class Token {
+  pos: Int32 = 0;
+}
+
+function isLetter(ch: number): NoThrow<boolean> {
+  return (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90);
+}
+```
+
+## Contracts
+
+- `NoThrow<T>` on a function's return type: the function never throws. Callers need no exception checks.
+- `Int32` on a parameter, variable, class instance field or function result: every stored value is a signed 32-bit integer by construction (an integer literal in range, a bitwise result such as `x | 0`, `Math.imul`, another `Int32`, or arithmetic scriptc can bound). The slot is stored as a 32-bit integer.
+- `Immutable<T>` on a parameter, variable, class instance field or function result: a deep read-only view, and no code writes to the value through any reference. A module constant built from literals becomes immortal data.
+
+scriptc proves each contract or rejects the program with a diagnostic (SC7001-SC7006) that explains why it does not hold. A program that compiles behaves exactly as under Node.js. See https://scriptc.dev/docs/contracts.
