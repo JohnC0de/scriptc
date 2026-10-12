@@ -52,8 +52,8 @@ export function computeTraced(mod: IrModule): { shapes: Set<string>; unions: Set
     return cur;
   };
   const unitOfClass = (name: string): string => `object:${rootOf(name)}`;
-  // ProgramLifetime hierarchies (contract types) are immortal from
-  // construction: the collector never walks them, and a garbage cycle cannot
+  // ProgramLifetime hierarchies (contract types) are never freed: the
+  // collector never walks them, and a garbage cycle cannot
   // pass through an object that is never freed. They are leaves: no edges
   // into them, none out of them.
   const lifetimeRoots = new Set(mod.contracts?.programLifetime ?? []);

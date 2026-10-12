@@ -746,10 +746,10 @@ export function retainBody(
   ];
 }
 
-/** The retain or release entry point of a class whose every instance is
- * immortal from creation (rc == SIZE_MAX, no collector header; see
- * classes.ts programLifetimeClass): nothing to count, so every inlined call
- * site folds away. */
+/** The retain or release entry point of a class whose every instance lives
+ * until the process exits (no collector header; see classes.ts
+ * programLifetimeClass and programLifetimeRc): nothing to count, so every
+ * inlined call site folds away. */
 function immortalRcBody(fnName: string, ret: "ptr" | "void", comment: string): string[] {
   return [
     `define internal ${ret} @${fnName}(ptr %o) ${FN_ATTRS} {${comment ? ` ; ${comment} (immortal)` : ""}`,

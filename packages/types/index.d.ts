@@ -46,7 +46,7 @@ export type Immutable<T> = T extends (...args: never[]) => unknown
  * them. This changes memory use only; Node.js behavior is unchanged. Use it
  * for objects a program keeps until it exits anyway (syntax trees, symbol
  * tables, interned types): discarded instances are never reclaimed. scriptc
- * accepts it only on the root class of a hierarchy, outside library builds,
- * and refuses instances that are published to other threads or registered
- * for finalization. */
+ * accepts it only on the root class of a hierarchy, outside library builds.
+ * Instances can be published to other threads (`@scriptc/threads`) like any
+ * other class instance. */
 export interface ProgramLifetime {}

@@ -15,8 +15,8 @@
  *   else references them), and such values never escape to code the IR
  *   cannot see. Module constants built from fresh literals become immortal.
  * - ProgramLifetime (class marker): the class is a hierarchy root in an
- *   executable whose instances cannot be published; its hierarchy is then
- *   immortal from construction (classes.ts programLifetimeClass).
+ *   executable; its hierarchy is then never freed and takes no reference
+ *   counts (classes.ts programLifetimeClass).
  *
  * Verified facts land on the IR as `contracts` (IrContracts). */
 import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
@@ -43,7 +43,6 @@ import {
 import { findInitializerBindings, withInitializerBindings } from "../ir/initializer-bindings.js";
 import { dynamicallyStoredFamilies, functionCallFacts, Int32Slots } from "../ir/int32-slots.js";
 import { computeMayThrow, type MayThrowReason } from "../backend/may-throw.js";
-import { computePublishedTypes } from "../backend/publication.js";
 import { SourceLocations } from "../backend/source-locations.js";
 import {
   contractLocKey,
@@ -257,18 +256,16 @@ class ContractChecker {
    * Checked: the class is the root of its hierarchy (every subclass, and so
    * every value of any static type in the hierarchy, is then program-
    * lifetime, which is what lets the backend elide reference counting on
-   * those static types); the build is an executable (library hosts own the
-   * lifetimes of the objects they receive); and no instance can be
-   * published to other threads (publication marks a graph immortal by its
-   * reference count and walks it by that mark, which program-lifetime
-   * objects already carry, so their fields would stay thread-local). Static
-   * code has no WeakRef or FinalizationRegistry; weak collections stay
-   * correct because an entry keyed by an object that is never freed is
-   * never observable as removed. */
+   * those static types); and the build is an executable (library hosts own
+   * the lifetimes of the objects they receive). Publication to other
+   * threads needs no check: an instance carries a reference count of its
+   * own until publication marks it like any other object it reaches
+   * (classes.ts programLifetimeRc). Static code has no WeakRef or
+   * FinalizationRegistry; weak collections stay correct because an entry
+   * keyed by an object that is never freed is never observable as removed. */
   private checkProgramLifetime(): void {
     if (this.notes.classes.size === 0) return;
     const roots: string[] = [];
-    const notes = new Map<string, ContractNote>();
     for (const [key, note] of this.notes.classes)
       for (const cls of this.classesAt(key)) {
         if (cls.base !== undefined) {
@@ -294,21 +291,8 @@ class ContractChecker {
           continue;
         }
         roots.push(cls.name);
-        notes.set(cls.name, note);
       }
     if (roots.length === 0) return;
-    const published = computePublishedTypes(this.mod);
-    if (published !== null)
-      for (const root of roots) {
-        if (!published.classGuarded(root)) continue;
-        const note = notes.get(root)!;
-        this.report(
-          "SC7007",
-          note.loc,
-          `'${note.name}' is declared ProgramLifetime, but its instances can be published to other threads`,
-          "publication is not supported for ProgramLifetime classes yet; remove ProgramLifetime or keep the instances out of the published graph",
-        );
-      }
     this.record("programLifetime", roots);
   }
 

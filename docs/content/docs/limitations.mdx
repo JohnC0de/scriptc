@@ -130,7 +130,7 @@ A program that passes its project's TypeScript check may still use unsupported o
 
 ### Contract types
 
-[Contract types](/docs/contracts) are checked only where they are written as the annotation of a parameter, variable, class instance field or function result; aliases, interface members and nested type positions are reported. A surrounding `try`/`catch` does not discharge `NoThrow`. `Int32` refuses parameters of functions used as values and fields of classes whose instances reach dynamic code, and `Immutable` refuses values that reach dynamic code or that another reference can still change. `ProgramLifetime` applies to root classes of executables only and cannot yet be combined with `@scriptc/threads` publication; instances the program drops are never reclaimed.
+[Contract types](/docs/contracts) are checked only where they are written as the annotation of a parameter, variable, class instance field or function result; aliases, interface members and nested type positions are reported. A surrounding `try`/`catch` does not discharge `NoThrow`. `Int32` refuses parameters of functions used as values and fields of classes whose instances reach dynamic code, and `Immutable` refuses values that reach dynamic code or that another reference can still change. `ProgramLifetime` applies to root classes of executables only; instances the program drops are never reclaimed.
 
 ### three.js
 

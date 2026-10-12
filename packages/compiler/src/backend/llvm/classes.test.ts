@@ -86,7 +86,7 @@ test("releases split into an inlinable fast path and an out-of-line remainder", 
   expect(slow).toContain("getelementptr inbounds %ScrVt, ptr %vt, i64 0, i32 2");
 });
 
-test("ProgramLifetime hierarchies are immortal from construction and take no reference counts", () => {
+test("ProgramLifetime hierarchies are never freed and take no reference counts", () => {
   const kids = { kind: "array" as const, elem: { kind: "object" as const, className: "Node" } };
   const owners = { kind: "array" as const, elem: { kind: "object" as const, className: "Owner" } };
   const mod: IrModule = {
@@ -118,9 +118,11 @@ test("ProgramLifetime hierarchies are immortal from construction and take no ref
     // Retain and release are empty, so every inlined call site folds away.
     expect(body(mangleClassRetain(cls)), cls).toMatch(/entry:\n {2}ret ptr %o\n}/);
     expect(body(mangleClassRelease(cls)), cls).toMatch(/entry:\n {2}ret void\n}/);
-    // new: no collector header (no descriptor, no scr_cyc_alloc), rc = SIZE_MAX.
+    // new: no collector header (no descriptor, no scr_cyc_alloc) and the
+    // program-lifetime count 2^63, not SIZE_MAX (which means published).
     const nw = body(mangleClassNew(cls));
-    expect(nw, cls).toContain("store i64 -1, ptr %o");
+    expect(nw, cls).toContain("store i64 -9223372036854775808, ptr %o");
+    expect(nw, cls).not.toContain("store i64 -1, ptr %o");
     expect(nw, cls).not.toContain("scr_cyc_alloc");
     expect(llvm, cls).not.toContain(`@${mangleClassTrace(cls)}.cyctype`);
     // The RC audit (sanitize builds) learns that the program keeps
@@ -133,6 +135,90 @@ test("ProgramLifetime hierarchies are immortal from construction and take no ref
   expect(body(mangleClassNew("Owner"))).toContain("store i64 1, ptr %o");
   expect(body(mangleClassNew("Owner"))).toContain("scr_cyc_alloc");
   expect(body(mangleClassRelease("Owner"))).toContain("load i16, ptr %bufp");
+});
+
+test("published ProgramLifetime instances use the published mark every other object uses", () => {
+  const node = { kind: "object" as const, className: "Node" };
+  const leaf = { kind: "object" as const, className: "Leaf" };
+  const root = { localId: "root", name: "root", type: node };
+  const mod: IrModule = {
+    irVersion: 15,
+    sourceFile: loc.file,
+    entry: "main",
+    functions: [
+      {
+        name: "main",
+        params: [root],
+        returnType: VOID,
+        locals: [{ id: "root", name: "root", type: node, mutable: false }],
+        body: [
+          {
+            kind: "exprStmt",
+            expr: {
+              kind: "intrinsic",
+              name: "threads.publish",
+              args: [{ kind: "varRef", localId: "root", type: node, loc }],
+              type: node,
+              loc,
+            },
+            loc,
+          },
+          {
+            kind: "fieldSet",
+            obj: { kind: "varRef", localId: "root", type: node, loc },
+            className: "Node",
+            field: "weight",
+            value: { kind: "numLit", value: 1, type: F64, loc },
+            loc,
+          },
+        ],
+        loc,
+      },
+    ],
+    classes: [
+      {
+        name: "Node",
+        fields: [
+          { name: "parent", type: node },
+          { name: "weight", type: F64 },
+        ],
+        methods: [],
+        loc,
+      },
+      {
+        name: "Leaf",
+        base: "Node",
+        fields: [
+          { name: "parent", type: node },
+          { name: "weight", type: F64 },
+          { name: "next", type: leaf },
+        ],
+        methods: [],
+        loc,
+      },
+    ],
+    contracts: { programLifetime: ["Node"] },
+  };
+  const llvm = emitLlvmModule(mod, { pointerBits: 64 });
+  // The walker marks each instance like a mortal object (SIZE_MAX, logged so
+  // a refusal restores the program-lifetime count); untraced, so it never
+  // leaves a collector buffer.
+  expect(llvm).toContain("call void @scr_publish(ptr");
+  expect(llvm).toMatch(/@scr_pub_mark\(ptr %ctx, ptr %o, i1 false, i32 4\)/);
+  // The frozen-object guard of the store tests the count against SIZE_MAX:
+  // an unpublished instance (2^63) stays writable.
+  const store =
+    llvm.split(/^define /m).find((fn) => fn.includes("call void @scr_throw_published_field(")) ??
+    "";
+  expect(store).toMatch(/icmp eq i64 %\S+, -1/);
+  expect(store).toContain("call void @scr_publish(ptr");
+  // 32-bit targets use 2^31.
+  const llvm32 = emitLlvmModule(mod, { pointerBits: 32 });
+  const nw32 =
+    new RegExp(`^define internal [a-z]+ @${mangleClassNew("Leaf")}\\([^]*?^}`, "m").exec(
+      llvm32,
+    )?.[0] ?? "";
+  expect(nw32).toContain("store i32 -2147483648, ptr %o");
 });
 
 function graph() {

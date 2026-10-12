@@ -1007,9 +1007,10 @@ export interface IrContracts {
    * need no reference counting. */
   immortalGlobals?: string[];
   /** Root classes declared `implements ProgramLifetime`: instances of every
-   * class in their hierarchies are immortal from construction (rc ==
-   * SIZE_MAX, no collector header), their static reference counting is
-   * elided, and the cycle analysis treats them as leaves. */
+   * class in their hierarchies are never freed (no collector header, a
+   * reference count that publication alone turns into SIZE_MAX), their
+   * static reference counting is elided, and the cycle analysis treats them
+   * as leaves. */
   programLifetime?: string[];
 }
 

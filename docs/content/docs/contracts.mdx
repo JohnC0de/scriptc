@@ -153,7 +153,7 @@ A value stored into an `Immutable` slot must be fresh: a literal, a `new` expres
 
 ## ProgramLifetime
 
-`ProgramLifetime` marks a class whose instances a program keeps until it exits, such as the nodes of a syntax tree, the symbols of a symbol table or interned types. scriptc then never reference counts, collects or frees instances of the class and of its subclasses: they are created immortal, every retain and release on them compiles to nothing, and the cycle collector neither walks them nor needs to trace the objects that point to them. Node.js behavior is unchanged; only memory use differs, because an instance the program drops is never reclaimed.
+`ProgramLifetime` marks a class whose instances a program keeps until it exits, such as the nodes of a syntax tree, the symbols of a symbol table or interned types. scriptc then never reference counts, collects or frees instances of the class and of its subclasses: they are never freed, every retain and release on them compiles to nothing, and the cycle collector neither walks them nor needs to trace the objects that point to them. Node.js behavior is unchanged; only memory use differs, because an instance the program drops is never reclaimed.
 
 ```ts:tree.ts
 import type { ProgramLifetime } from "@scriptc/types";
@@ -174,8 +174,9 @@ class Identifier extends SyntaxNode {
 scriptc checks that the promise cannot change what the program computes (SC7007):
 
 - the class is the root of its hierarchy, so every value of any class type in the hierarchy is program-lifetime; built-in bases such as `Error`, `EventEmitter` and streams are refused because they hold runtime state that is released with the object;
-- the build is an executable: a library's host decides when the objects it receives are released;
-- no instance can be published to other threads with `@scriptc/threads`.
+- the build is an executable: a library's host decides when the objects it receives are released.
+
+Instances can be published to other threads with `@scriptc/threads` like other class instances: `publish()` makes them immutable and shares them by reference, writes to a published instance throw the same `TypeError` as under Node.js, and instances that were not published stay writable and are cloned by `postMessage` and `workerData`.
 
 Static code has no `WeakRef` or `FinalizationRegistry`, and a `WeakMap` or `WeakSet` entry whose key is never freed is never observable as removed, so nothing else can tell the difference.
 
@@ -275,7 +276,7 @@ $ scriptc build reject.ts
     </tr>
     <tr>
       <td>SC7007</td>
-      <td>A <code>ProgramLifetime</code> class is not the root of its hierarchy, is part of a library build, or can be published to other threads.</td>
+      <td>A <code>ProgramLifetime</code> class is not the root of its hierarchy, or is part of a library build.</td>
     </tr>
   </tbody>
 </table>
