@@ -24,13 +24,11 @@ export async function compilePackedLibrary(
 ): Promise<void> {
   const optimization = options.optimization ?? "release";
   const features: NativeLinkFeatures = {
-    dynamic: false,
     regex: options.regex ?? false,
     copying: options.copying ?? false,
     textDecoderLegacy: options.textDecoderLegacy ?? false,
     fileHandle: false,
     fetch: false,
-    netIsland: false,
     zlib: options.zlib ?? false,
     assert: options.assert ?? false,
     inspect: options.inspect ?? false,

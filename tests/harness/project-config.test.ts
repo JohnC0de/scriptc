@@ -318,7 +318,6 @@ test("node-types: global and node:util codec instances share the stored native r
     outPath: join(outDir, "text-codecs"),
     outDir,
     sanitize,
-    dynamic: false,
   });
   expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
   if (!result.ok) return;
@@ -337,7 +336,6 @@ test("node-types: imported console methods share native output formatting", asyn
     outPath: join(outDir, "console-imports"),
     outDir,
     sanitize,
-    dynamic: false,
   });
   expect(result.ok, !result.ok ? JSON.stringify(result.diagnostics, null, 2) : "").toBe(true);
   if (!result.ok) return;

@@ -37,7 +37,6 @@ export async function executableNativeEnvironmentFingerprint(
     .update("\0");
   for (const name of [
     "PATH",
-    "SCRIPTC_FETCH_CURL",
     "SCRIPTC_TEST_RUNTIME_SRC_DIR",
     "SCRIPTC_TEST_VENDOR_CACHE_DIR",
     "SCRIPTC_TEST_TRUST_COMPILER_WRAPPER",

@@ -40,7 +40,6 @@ checkChild({ value: 1, extra: 2 });
 `,
     );
     const result = await compile(entry, {
-      dynamic: false,
       outDir: dir,
       outPath: join(dir, "program"),
       sanitize: process.env["SCRIPTC_SAN"] === "1",

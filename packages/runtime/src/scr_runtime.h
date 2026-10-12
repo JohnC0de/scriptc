@@ -53,6 +53,18 @@ void arc4random_buf(void *buf, size_t n);
 #define SCR_TL
 #endif
 
+/* Entry points that only run when a JS exception is being raised. noinline
+ * keeps the throw machinery out of every caller: the LLVM helper never
+ * imports noinline runtime bodies into program code, so a compiled function
+ * whose only slow path throws stays small enough to inline and needs no
+ * callee-saved registers on its fast path. cold tells the C compiler that
+ * runtime paths reaching them are unlikely. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SCR_COLD __attribute__((cold, noinline))
+#else
+#define SCR_COLD
+#endif
+
 /* ── process ──────────────────────────────────────────────────────────── */
 
 /* Called once at the top of main: private stdout formatter buffer,
@@ -62,7 +74,7 @@ void scr_init(void);
 /* Program objects emitted by the bundled LLVM helper reference this symbol.
  * Its versioned spelling makes a mismatched manual runtime link fail before
  * the program can start. */
-void scr_runtime_abi_v13(void);
+void scr_runtime_abi_v14(void);
 void scr_runtime_workers_v8(void);
 
 /* ── the trap funnel (scr_console.c; scr_library.c under -DSCR_LIB) ──────
@@ -336,7 +348,7 @@ bool scr_context_is_main(void);
  * report. Zero (the default) disables the check on that stack. */
 extern SCR_TL uintptr_t scr_stack_guard;
 void scr_stack_guard_init(void);
-void scr_stack_overflow(void);
+SCR_COLD void scr_stack_overflow(void);
 #if defined(SCR_WORKERS) && !defined(SCR_LIB) && defined(__APPLE__) && \
     (defined(__aarch64__) || defined(__x86_64__))
 /* Darwin worker executables: reading a thread-local variable calls its TLV
@@ -797,9 +809,9 @@ void scr_publish_refuse(const char *message);
  * TypeErrors. scr_throw_published_array answers false (and throws nothing)
  * when Node's operation would not write the array. */
 struct ScrArr;
-void scr_throw_published_field(const char *prop, const char *owner);
+SCR_COLD void scr_throw_published_field(const char *prop, const char *owner);
 bool scr_throw_published_array(int op, const struct ScrArr *a, double index, double n);
-void scr_throw_published_collection(bool set);
+SCR_COLD void scr_throw_published_collection(bool set);
 
 /* ── class hierarchies (single inheritance) ───────────────────────────
  * Classes in an `extends` hierarchy share a two-word object prefix: the
@@ -1059,26 +1071,6 @@ void scr_dyn_bag_set(struct ScrDyn *bag, ScrStr *key, struct ScrDyn *value, stru
  * monomorphic-struct divergence). scr_object.c. */
 void scr_record_key_miss(ScrStr *k);
 
-/* ── error objects (scr_error.c) ──────────────────────────────────────
- * `Error` and its standard subclasses are a
- * RUNTIME-PROVIDED hierarchy: ScrError lays out exactly like a compiler-
- * emitted hierarchy class (rc, vt, then the fields), so `class MyError
- * extends Error` compiles as an ordinary derived class whose struct embeds
- * this prefix, and every vtable mechanism (base-typed release, preorder-
- * interval instanceof) applies unchanged.
- *
- * The builtin classes' vtables live HERE as mutable globals because
- * the runtime itself creates error instances (JSON/dynCheck/regex failures,
- * the island bridge) — but their preorder intervals depend on the whole
- * program's class forest, which only the compiler knows. Every emitted
- * main() stamps pre/post into these vtables before user code runs (the
- * defaults below only cover the moments before that), so runtime-made and
- * compiler-made error objects always agree on instanceof.
- *
- * Cycle capability is hierarchy-uniform and program-dependent (a user
- * subclass may hold closures): when the compiler's fixpoint marks the Error
- * hierarchy cycle-capable, main() also calls scr_error_set_traced() and
- * the runtime allocates its own error objects with collector headers. */
 typedef struct ScrError {
   size_t rc;
   const ScrVt *vt;
@@ -1170,8 +1162,8 @@ ScrError *scr_domex_clone(ScrError *e, const struct ScrDyn *options);
 /* Throw a fresh DOMException through the exception cell (atob/btoa's
  * InvalidCharacterError sites). Copies both C strings; the _str form
  * takes ownership of the message. */
-void scr_throw_domex(const char *name, const char *message);
-void scr_throw_domex_str(const char *name, ScrStr *message);
+SCR_COLD void scr_throw_domex(const char *name, const char *message);
+SCR_COLD void scr_throw_domex_str(const char *name, ScrStr *message);
 
 /* Switch runtime-side error allocation to collector-headered (called from
  * main() when the compiler's cycle fixpoint marks the hierarchy). */
@@ -1179,7 +1171,7 @@ void scr_error_set_traced(void);
 
 /* Allocate + initialize (name = the kind's builtin name, message retained
  * from the borrowed argument; NULL means ""). Returns +1. */
-ScrError *scr_error_new(int kind, ScrStr *message);
+SCR_COLD ScrError *scr_error_new(int kind, ScrStr *message);
 /* Initialize the error prefix of an already-allocated (zeroed) object —
  * the super(message) call of a compiled `extends Error` constructor. Both
  * arguments are borrowed. */
@@ -1217,24 +1209,24 @@ bool scr_error_is(const void *obj);
 
 /* Throw a fresh builtin error through the exception cell. scr_throw_error
  * takes ownership of message; the _msg form copies the C string. The _named
- * form (island bridge) takes ownership of both strings and picks the
+ * form takes ownership of both strings and picks the
  * builtin vtable whose class name matches `name` (Error otherwise). */
-void scr_throw_error(int kind, ScrStr *message);
-void scr_throw_error_msg(int kind, const char *message, size_t len);
-void scr_throw_error_named(ScrStr *name, ScrStr *message);
+SCR_COLD void scr_throw_error(int kind, ScrStr *message);
+SCR_COLD void scr_throw_error_msg(int kind, const char *message, size_t len);
+SCR_COLD void scr_throw_error_named(ScrStr *name, ScrStr *message);
 /* A read of a declare-d const nothing defines: throws Node's catchable
  * ReferenceError "<name> is not defined". Borrows name; always throws. */
-void scr_undef_global_read(ScrStr *name);
+SCR_COLD void scr_undef_global_read(ScrStr *name);
 /* The `code` slot (NodeJS.ErrnoException's .code): set stamps a fresh
  * string from the C literal (replacing any previous value); get answers
  * +1 or NULL when absent (the compiler's undefined arm). The _msg_code
  * thrower is scr_throw_error_msg with the code stamped on the payload. */
 void scr_error_set_code(ScrError *e, const char *code);
 ScrStr *scr_error_code(ScrError *e);
-void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
+SCR_COLD void scr_throw_error_msg_code(int kind, const char *message, size_t len, const char *code);
 /* The compiler-resolved Node-parity throw (error.nodeThrow): builtin
  * error of `kind`, `code` stamped when non-empty. Borrows both. */
-void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
+SCR_COLD void scr_throw_node_coded(double kind, const ScrStr *code, const ScrStr *msg);
 
 /* ── string methods ─────────────────────────────────────────────────
  * ECMA-262 observable semantics over UTF-8 storage with UTF-16 code-unit
@@ -1853,24 +1845,6 @@ ScrStr *scr_arr_join(ScrArr *a, ScrStr *sep);
  * missing ones skip. Borrows both; +1 result; never throws. */
 ScrStr *scr_str_raw(ScrArr *raw, ScrArr *subs);
 
-/* ── regular expressions (scr_regex.c — linked ONLY when the program
- * contains a regex literal; see native-toolchain.ts) ────────────────────────────────
- * The engine is quickjs-ng's libregexp (the same bytecode interpreter the
- * dynamic island uses), compiled standalone. Each regex literal evaluation
- * creates a fresh refcounted instance sharing an immortal template per
- * (pattern, flags) pair. Template bytecode compiles lazily on first use
- * and is freed at exit; constructed regexes own their bytecode.
- * Subjects are matched as UTF-16 (converted per call from the UTF-8
- * storage), so all observable index behavior is UTF-16-exact like Node.
- *
- * Global and sticky regexes carry numeric lastIndex. Exec/test update it
- * after matching; String methods apply their specified state rules.
- *
- * Ownership: subjects/replacements are BORROWED; string/array results
- * return +1. replace_all without /g THROWS a catchable TypeError
- * (callers are compiler-emitted pending
- * checks); every other failure mode aborts.
- */
 typedef struct ScrRegex {
   size_t rc;      /* SIZE_MAX = immortal literal template */
   ScrStr *source; /* pattern text between the slashes */
@@ -3067,23 +3041,23 @@ static inline bool scr_exc_pending_inline(void) { return scr_exc_active->kind !=
 _Static_assert(offsetof(ScrExcCell, kind) == 0 && sizeof(ScrExcKind) == 4 && SCR_EXC_NONE == 0,
                "the LLVM emitter's inline pending check loads an i32 kind at offset 0");
 
-void scr_throw_f64(double v);
-void scr_throw_bool(bool v);
-void scr_throw_str(ScrStr *v); /* takes ownership */
+SCR_COLD void scr_throw_f64(double v);
+SCR_COLD void scr_throw_bool(bool v);
+SCR_COLD void scr_throw_str(ScrStr *v); /* takes ownership */
 /* Takes ownership of v; retain/release must be non-NULL (the compiler
  * passes the payload type's `_v` adapters, like scr_union_new_ref); trace
  * is non-NULL iff the payload type carries a cycle header. */
-void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
-                   ScrTraceFn trace);
+SCR_COLD void scr_throw_ref(void *v, void *(*retain)(void *), void (*release)(void *),
+                            ScrTraceFn trace);
 /* Store a reference whose JS typeof was checked at the throw site. */
-void scr_throw_ref_classified(void *v, void *(*retain)(void *), void (*release)(void *),
-                              ScrTraceFn trace, bool object);
-void scr_throw_primitive_ref(void *v, void *(*retain)(void *), void (*release)(void *),
-                             ScrTraceFn trace);
+SCR_COLD void scr_throw_ref_classified(void *v, void *(*retain)(void *), void (*release)(void *),
+                                       ScrTraceFn trace, bool object);
+SCR_COLD void scr_throw_primitive_ref(void *v, void *(*retain)(void *), void (*release)(void *),
+                                      ScrTraceFn trace);
 /* Same ownership contract as scr_throw_ref; the payload must be a
  * hierarchy-class instance (vtable word present) — see SCR_EXC_OBJ. */
-void scr_throw_obj(void *v, void *(*retain)(void *), void (*release)(void *),
-                    ScrTraceFn trace);
+SCR_COLD void scr_throw_obj(void *v, void *(*retain)(void *), void (*release)(void *),
+                            ScrTraceFn trace);
 
 /* Catch: discard the in-flight exception (releases a refcounted payload). */
 void scr_exc_clear(void);
@@ -3191,8 +3165,7 @@ bool scr_module_loaded(double module_id);
 double scr_module_cache_get(ScrStr *filename);
 bool scr_module_cache_has(ScrStr *filename);
 ScrArr *scr_module_cache_keys(void);
-/* Raw argv accessors — the island's process shim builds the same
- * ["scriptc", argv[0], ...] shape from the same stash. */
+
 int scr_lib_arg_count(void);
 const char *scr_lib_arg(int i);
 /* Private self-reexec marker parsed and removed from process.argv by
@@ -3206,9 +3179,7 @@ bool scr_lib_fork_info(double *target, uintptr_t *read_handle,
 bool scr_lib_should_collapse_reexec_arg(ScrStr *cmd, ScrArr *args);
 ScrStr *scr_process_platform(void); /* +1 interned ("darwin", "linux", ...) */
 ScrStr *scr_process_cwd(void);      /* +1 fresh (getcwd) */
-/* Submit one raw chunk to fd 1/2 and flush it before returning. Used by all
- * JavaScript-visible console/process/readline/island output paths so the
- * internal stdio formatting buffer never delays live output. */
+
 bool scr_stdio_write(int fd, const void *data, size_t len);
 int scr_stdio_write_raw(int fd, const void *data, size_t len);
 extern SCR_TL bool (*scr_stdio_write_hook)(int fd, const void *data, size_t len);
@@ -3912,10 +3883,7 @@ void scr_crypto_hkdf_async(ScrStr *digest, ScrBytes *ikm, ScrBytes *salt,
                            ScrBytes *info, double keylen, ScrClosure *cb, ScrCryptoBytesFn fn);
 void scr_crypto_scrypt_async(ScrBytes *password, ScrBytes *salt, double keylen,
                              ScrDyn *options, ScrClosure *cb, ScrCryptoBytesFn fn);
-/* One-shot raw digest/HMAC by algorithm name ("md5", "sha1", and SHA-2)
- * — the island crypto shim's bridge (scr_island.c host hooks). Digest
- * bytes into out (≥64); returns the digest length, 0 for an unknown
- * algorithm. */
+
 size_t scr_crypto_digest_raw(const char *alg, const unsigned char *data, size_t len,
                              unsigned char out[64]);
 size_t scr_crypto_hmac_raw(const char *alg, const unsigned char *key, size_t keylen,
@@ -4334,34 +4302,13 @@ typedef enum {
    * (the dyn→closure stance): a cycle THROUGH a dyn-boxed promise is
    * merely never collected. */
   SCR_DYN_PROMISE,
-  /* An ISLAND (engine-held) value — the jsval→dyn crossing. Never
-   * produced by the parser — it enters the checked-dynamic tree through the gated
-   * constructor scr_dyn_from_jsval (scr_island.c): an 'any'-typed value
-   * flowing into an 'unknown'/'object'/JS-residue slot. Boxes by
-   * REFERENCE (a retained ScrJsval cell). The constructor SCALAR-
-   * NORMALIZES: engine numbers/strings/booleans/null/undefined convert
-   * to the native dyn kinds at wrap time, so JSVAL nodes only ever hold
-   * engine objects, arrays, and functions (plus the symbol/bigint edge —
-   * kinds the checked-dynamic tree cannot represent at all). Identity is the CELL's
-   * engine value: strict equality routes to the engine's === (two wraps
-   * of one engine value compare equal), and scr_jsval_from_dyn unwraps
-   * the SAME cell back (+1) — the boundary is identity-preserving for
-   * engine-born values. typeof/truthiness/String() route to the engine
-   * per use (scr_dyn_jsval_ops); every dyn walk without an armed route
-   * (JSON, structuredClone, deepStrictEqual, inspect, keyed access,
-   * calls, iteration) throws the LOUD "not supported yet" ladder — never
-   * a silent wrong answer. The dyn→cell edge is NOT visible to the cycle
-   * collector (the dyn→closure stance): a cycle dyn → cell → engine
-   * object → host closure → dyn is merely never collected (the
-   * documented cross-boundary-cycle divergence). */
-  SCR_DYN_JSVAL,
   /* A compiler-owned typed reference. Program class instances use this for
    * ordinary `unknown` storage; native Web streams also use it when their
    * contract must expose the exact input reference again. The capsule
    * retains the original value so an exact checked cast preserves identity;
    * `materialize` supplies the ordinary own-field/data view to generic dyn
    * consumers. LLVM hardcodes these kind numbers; append new kinds. */
-  SCR_DYN_TYPED_REF,
+  SCR_DYN_TYPED_REF = 12, /* tag 11 is retired; preserve the native ABI */
   /* Native Proxy over a checked plain object; keep new tags at the end. */
   SCR_DYN_PROXY,
   SCR_DYN_BIGINT, /* exact native integer, retained by the box */
@@ -4426,10 +4373,6 @@ typedef struct ScrDynTypedCast {
   bool traced;
   struct ScrDynTypedCast *next;
 } ScrDynTypedCast;
-typedef struct ScrJsval ScrJsval; /* opaque island cell (C11 repeat; the
-                                   * always-linked dyn core never touches
-                                   * its engine value — only the gated ops
-                                   * installed by scr_dyn_from_jsval do) */
 
 /* The compiler-emitted call glue carried by a SCR_DYN_FUNC box: checks the
  * dyn arguments against the boxed closure's declared parameter types (a
@@ -4560,11 +4503,7 @@ struct ScrDyn {
      * emitted converters guarantee it (direct box for promise<dyn>,
      * adapter promise otherwise). */
     ScrPromise *promise;
-    /* SCR_DYN_JSVAL: the retained island cell (engine objects/arrays/
-     * functions only — the constructor scalar-normalizes; see the kind's
-     * comment). Released through the installed ops so this always-linked
-     * core never references the gated island unit. */
-    struct { ScrJsval *cell; } jsval;
+
     struct { ScrDyn *target; ScrDyn *handler; } proxy; /* both owned */
   } v;
   /* Keep the checked value payload at its established offset: generated
@@ -4633,7 +4572,6 @@ void *scr_json_parse_schema(const ScrStr *text, const ScrJsonSchema *schema);
 ScrDyn *scr_json_parse_reviver(ScrStr *text, const ScrDyn *reviver);
 ScrDyn *scr_json_stringify_replacer(const ScrDyn *value, const ScrDyn *replacer, const ScrStr *gap);
 ScrDyn *scr_json_stringify_value(const ScrDyn *value, const ScrDyn *replacer, const ScrDyn *space);
-
 
 /* BORROWED member lookup on a SCR_DYN_OBJ; NULL when the key is absent. */
 ScrDyn *scr_dyn_obj_get(const ScrDyn *d, const char *key, size_t key_len);
@@ -4857,7 +4795,6 @@ void scr_dyn_arr_push_spread(ScrDyn *arr, const ScrDyn *src, const char *what);
  * compile-time source spelling), else the runtime kind wording. Borrows
  * both; NULL with the exception pending on the throw. */
 ScrDyn *scr_dyn_iter_pack(const ScrDyn *src, const ScrStr *msg);
-ScrDyn *scr_dyn_jsval_iter_n(const ScrDyn *src, double count);
 /* Map constructor seeds: retain array inputs for live iteration, accept
  * nullish inputs as empty, and validate each entry before reading 0/1. */
 ScrDyn *scr_dyn_map_seed_entries(const ScrDyn *src);
@@ -5162,99 +5099,11 @@ ScrDyn *scr_dyn_new_promise_adapting(ScrPromise *src,
 ScrPromise *scr_dyn_promise_of(const ScrDyn *d);
 ScrPromise *scr_dyn_promise_all(const ScrDyn *entries);
 
-/* ── island values in the checked-dynamic tree (SCR_DYN_JSVAL) ─────────────────────────
- * Engine routing ops for JSVAL nodes, installed by the gated constructor
- * (scr_dyn_from_jsval, scr_island.c — the scr_dyn_alloc_promise hook
- * story: JSVAL nodes exist only after the constructor ran, so the ops
- * are always installed when a dispatch arm meets the kind, and a
- * dynamic-free link never references engine symbols). Contracts mirror
- * the scr_jsval_* entries they route to. */
-typedef struct ScrDynJsvalOps {
-  void (*release)(ScrJsval *cell);
-  ScrStr *(*type_of)(ScrJsval *cell); /* engine typeof; +1, never throws */
-  bool (*truthy)(ScrJsval *cell);     /* engine ToBoolean; never throws */
-  /* String(v) in the engine (the full ToString protocol — user toString
-   * runs, its throw bridges): +1, or NULL with the exception pending. */
-  ScrStr *(*to_str)(ScrJsval *cell);
-  bool (*strict_eq)(ScrJsval *a, ScrJsval *b); /* engine ===; never throws */
-  bool (*is_array)(ScrJsval *cell);   /* Array.isArray, engine-side */
-  bool (*is_error)(ScrJsval *cell);   /* native Error instance, engine-side */
-  /* ── the routed operation set (lane dyn-routing-ops) ────────────────
-   * Each routes to the engine at the moment of use and converts at the
-   * boundary: dyn ARGUMENTS cross through scr_jsval_from_dyn (wrapped
-   * cells unwrap by reference, dyn data deep-copies, dyn FUNC boxes
-   * cross through the generic host-function shim), engine RESULTS come
-   * back through scr_dyn_from_jsval (scalar-normalizing). Fallible ops
-   * bridge the ENGINE's exception catchably and answer NULL/false/-1. */
-  ScrDyn *(*key_get)(ScrJsval *cell, const ScrStr *k); /* o[k]; +1 or NULL pending */
-  bool (*key_set)(ScrJsval *cell, const ScrStr *k, const ScrDyn *v); /* false = pending */
-  ScrDyn *(*call)(ScrJsval *cell, ScrDyn *const *args, size_t argc); /* f(...); +1 or NULL pending */
-  /* o.m(...) — the ENGINE's own prototypes run (JS-exact flatMap/map/
-   * forEach/...). A missing or non-callable member throws Node's
-   * "<what> is not a function" (the call site's spelling — V8's text,
-   * front-run before the engine's terser claim). */
-  ScrDyn *(*invoke)(ScrJsval *cell, const char *method, ScrDyn *const *args, size_t argc, const char *what);
-  bool (*is_nullish)(ScrJsval *cell); /* engine undefined/null; never throws
-                                       * (always false today — the wrap
-                                       * constructor scalar-normalizes) */
-  /* Object.keys/values/entries (mode 0/1/2) as a NATIVE dyn array (+1):
-   * keys are dyn strings, values wrap per element, entries are native
-   * dyn pairs. NULL with the engine's exception pending on refusal. */
-  ScrDyn *(*obj_walk)(ScrJsval *cell, int mode);
-  int (*has_own)(ScrJsval *cell, const ScrStr *k); /* 0/1; -1 = pending */
-  /* Object.assign(target, src) with the ENGINE target: src converts per
-   * member semantics (a wrapped src spreads by reference; dyn data
-   * enters as the usual deep copy). false = pending. */
-  bool (*assign)(ScrJsval *cell, const ScrDyn *src);
-  /* JSON.stringify text of the engine value (+1) — the engine's own
-   * stringify (toJSON protocols, cycle TypeErrors). NULL + pending when
-   * not JSON-representable. */
-  ScrStr *(*to_json)(ScrJsval *cell);
-  /* Drain the ENGINE's own iterator protocol into a fresh dyn array
-   * (elements wrap back scalar-normalized) — the for-of/destructuring/
-   * spread arm over a wrapped value. The guard's TypeError wording on a
-   * non-iterable: spread true takes V8's spread-call text; otherwise the
-   * compile-time spelling `spell` verbatim when non-NULL (the named-
-   * source form), else the kind wording. An iterating getter/next throw
-   * bridges with the ENGINE's message. +1, or NULL with the exception
-   * pending. */
-  ScrDyn *(*iter_drain)(ScrJsval *cell, bool spread, const ScrStr *spell);
-  ScrDyn *(*iterator)(ScrJsval *cell, const ScrStr *spell, bool array_from);
-  ScrDyn *(*iter_n)(ScrJsval *cell, double count);
-  bool (*type_probe)(ScrJsval *cell, const ScrStr *probe); /* internal brand; no property access */
-} ScrDynJsvalOps;
-
-/* The allocator view the gated constructor uses (installs the ops);
- * ownership of `cell` MOVES in (the caller retains first). */
-ScrDyn *scr_dyn_alloc_jsval(ScrJsval *cell, const ScrDynJsvalOps *ops);
-/* The installed ops (traps on a missing install — impossible unless a
- * JSVAL node was forged without the constructor). */
-const ScrDynJsvalOps *scr_dyn_jsval_ops(void);
-/* dynTest arms that need the ENGINE's answer on a JSVAL node, or the
- * materialized answer for a live typed-reference capsule. Each answers
- * false for every other kind (callers test unconditionally — the emitted
- * narrowing tests stay branch-free). Never throw. */
-bool scr_dyn_isl_typeof_is(const ScrDyn *d, const char *name);
-bool scr_dyn_isl_is_array(const ScrDyn *d);
-bool scr_dyn_isl_is_error(const ScrDyn *d);
-/* The JSVAL honesty ladder: when d is a JSVAL node, THROWS the catchable
- * "<what> on an island value held in 'unknown' is not supported yet"
- * Error and returns false; every other kind returns false untouched.
- * Callers gate un-armed operations with it — never a silent wrong
- * answer (the retired fence-box bug). */
-bool scr_dyn_isl_fence(const ScrDyn *d, const char *what);
-/* The emitted keyed READ's JSVAL arm (sc_dyn_key_get): routes o[k] to the
- * engine through the installed ops and wraps the result back (+1, scalars
- * normalized) — the retired `.length -> fence` row. d MUST be a JSVAL
- * node; NULL with the engine's exception bridged catchably. */
-ScrDyn *scr_dyn_isl_key_get(const ScrDyn *d, const ScrStr *k);
-/* The `??`/optional-chain nullish test over a dyn value: UNDEF/NULL
- * native, JSVAL through the engine's own test (defensively — the wrap
- * constructor scalar-normalizes engine null/undefined away), every other
- * kind false. Never throws. */
+/* Native predicates for typed reference capsules and boxed errors. */
+bool scr_dyn_ref_typeof_is(const ScrDyn *d, const char *name);
+bool scr_dyn_ref_is_array(const ScrDyn *d);
+bool scr_dyn_ref_is_error(const ScrDyn *d);
 bool scr_dyn_is_nullish(const ScrDyn *d);
-/* scr_dyn_isl_tostr_buf (the display walkers' JSVAL arm) is declared
- * with the ScrJsonBuf surface below. */
 
 /* ── the ambient receiver (JS `this` inside listener/callback bodies) ──
  * Node calls a handle's listeners with `this` bound to the emitting
@@ -5303,22 +5152,22 @@ void scr_dyn_check_listener(const ScrDyn *cb, const char *argname);
 const char *scr_dyn_specific_type(const ScrDyn *v, char *buf, size_t cap);
 /* ERR_INVALID_ARG_TYPE with the runtime-rendered Received tail (the
  * error.argTypeThrow libCall). Borrows all three; always throws. */
-void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
-void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
+SCR_COLD void scr_throw_arg_type(const ScrStr *argname, const ScrStr *expected, const ScrDyn *got);
+SCR_COLD void scr_dyn_arg_type_fail(const char *argname, const char *expected, const ScrDyn *got);
 /* The property flavor ("The \"options.x\" property must be ...") — the
  * option-bag validators' gate (error.propTypeThrow). Always throws. */
-void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
-void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
+SCR_COLD void scr_throw_prop_type(const ScrStr *name, const ScrStr *expected, const ScrDyn *got);
+SCR_COLD void scr_dyn_prop_type_fail(const char *name, const char *expected, const ScrDyn *got);
 /* Node's ERR_INVALID_ARG_VALUE ("The argument 'encoding' is invalid
  * encoding. Received 'no'") — reason NULL renders "is invalid".
  * TypeError; always throws catchably. */
-void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
+SCR_COLD void scr_dyn_arg_value_fail(const char *name, const char *reason, const ScrDyn *got);
 /* The ERR_INVALID_ARG_VALUE/%j "Received" renderer (inspect-lite:
  * strings quote, scalars print plain, deep shapes sketch). */
 const char *scr_dyn_inspect_lite(const ScrDyn *v, char *buf, size_t cap);
 /* A ladder's post-validation refuse: throws the compiler-rendered SC2020
  * statement-fence text verbatim (Node's validation errors run first). */
-void scr_throw_lowering_fence(const ScrStr *msg);
+SCR_COLD void scr_throw_lowering_fence(const ScrStr *msg);
 /* ERR_OUT_OF_RANGE's "Received" number rendering (Node's
  * addNumericalSeparator underscores past 2^32) — scr_bytes.c's renderer,
  * shared by the fs/net/tls option-ladder validators. */
@@ -5403,12 +5252,7 @@ void scr_jb_put_number(ScrJsonBuf *b, double v);
  * as \u00XX, everything else (UTF-8 included) verbatim — exactly the JS
  * JSON.stringify escape set for well-formed strings. */
 void scr_jb_put_json_str(ScrJsonBuf *b, const ScrStr *s);
-/* String(v) of a JSVAL node appended into b (the emitted sc_ds display
- * walkers' arm; scr_dyn_display/to_string route here too): the engine's
- * ToString. A bridged failure (throwing user toString, a symbol) leaves
- * the exception PENDING and appends nothing — the loud path, never a
- * fabricated rendering. */
-void scr_dyn_isl_tostr_buf(ScrJsonBuf *b, const ScrDyn *d);
+
 /* JSON-serialize a dyn value into the buffer — the sc_jw_* walker for the
  * dyn leaves the compiler cannot type: object members holding undefined
  * DROP, array slots holding undefined print null (exactly Node). */
@@ -5434,8 +5278,13 @@ long scr_dyn_live_count(void);
  */
 void scr_obj_alloc_note(void);
 void scr_obj_free_note(void);
+/* Emitted by the RC-audit lane's ProgramLifetime constructors, after the
+ * allocation note: such instances are never freed (the exit audit skips its
+ * leak report, and LeakSanitizer scans them as roots). */
+void scr_obj_lifetime_note(const void *obj);
 #ifdef SCR_RC_AUDIT
 long scr_obj_live_count(void);
+long scr_obj_lifetime_count(void);
 #else
 /* Only the RC audit lane counts live objects. Other runtimes keep the
  * out-of-line no-op symbols for direct-emission objects that still call
@@ -5624,10 +5473,6 @@ void scr_promise_fulfill_str(ScrPromise *p, ScrStr *v); /* moves in */
 void scr_promise_fulfill_ref(ScrPromise *p, void *v, void *(*retain)(void *), void (*release)(void *), ScrTraceFn trace);
 void scr_promise_fulfill_void(ScrPromise *p);
 
-/* Reject `p` with the exception pending in the active cell (moved out —
- * the cell resets); wakes waiters, enters the unhandled ledger. No-op
- * with a clean cell; an already-settled `p` just clears the cell. The
- * island promise bridge's rejection half (scr_island.c). */
 void scr_promise_reject_pending(ScrPromise *p);
 
 /* Mint an ALREADY-SETTLED promise from a just-run synchronous operation:
@@ -5688,10 +5533,7 @@ double scr_set_interval(ScrClosure *cb, double ms); /* cb ownership moves in */
  * fulfills with the undefined dyn value (+1). */
 ScrPromise *scr_immediate_promise(void);
 void scr_clear_interval(double handle);
-/* The island timer bridge (scr_web.c): a one-shot entry WITH a clear
- * handle (island clearTimeout cancels; ids share the interval space so
- * scr_clear_interval serves both), and the teardown sweep that releases
- * every armed closure before the engine dies. */
+
 double scr_set_timeout_handle(ScrClosure *cb, double ms); /* cb ownership moves in */
 void scr_timers_teardown(void);
 /* Timeout.unref()/ref()/hasRef(): loop-liveness bookkeeping over the timer
@@ -5837,35 +5679,11 @@ double scr_now_ms(void); /* the loop's monotonic clock, in ms */
  * already selected and reported exit status 1. */
 bool scr_loop_run(ScrPromise *top_level);
 void scr_loop_commonjs_entry(void);
-/* External I/O hook, polled at loop quiescence like the child registry:
- * `pending` keeps the loop alive; `poll` makes progress and may SLEEP up
- * to max_wait_ms (on real fds — socket readiness wakes it early), so the
- * loop skips its own nanosleep for that turn. One registrant: the dynamic
- * island (engine promise jobs + in-flight fetch transfers). Static builds
- * never set it. */
-void scr_loop_set_io(bool (*pending)(void), void (*poll)(double max_wait_ms));
 bool scr_report_unhandled_rejections(void); /* true = exit 1 */
 void scr_discard_unhandled_rejections(void);
-/* The island's unhandled-rejection ledger joins the report above (one
- * registrant, set at engine boot; static builds never set it): called with
- * print=true when the static ledger reported nothing, prints its FIRST
- * never-observed rejection in the same voice, frees the ledger either way,
- * and returns whether it had any. */
-void scr_loop_set_island_rejections(bool (*fn)(bool print),
-                                    int (*drain_jobs)(void));
-/* The island's earliest armed timer deadline (scr_island_timers_deadline;
- * HUGE_VAL when none) joins the loop's sleep computation: an armed
- * AbortSignal.timeout must fire on time while the loop sleeps on socket
- * readiness, without keeping the loop alive by itself (Node's unref'd
- * timer). One registrant, set at engine boot; static builds never set it. */
-void scr_loop_set_island_deadline(double (*fn)(void));
 long scr_abandoned_fiber_count(void);
-/* True while executing on an async fiber (vs the main stack) — the island
- * sizes its engine stack budget per stack (see scr_island.c). */
-bool scr_on_fiber(void);
-/* Identity of the running fiber (NULL on the main stack) — the island's
- * stack-anchor bookkeeping tells STACKS apart, not just fiber-vs-main
- * (a host callback may spawn a fiber that re-enters the engine). */
+
+
 void *scr_fiber_self(void);
 void scr_note_abandoned_fibers(long n); /* scr_console.c owns the flag */
 
@@ -6003,13 +5821,6 @@ ScrGen *scr_gen_of_fiber(ScrFiber *f);
 long scr_promise_live_count(void);
 #endif
 
-/* ── fetch (scr_fetch.c) ──────────────────────────────────────────────
- * The native bridge over scr_net + scr_tls + scr_http's client parser.
- * Static fetch(url) resolves at the response head with native Response
- * and ReadableStream handles; Response.json consumes that same stream.
- * AbortSignal and streaming request bodies stay native too. Under
- * --dynamic the same TU boots the broader engine web surface. The
- * emitted main calls scr_fetch_install in either form. */
 void scr_fetch_install(void);
 ScrPromise *scr_fetch_input(ScrDyn *input, ScrDyn *init);
 ScrDyn *scr_fetch_function(void);
@@ -6037,424 +5848,6 @@ ScrDyn *scr_fetch_stream_from_bytes(
 ScrDyn *scr_fetch_stream_from_string(
     ScrStr *iterable); /* borrowed string; +1 handle */
 ScrPromise *scr_fetch_reader_read(ScrDyn *reader); /* borrowed handle; +1 */
-
-/* ── dynamic island (scr_island.c; --dynamic builds ONLY) ────────────
- * The embedded QuickJS-ng engine. Compiled and linked only under
- * -DSCR_DYNAMIC; static builds never reference these symbols (nor the
- * engine headers — this block deliberately names no engine type). One
- * runtime+context per process, created lazily on first entry, torn down
- * at exit before the RC audit; every entry re-anchors the engine's
- * stack-overflow check so calls from ucontext fibers are safe. Not
- * reentrant from engine callbacks.
- */
-#ifdef SCR_DYNAMIC
-/* Evaluate UTF-8 source in the island's global scope; returns
- * String(result) as a +1 ScrStr. Borrows code. An island exception is
- * bridged into the exception cell as a catchable string ("TypeError:
- * boom" — String(e)) and NULL comes back — callers are compiler-emitted
- * pending checks (may-throw, like the fs.* surface). */
-ScrStr *scr_island_eval(ScrStr *code);
-
-/* The libregexp opaque for scr_regex.c (--dynamic builds share the engine
- * archive's libregexp, whose host hooks want the island's JSContext):
- * lazily boots the engine and re-anchors its stack check, then hands the
- * context out as an opaque pointer. */
-void *scr_island_lre_opaque(void);
-
-/* ── embedded npm modules ─────────────────────────────────────────────
- * npm package code is embedded into the binary at BUILD time: the emitted
- * C carries every reached module's source as a static string plus the
- * (importer, specifier) → target resolution edges, and registers both
- * tables at the top of main. The island's module loader and its CommonJS
- * require shim resolve exclusively from these tables — binaries never
- * read node_modules at runtime. Edge targets are module keys or "node:*"
- * builtins, which the island shims (events, path, process, fs stubs,
- * child_process stubs). */
-typedef struct ScrIslandModule {
-  const char *key; /* resolved path — the loader's cache key */
-  /* UTF-8 source — or raw-DEFLATE bytes when src_raw > 0 (the emitter
-   * compresses big module texts; the loader inflates LAZILY at first
-   * load through the inflater the emitted main installs, so a module a
-   * run never loads never inflates — and its pages never fault in). */
-  const char *src;
-  size_t len;      /* byte length of src AS STORED */
-  size_t src_raw;  /* 0: src is plain text; else the inflated byte length */
-  int format; /* 0 = ESM, 1 = CommonJS, 2 = JSON */
-  /* CommonJS only: the ESM facade the loader evaluates when an ES module
-   * imports this file — default (module.exports itself) plus the named
-   * exports LEXED from the source at BUILD time with the compiler's port
-   * of Node's vendored CJS lexer. NULL for ESM sources (compiled
-   * natively) and JSON (default-only wrapper, like Node). The same
-   * compression contract as src, via esm_raw. */
-  const char *esm;
-  size_t esm_len;
-  size_t esm_raw;
-} ScrIslandModule;
-
-typedef struct ScrIslandEdge {
-  const char *from;
-  const char *spec;
-  const char *to;
-  /* Which call forms this resolution serves — Node picks the "exports"
-   * condition set from the CALL FORM, so a dual package embeds TWO edges
-   * for one (from, spec): its "import" condition's target behind kind 1
-   * and its "require" condition's behind kind 2. 0 answers both lookups
-   * (relative files, builtins). */
-  int kind; /* 0 = any, 1 = import, 2 = require */
-} ScrIslandEdge;
-
-/* Registers the emitted tables (static data; no copy, no engine boot).
- * Must run before any island entry that imports — main calls it right
- * after scr_lib_init. */
-void scr_island_modules(const ScrIslandModule *mods, size_t nmods,
-                         const ScrIslandEdge *edges, size_t nedges);
-/* The logical source entry, independent of the installed binary path. */
-void scr_island_entry_module(const char *filename);
-
-/* The inflater for compressed embedded module text (raw DEFLATE, exact
- * inflated size known from the table row). The emitted main installs
- * scr_zlib.c's scr_zlib_inflate_exact exactly when some module compressed
- * at build time — index.ts links scr_zlib.c/libz on the same predicate,
- * so compression-free builds keep their link line and the island keeps no
- * zlib reference of its own. */
-void scr_island_set_inflate(bool (*inflate)(const unsigned char *src, size_t src_len,
-                                            unsigned char *dst, size_t dst_len));
-/* scr_zlib.c: one-shot raw-DEFLATE inflate into a caller-sized buffer;
- * true only when the stream ends exactly at dst_len. */
-bool scr_zlib_inflate_exact(const unsigned char *src, size_t src_len,
-                            unsigned char *dst, size_t dst_len);
-
-/* The island process shim's implicit exit status (process.exitCode):
- * Node's set-it-and-return-normally contract. The emitted main returns
- * this after the loop drains; 0 when never set. The version advances on
- * every assignment so an exit listener can override a provisional status. */
-int scr_island_exit_code(void);
-size_t scr_island_exit_code_version(void);
-
-/* ── web-platform globals (scr_web.c) ─────────────────────────────────
- * The pure-JS prelude defining the island's WHATWG subset (streams et
- * al.), evaluated at engine boot before any embedded module. `jsctx` is
- * the island's JSContext as an opaque pointer — engine types stay out of
- * this header. */
-void scr_island_web_boot(void *jsctx);
-
-/* Runs the engine's pending promise-reaction jobs to exhaustion (no-op
- * before the engine boots). Returns the number executed. The loop's io
- * hook drains through this so island async chains progress at quiescence,
- * exactly where Node runs its microtasks. */
-int scr_island_drain_jobs(void);
-
-/* Re-anchors the engine's stack-overflow check to the CURRENT stack (the
- * every-island-entry rule) — for units entering the engine from loop
- * dispatch stations (the fetch bridge's net callbacks) rather than
- * through an emitted island op. */
-void scr_island_host_enter(void);
-
-/* Bridges the engine's CURRENT pending exception into the scriptc
- * pending cell (the island timer bridge fires engine callbacks from the
- * static heap; a throw there must become the loop's uncaught report). */
-void scr_island_bridge_exception(void);
-
-/* ── island timers (scr_web.c) ────────────────────────────────────────
- * The machinery behind AbortSignal.timeout: one-shot engine callbacks
- * armed by the web prelude's host.timer. Deliberately UNREF'd, like
- * Node's AbortSignal.timeout timer — an armed timer never keeps the loop
- * alive; it fires only if other work (a live transfer, engine jobs) keeps
- * the process running, and the island's io hook caps its sleeps at the
- * earliest deadline so a fetch timeout fires on time. Deadlines are on
- * the scr_now_ms clock; _deadline returns HUGE_VAL when none are armed.
- * Teardown frees unfired callbacks so the engine audit stays zero. */
-double scr_island_timers_deadline(void);
-bool scr_island_timers_due(void);
-bool scr_island_timers_fire_due(void); /* true = fired at least one */
-void scr_island_timers_teardown(void);
-
-/* ── dynamic fetch hooks ──────────────────────────────────────────────
- * The native bridge registers NO pending/poll hooks (its
- * transfers live on real sockets the loop's poller sleeps on); the curl
- * reference implementation (scr_fetch_curl.c, SCRIPTC_FETCH_CURL=1 —
- * one release as the flip's reference) still registers all four so the
- * loop can sleep on curl's fds. */
-void scr_island_set_fetch(void (*boot)(void *jsctx), bool (*pending)(void),
-                           void (*poll)(double max_wait_ms), void (*teardown)(void));
-
-/* ── the island's node:http/https client bridge (scr_net_island.c) ────
- * The one TU referencing BOTH the socket units and the island (the
- * scr_zlib_island.c precedent): native-toolchain.ts compiles it exactly when a
- * --dynamic build links the socket units, and the emitted main calls
- * scr_net_island_install before any island entry. `attach` runs while
- * the island builds its bootstrap host object (jsctx and host_obj are
- * the engine's context and host-object pointers, opaque here — engine
- * types stay out of this header) and adds the bridge's host functions; `teardown`
- * frees engine values still held by in-flight requests before the
- * engine dies, the fetch-teardown story. Without the bridge the island
- * keeps its "does not provide the 'node:http' builtin" refusal. */
-void scr_island_set_netmod(void (*attach)(void *jsctx, void *host_obj), void (*teardown)(void));
-void scr_net_island_install(void);
-
-/* ── island value handles (the `any` runtime type) ────────────────────
- * A ScrJsval is an ordinary refcounted scriptc heap cell owning ONE
- * engine value. It is opaque here (the engine's value type must not leak
- * into static-build translation units) and deliberately NOT
- * cycle-collector-traced: its internal references live in the engine's
- * own GC world, and cycles that cross the boundary are documented as
- * uncollectable (SEMANTICS.md). Releasing the last reference frees the
- * engine value — or only the cell itself after engine teardown (the
- * engine frees every value it still owns when it goes down, so a
- * post-teardown release must not touch it).
- *
- * Conventions, mirroring the rest of the runtime: operands are BORROWED,
- * refcounted results come back owned (+1). Fallible operations bridge
- * the engine exception into the exception cell (catchable) and report
- * failure via NULL (pointer results) or -1 (int results) — callers are
- * compiler-emitted pending checks. Every entry re-anchors the engine's
- * stack check, so all of these are fiber-safe. */
-typedef struct ScrJsval ScrJsval;
-
-ScrJsval *scr_jsval_retain(ScrJsval *v);
-void scr_jsval_release(ScrJsval *v);
-void *scr_jsval_retain_v(void *v);
-void scr_jsval_release_v(void *v);
-
-/* Binary operator codes for scr_jsval_binop / scr_jsval_cmp. The JS
- * semantics (ToPrimitive, coercion) come from prelude helper closures
- * evaluated at island init, not from C reimplementations. */
-#define SCR_JSOP_ADD 0
-#define SCR_JSOP_SUB 1
-#define SCR_JSOP_MUL 2
-#define SCR_JSOP_DIV 3
-#define SCR_JSOP_MOD 4
-#define SCR_JSOP_POW 5
-#define SCR_JSOP_LT 6
-#define SCR_JSOP_LE 7
-#define SCR_JSOP_GT 8
-#define SCR_JSOP_GE 9
-#define SCR_JSOP_EQ 10  /* strict === */
-#define SCR_JSOP_NEQ 11 /* strict !== */
-#define SCR_JSOP_COUNT 12
-
-/* Marshal in (static → island). Each returns a fresh +1 cell. from_str
- * borrows s; from_json borrows JSON text produced by the emitted
- * type-directed serializers (a DEEP COPY into the island — the documented
- * aliasing divergence) and cannot fail on that trusted input. */
-ScrJsval *scr_jsval_from_f64(double v);
-ScrJsval *scr_jsval_from_bool(bool v);
-ScrJsval *scr_jsval_from_str(const ScrStr *s);
-ScrJsval *scr_jsval_from_json(const ScrStr *json);
-/* A CHECKED-DYNAMIC (dyn) value entering the island — deep copy for data
- * kinds (a boxed handle/promise throws the catchable TypeError). A JSVAL
- * node unwraps to its OWN cell (+1) — an engine value that crossed into
- * the checked-dynamic tree and back is the SAME engine value, by reference (nested JSVAL
- * members embed their engine values directly). A boxed FUNCTION crosses
- * as one generic host-function shim over its uniform ScrDynThunk: the
- * shim wraps engine arguments as dyn values (scalar-normalizing), calls
- * the thunk, and converts the dyn result back — each crossing mints a
- * fresh engine function (identity is not preserved for re-crossings;
- * SEMANTICS.md). NULL with a pending exception on failure. Borrows d. */
-ScrJsval *scr_jsval_from_dyn(const ScrDyn *d);
-
-/* The jsval→dyn crossing (the IR's dynFromJsval): wraps an island value
- * as a SCR_DYN_JSVAL node, SCALAR-NORMALIZING first — engine numbers/
- * strings/booleans/null/undefined convert to the native dyn kinds (the
- * strict exits cannot fail on engine-reported scalars), so JSVAL nodes
- * only ever hold engine objects/arrays/functions (and the symbol/bigint
- * edge). Installs the checked-dynamic tree's engine-routing ops on first use. Borrows
- * the cell (retains it into the node); +1 out; never throws. */
-ScrDyn *scr_dyn_from_jsval(ScrJsval *cell);
-
-/* Engine operations. Arithmetic yields a fresh cell (NULL = bridged);
- * comparisons yield 0/1 (-1 = bridged); truthy/not never fail. */
-ScrJsval *scr_jsval_binop(int op, ScrJsval *a, ScrJsval *b);
-int scr_jsval_cmp(int op, ScrJsval *a, ScrJsval *b);
-/* `v instanceof C` in the engine (JS_IsInstanceOf — the spec operator,
- * Symbol.hasInstance included). 0/1; -1 = bridged (non-object RHS throws
- * the engine's own TypeError, catchably). */
-int scr_jsval_instance_of(ScrJsval *v, ScrJsval *c);
-ScrJsval *scr_jsval_neg(ScrJsval *a);
-/* GetIterator over an island value (the for-of head over 'any'): the
- * engine's protocol lookup; NULL + pending TypeError when not iterable. */
-ScrJsval *scr_jsval_iter_new(ScrJsval *a);
-ScrJsval *scr_jsval_plus(ScrJsval *a); /* unary + (ToNumber) */
-int scr_jsval_truthy(ScrJsval *a);
-ScrStr *scr_jsval_typeof(ScrJsval *a);
-bool scr_jsval_is_object(ScrJsval *a);
-ScrStr *scr_jsval_to_str(ScrJsval *a); /* String(v); NULL = bridged */
-
-/* Property/element access and calls. Names are NUL-terminated ScrStr
- * (identifier property names from source); computed keys are jsvals. */
-ScrJsval *scr_jsval_get_prop(ScrJsval *o, const ScrStr *name);
-ScrJsval *scr_jsval_global_get(const ScrStr *name);
-int scr_jsval_set_prop(ScrJsval *o, const ScrStr *name, ScrJsval *v);
-ScrJsval *scr_jsval_get_idx(ScrJsval *o, ScrJsval *key);
-/* Destructuring guards over island values: RequireObjectCoercible with
- * V8's exact TypeError text (pass-through result, +1), and GetIterator +
- * the pattern's width as a fresh engine array (undefined-padded,
- * IteratorClose per spec); both throw catchably, NULL + pending on throw. */
-ScrJsval *scr_jsval_destr_check(ScrJsval *v, const char *spell, const char *first);
-ScrJsval *scr_jsval_iter_n(ScrJsval *v, double n);
-int scr_jsval_set_idx(ScrJsval *o, ScrJsval *key, ScrJsval *v);
-ScrJsval *scr_jsval_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv);
-ScrJsval *scr_jsval_call_this(ScrJsval *f, ScrJsval *receiver, int argc, ScrJsval **argv);
-/* `o.name?.(...)`: a nullish member answers the engine's undefined;
- * anything else calls with this = o (non-callables throw in the engine). */
-ScrJsval *scr_jsval_opt_call_method(ScrJsval *o, const ScrStr *name, int argc, ScrJsval **argv);
-ScrJsval *scr_jsval_call(ScrJsval *f, int argc, ScrJsval **argv);
-/* Spread application on an island callee — `f(...pre, ...spread)` through
- * the prelude helper's REAL spread syntax (iterator protocols are the
- * engine's own; the guards front-run V8's exact spread-call TypeError
- * texts). `pre` is the engine array of leading fixed arguments; `what` the
- * spread expression's source spelling (the nullish text spells it).
- * Borrows everything; +1 out, or NULL with the exception bridged. */
-ScrJsval *scr_jsval_call_spread(ScrJsval *f, ScrJsval *pre, ScrJsval *spread, const ScrStr *what);
-/* `new X(...)` on an island callee (jsOp construct) — JS_CallConstructor.
- * Borrows everything; +1 out, or NULL with the exception bridged. */
-ScrJsval *scr_jsval_construct(ScrJsval *f, int argc, ScrJsval **argv);
-
-/* A scriptc closure entering the island as an engine function (the
- * package-callback pattern: `.action((a, b) => ...)`). `adapt` is the
- * compiler-emitted per-signature adapter — one uniform shape over the
- * closure ABI: borrowed argument cells in (the closure ABI consumes its
- * params, so the adapter retains them), the +1 result cell (or NULL for
- * void) out. The wrapper retains the closure; the engine finalizer
- * releases it (before the RC audit — teardown precedes it). Calls from
- * the engine pad missing arguments with undefined and drop surplus, like
- * any JS call; a scriptc exception thrown inside reverse-bridges to an
- * engine throw (strings stay strings — the two bridges round-trip). */
-ScrJsval *scr_jsval_from_closure(ScrClosure *c, int arity,
-                                  ScrJsval *(*adapt)(ScrClosure *, ScrJsval **));
-
-/* True iff the cell holds the engine's undefined — the TYPED host-call
- * adapters ask before converting a `T | undefined` parameter (an absent
- * or undefined engine argument takes the undefined arm; anything else
- * converts through the exit machinery). */
-bool scr_jsval_is_undefined(ScrJsval *v);
-
-/* Optional chains on island values: the nullish test on the HANDLE
- * (`x?.y` on 'any' — undefined OR null short-circuits, JS-exact) and the
- * engine's own undefined/null as +1 cells (the unit path's result, and
- * the union lift's unit arms). All infallible. */
-bool scr_jsval_is_nullish(ScrJsval *v);
-ScrJsval *scr_jsval_undefined(void);
-ScrJsval *scr_jsval_null(void);
-
-/* Non-JSON marshals IN: a URL crosses as an engine URL instance built
- * from its href (the first call installs a minimal island URL class when
- * no global exists — construction re-parses through scr_url.c's WHATWG
- * parser; href/protocol/pathname readable, other components throw, see
- * SEMANTICS.md). Borrows; +1 cell out, or NULL with the exception
- * bridged. scr_jsval_from_bytes is its typed-array sibling — declared
- * with the bytes surface below. */
-ScrJsval *scr_jsval_from_url(ScrUrl *u);
-
-/* Payload tags for scr_jsval_from_promise — the fulfillment types an
- * async island callback may resolve with (the compiler fences the rest). */
-enum {
-  SCR_ISLP_VOID = 0,
-  SCR_ISLP_F64 = 1,
-  SCR_ISLP_BOOL = 2,
-  SCR_ISLP_STR = 3,
-  SCR_ISLP_JSVAL = 4,
-  /* Promise<any[]> — the fulfillment is a native array of engine cells
-   * (the jsval-element-array spelling): it re-enters the engine as a
-   * fresh engine array whose ELEMENTS are the same engine values (the
-   * loadPlugins shape: identity crosses, the spine is a copy). */
-  SCR_ISLP_JSVAL_ARR = 5,
-};
-
-/* Wrap a scriptc promise as an ENGINE promise (async callbacks crossing
- * into the island: the package sees a real thenable). Takes ownership of
- * `p` (+1 moves in). A waiter fiber awaits it and settles the engine
- * capability when it settles — fulfillment marshals per `payload`
- * (SCR_ISLP_*), rejection reverse-bridges the reason (Errors cross as
- * real engine Errors). The await OBSERVES a rejection for the static
- * ledger, and the engine's rejection tracker takes over for the wrapper
- * promise — one report, one voice, whichever world drops the ball.
- * Wrappers still pending at teardown free their engine values then (the
- * island audit sees zero live allocations). NULL only if the engine
- * cannot mint a capability (exception bridged). */
-ScrJsval *scr_jsval_from_promise(ScrPromise *p, int payload);
-
-/* The REVERSE bridge: an ENGINE promise (a package call's jsval whose
- * declared type is Promise<T>) settles a fresh STATIC promise, so
- * `await pkgCall()` parks a fiber and `.catch/.finally` desugar over it.
- * Borrows `v`; the +1 result is pending until the engine promise settles
- * (subscription is Promise.resolve(v).then(onF, onR) through a pinned
- * prelude helper — thenables and plain values behave like `await`).
- * Fulfillment stores the retained value cell (SCR_ISLP_JSVAL) or nothing
- * (SCR_ISLP_VOID; the compiler passes no other tags); rejection converts
- * the reason exactly like a bridged exception (engine Errors become
- * ScrErrors picked by name) and rejects — re-thrown at the await,
- * ledger-tracked if never observed. The .then marks the engine promise
- * HANDLED for the island's rejection tracker, so exactly one world
- * reports a dropped rejection. Bridging the same engine promise twice
- * just makes two static observers of one settlement. NULL only on an
- * engine-level surprise minting the subscription (exception bridged). */
-ScrPromise *scr_jsval_bridge_promise(ScrJsval *v, int payload);
-
-/* Island-native literals: build an object from key/value pairs (keys are
- * marshaled strings) or an array from elements. Borrow argv; +1 out.
- * Cannot fail (allocation failure aborts, like every runtime OOM). */
-ScrJsval *scr_jsval_obj_lit(int npairs, ScrJsval **kv);
-/* Getter completion for an island literal: defines `key` on `obj` as an
- * engine getter invoking `fn`; answers the object retained (+1). */
-ScrJsval *scr_jsval_define_getter(ScrJsval *obj, ScrJsval *key, ScrJsval *fn);
-/* The engine TemplateStringsArray for an island tag call: n cooked then n
- * raw strings; the result array carries `.raw` (+1). */
-ScrJsval *scr_jsval_tpl_strings(int n, ScrJsval **kv);
-/* Spread completion for an island literal: engine CopyDataProperties of
- * `src` onto `obj`; answers the target (+1), NULL + pending on a getter
- * throw. */
-ScrJsval *scr_jsval_obj_spread(ScrJsval *obj, ScrJsval *src);
-ScrJsval *scr_jsval_arr_lit(int n, ScrJsval **elems);
-
-/* Marshal out (island → static): validated, STRICT extraction — a
- * non-number refuses to exit as number (no coercion), throwing a
- * catchable path-less TypeError like the dynCheck walkers'. Composite
- * targets exit via scr_jsval_to_json + the existing json.parse +
- * dynCheck pipeline instead (to_json throws if the value is not
- * JSON-representable, e.g. contains a function). */
-int scr_jsval_exit_f64(ScrJsval *v, double *out);
-int scr_jsval_exit_bool(ScrJsval *v, bool *out);
-ScrStr *scr_jsval_exit_str(ScrJsval *v);
-/* Uint8Array exit (engine Buffers pass — they ARE Uint8Arrays): a fresh
- * u8 COPY (+1), the boundary's aliasing stance; NULL = thrown. */
-ScrBytes *scr_jsval_exit_bytes(ScrJsval *v);
-/* `any[]`-declared slot exit (the jsval-element-array spelling):
- * Array.isArray-gated, elements BY REFERENCE into a native array of
- * engine cells (identity crosses, the spine is a snapshot copy). +1;
- * NULL = thrown. */
-ScrArr *scr_jsval_exit_jsval_arr(ScrJsval *v);
-ScrStr *scr_jsval_to_json(ScrJsval *v);
-
-/* The import boundary (libCall island.import): loads an embedded module —
- * the package's runtime entry — through the island's module system and
- * takes one export as an owned (+1) jsval. `name` is an export name,
- * "default", or "*" (the namespace object; for CommonJS entries, an
- * interop object over module.exports). The engine's module registry (and
- * the require shim's cache) make repeated imports lookups, not
- * re-evaluations. `specifier` is the specifier as WRITTEN at the import
- * site: an ESM entry that does not provide a requested named export
- * throws Node's link-time SyntaxError naming it ("The requested module
- * 'x' does not provide an export named 'y'"). Borrows all args. NULL =
- * bridged exception (a package's top-level code can throw). */
-ScrJsval *scr_jsval_import(const ScrStr *key, const ScrStr *name, const ScrStr *specifier);
-
-/* Dynamic import() (libCall island.importDyn): loads a module — an
- * embedded module's key or a builtin shim's "node:x" key — through the
- * island's module system and answers an owned (+1) jsval holding an
- * ENGINE PROMISE of the namespace object. ALWAYS a promise: load and
- * evaluation failures REJECT it (Node's dynamic-import shape). Borrows
- * the key. NULL only on an engine-level surprise minting the rejected
- * promise. */
-ScrJsval *scr_jsval_import_dyn(const ScrStr *key);
-
-/* The deferred boundary failure (libCall island.castFail): throws a
- * catchable TypeError naming the target type — a checked cast of an
- * island value to a type with no validated exit fails at RUNTIME, at the
- * cast, instead of refusing the build. Borrows both args; the exception
- * is pending on return. */
-void scr_jsval_cast_fail(ScrJsval *v, const ScrStr *target);
-#endif /* SCR_DYNAMIC */
 
 /* ── numbers ────────────────────────────────────────────────────────────
  * JS-exact Number-to-string (ECMA-262 §6.1.6.1.20 Number::toString, radix
@@ -6709,13 +6102,6 @@ double scr_bytes_to_u8_clamp(double value);
 ScrStr *scr_strdec_write(const ScrStr *enc, double pending, const ScrBytes *chunk);
 double scr_strdec_next(const ScrStr *enc, double pending, const ScrBytes *chunk);
 ScrStr *scr_strdec_end(const ScrStr *enc, double pending);
-
-#ifdef SCR_DYNAMIC
-/* Static → island typed-array marshal (scr_island.c; --dynamic builds
- * only): an engine typed array of the same element kind — a COPY, the
- * boundary's copy stance. Borrows; +1 cell, or NULL bridged. */
-ScrJsval *scr_jsval_from_bytes(const ScrBytes *b);
-#endif
 
 /* `new Uint8Array(n)` / Buffer.alloc(n): zero-filled. n goes through
  * ToIndex like JS (NaN → 0, truncate toward zero; negative or > 2^53-1
@@ -7041,13 +6427,6 @@ ScrStr *scr_insp_error(ScrError *e, double recurse, double depth);
 ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth);
 /* format's %s / rest-args twin: dyn strings pass verbatim. */
 ScrStr *scr_insp_dyn_s(ScrDyn *d, double depth);
-#ifdef SCR_DYNAMIC
-/* Island `any` (scr_inspect_island.c — linked when a --dynamic build's
- * IR carries insp.* libCalls): the scalar kinds render exactly (typeof
- * dispatch); composites THROW a catchable TypeError (callers are
- * compiler-emitted pending checks). */
-ScrStr *scr_insp_jsval(ScrJsval *v, double recurse, double depth);
-#endif
 void scr_insp_begin(double recurse);
 void scr_insp_entry(ScrStr *s, bool is_num);
 /* Circular references, Node-exact (<ref *N> / [Circular *N]): the
@@ -7141,9 +6520,7 @@ void scr_fs_throw(int e, const char *op, const ScrStr *path);
  * ("incorrect header check", ...). Borrow their input; results +1. */
 ScrBytes *scr_zlib_deflate(const ScrBytes *data);
 ScrBytes *scr_zlib_inflate(const ScrBytes *data);
-/* The format-mode variants (0 zlib / 1 raw / 2 gzip; inflate adds
- * 3 = auto-detect). Static one-shot codecs call these directly, and
- * scr_zlib_island.c bridges them into the embedded engine's node:zlib shim. */
+
 ScrBytes *scr_zlib_deflate_mode(const ScrBytes *data, double mode, double level);
 ScrBytes *scr_zlib_inflate_mode(const ScrBytes *data, double mode);
 double scr_zlib_crc32(const ScrBytes *data, double value);
@@ -7151,7 +6528,6 @@ typedef void (*ScrZlibBytesFn)(ScrClosure *cb, ScrError *err,
                               ScrBytes *value /* moves, NULL on error */);
 void scr_zlib_codec_async(const ScrBytes *data, double mode, bool compressing,
                           ScrClosure *cb /* moves */, ScrZlibBytesFn fn);
-void scr_zlib_island_install(void);
 
 /* ── node:net (scr_net.c — compiled and linked ONLY when the program
  * uses the net surface, like scr_events.c; see native-toolchain.ts) ─────────────────
@@ -7337,11 +6713,7 @@ void scr_net_connect_opts_chk(const ScrDyn *opts, const ScrStr *fence);
  * lookup(hostname, options, answer-closure) synchronously; answer_fn is
  * the emitted per-shape thunk that decodes the answer down to
  * scr_net_lookup_answer. Dials the answered addresses in order. */
-/* Blocking first-answer hostname resolution for the CLIENT bridges (the
- * native fetch, the island's http/https client) — the dns.lookup
- * precedent: getaddrinfo at call time. +1: the resolved IP, or a retain
- * of `host` (already an IP literal / localhost / unresolvable — the dial
- * then delivers Node's exact getaddrinfo ENOTFOUND cause). */
+
 ScrStr *scr_net_blocking_lookup(ScrStr *host /*borrowed*/);
 ScrNetSocket *scr_net_connect_lookup(double port, ScrStr *host /*borrowed*/,
                                       ScrClosure *lookup /*moves*/, void *answer_fn); /* +1 */

@@ -1,47 +1,7 @@
 /* Focused LLVM expression emission extracted from emitter.ts. */
 import { InternalCompilerError } from "../../errors.js";
 import { type IrExpr } from "../../ir/ir.js";
-import type { LlvmEmitterContext, ExprOf, LlValue } from "./expr-context.js";
-
-export function emitJsInteropExpr(
-  host: LlvmEmitterContext,
-  e: ExprOf<"jsMarshal" | "jsOp" | "jsExit" | "jsBridgePromise">,
-): LlValue {
-  const B = host.B;
-  switch (e.kind) {
-    case "jsMarshal":
-      return host.emitJsMarshal(e);
-    case "jsOp":
-      return host.emitJsOp(e);
-    case "jsExit":
-      return host.emitJsExit(e);
-    case "jsBridgePromise": {
-      // Island → static promise bridge: a fresh pending ScrPromise the
-      // engine promise settles. Operand borrowed; the +1 promise joins
-      // the frame. Pending check like other island ops.
-      const v = host.emitExpr(e.value);
-      const payload =
-        e.type.kind === "promise" && e.type.inner.kind === "void"
-          ? 0 // SCR_ISLP_VOID
-          : e.type.kind === "promise" &&
-              e.type.inner.kind === "array" &&
-              e.type.inner.elem.kind === "jsval"
-            ? 5 // SCR_ISLP_JSVAL_ARR: the Array.isArray-gated by-reference exit at settle
-            : 4; // SCR_ISLP_JSVAL
-      host.declare(`declare ptr @scr_jsval_bridge_promise(ptr, i32)`);
-      const t = B.tmp();
-      B.line(`${t} = call ptr @scr_jsval_bridge_promise(ptr ${v.name}, i32 ${payload})`);
-      const out = host.own({ name: t, type: e.type });
-      host.emitPendingCheck();
-      return out;
-    }
-    default: {
-      const _exhaustive: never = e;
-      void _exhaustive;
-      throw new InternalCompilerError("unreachable");
-    }
-  }
-}
+import type { LlvmEmitterContext, LlValue } from "./expr-context.js";
 
 export function emitExpr(host: LlvmEmitterContext, e: IrExpr): LlValue {
   switch (e.kind) {
@@ -117,7 +77,6 @@ export function emitExpr(host: LlvmEmitterContext, e: IrExpr): LlValue {
     case "fieldAbsent":
       return host.emitRecordExpr(e);
     case "dynFrom":
-    case "dynFromJsval":
     case "dynCall":
     case "dynInvoke":
     case "dynArrLit":
@@ -150,11 +109,6 @@ export function emitExpr(host: LlvmEmitterContext, e: IrExpr): LlValue {
     case "newPromise":
     case "promiseWithResolvers":
       return host.emitAsyncExpr(e);
-    case "jsMarshal":
-    case "jsOp":
-    case "jsExit":
-    case "jsBridgePromise":
-      return host.emitJsInteropExpr(e);
     case "libCall":
       return host.emitLibCall(e);
     default: {

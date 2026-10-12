@@ -39,13 +39,12 @@ test.each([
   try {
     const entry = join(dir, "main.cjs");
     writeFileSync(entry, `const { EventEmitter } = require('node:events');\n${source}\n`);
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     const diagnostics = [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])];
     expect(
       diagnostics.some((d) => d.code === "SC2020" && d.message.includes(message!)),
       JSON.stringify(diagnostics),
     ).toBe(true);
-    expect(coverage.stats.statementsIsland).toBe(0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

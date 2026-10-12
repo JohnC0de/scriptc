@@ -918,19 +918,7 @@ ScrStr *scr_insp_dyn(ScrDyn *d, double recurse, double depth) {
       scr_throw_error(SCR_ERR_ERROR, ib_take(&out));
       return scr_str_new("", 0);
     }
-    case SCR_DYN_JSVAL: {
-      /* An island value inside the checked-dynamic tree: Node prints the engine object's
-       * property dump — fence loudly, naming the engine typeof (the
-       * scr_insp_jsval wording for bare 'any' composites). */
-      ScrStr *t = scr_dyn_typeof(d); /* routes to the engine; +1 */
-      InspBuf out = {0};
-      ib_cstr(&out, "util.inspect of a composite 'any' value (typeof '");
-      ib_bytes(&out, t->data, t->len);
-      ib_cstr(&out, "') is not supported yet");
-      scr_str_release(t);
-      scr_throw_error(SCR_ERR_ERROR, ib_take(&out));
-      return scr_str_new("", 0);
-    }
+
     case SCR_DYN_TYPED_REF: {
       ScrDyn *materialized = scr_dyn_typed_ref_materialize(d);
       ScrStr *out = scr_insp_dyn(materialized, recurse, depth);

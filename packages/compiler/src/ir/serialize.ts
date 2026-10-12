@@ -8,9 +8,9 @@
  * materializes the complete document as a single string. */
 import type { IrExpr, IrFunction, IrModule, IrStmt } from "./ir.js";
 
-// Version 15 expands the native Error prefix with filesystem metadata.
-// Older modules embed incompatible subclass offsets and must be rejected.
-export const IR_VERSION = 15 as const;
+// Version 16 removes embedded-engine types, operations, and module metadata.
+// Older modules can require runtime support that no longer exists.
+export const IR_VERSION = 16 as const;
 
 /** IR artifacts are plain data. Scan each function once before deciding
  * whether its JSON encoding needs the complete-number-domain replacer. */

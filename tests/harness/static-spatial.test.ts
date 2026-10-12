@@ -72,7 +72,6 @@ test.for(cases)(
         outDir: dir,
         outPath: output,
         backend: "llvm",
-        dynamic: false,
         npmStatic: ["spatial-fixture"],
         sanitize: !wasm && process.env["SCRIPTC_SAN"] === "1",
       });

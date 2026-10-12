@@ -30,7 +30,7 @@ import { everyExprChild, everyStmtChild, everyTypeChild } from "./traverse.js";
  * reach checked-dynamic code get live views whose runtime stores commit
  * back into the fields; a field of such a class stays a double when any
  * dynamic store in the program can name it (literal-keyed stores name one
- * property, every other store any property, islands everything). Classes
+ * property, every other store any property). Classes
  * with runtime-provided ancestors, generic families, fields under
  * `++`/`--`, and parameters of functions that escape as values, are
  * constructed through class values, or are virtual-dispatch targets are
@@ -197,7 +197,7 @@ export class Int32Slots {
   }
 }
 
-const DYN_KINDS = new Set<IrType["kind"]>(["dyn", "jsval", "caught"]);
+const DYN_KINDS = new Set<IrType["kind"]>(["dyn", "caught"]);
 /** Expressions that hand their operands (or produce results) to runtime
  * helpers, reflection, promises or other code the IR does not show. */
 const BOUNDARY_KINDS = new Set<IrExpr["kind"]>([
@@ -205,14 +205,9 @@ const BOUNDARY_KINDS = new Set<IrExpr["kind"]>([
   "intrinsic",
   "jsonStringify",
   "ffiCall",
-  "jsOp",
-  "jsExit",
-  "jsBridgePromise",
-  "jsMarshal",
   "dynCall",
   "dynInvoke",
   "dynFrom",
-  "dynFromJsval",
   "dynCheck",
   "dynObjLit",
   "dynArrLit",
@@ -270,13 +265,6 @@ const DYN_READ_ONLY = new Set<string>([
   "text.decodeStream",
   "worker.new",
 ]);
-const ISLAND_KINDS = new Set<IrExpr["kind"]>([
-  "jsOp",
-  "jsMarshal",
-  "jsExit",
-  "jsBridgePromise",
-  "dynFromJsval",
-]);
 /** IR metadata keys whose strings never name a function. */
 const NON_REFERENCE_KEYS = new Set([
   "loc",
@@ -305,8 +293,8 @@ function walkFunction(
 }
 
 /** The class field names that runtime stores through live dynamic views
- * (typed-ref capsules) can write: every name when `all` (islands, jsval
- * values, or a dynamic store whose key is not a literal), otherwise the
+ * (typed-ref capsules) can write: every name when `all` (a dynamic store
+ * whose key is not a literal), otherwise the
  * literal keys of `dyn.keySet`/`dyn.keyDelete`. A view commits a store back
  * into the instance's native field slots, which the IR does not show. */
 export function dynamicFieldStores(
@@ -354,8 +342,7 @@ export function dynamicFieldStores(
     walkFunction(fn, {
       expr: (e) => {
         if (dynWritesAll) return;
-        if (ISLAND_KINDS.has(e.kind) || e.type.kind === "jsval") dynWritesAll = true;
-        else if (
+        if (
           e.kind === "libCall" &&
           !DYN_READ_ONLY.has(e.fn) &&
           e.args.some((a) => dynish(a.type))

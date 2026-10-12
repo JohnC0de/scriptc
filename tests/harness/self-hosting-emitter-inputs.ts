@@ -322,69 +322,6 @@ export function emitterInputCases(): EmitterInputCase[] {
   dictionary.functions[0]!.body = [effect({ kind: "mapNew", type: mapType, loc })];
   add("typed map construction", dictionary);
 
-  const shortNpm = module();
-  shortNpm.embedded = {
-    modules: [
-      { key: "/node_modules/tiny/index.js", format: "esm", source: "export const n = 1;" },
-      { key: "/node_modules/tiny/config.json", format: "json", source: '{"name":"π"}' },
-      { key: "/node_modules/tiny/empty.js", format: "cjs", source: "", esm: "export default {};" },
-    ],
-    edges: [
-      {
-        from: "/node_modules/tiny/index.js",
-        specifier: "./config.json",
-        to: "/node_modules/tiny/config.json",
-        kind: "import",
-      },
-      { from: "/node_modules/tiny/index.js", specifier: "node:path", to: "node:path", kind: "any" },
-    ],
-  };
-  add("uncompressed npm, JSON and CJS facade tables", shortNpm);
-
-  const compressed = module();
-  compressed.embedded = {
-    modules: [
-      {
-        key: "/node_modules/large/index.js",
-        format: "cjs",
-        source: "exports.value = 'repeat π';\n".repeat(2000),
-        esm: "export const value = 'repeat π';\n".repeat(2000),
-      },
-    ],
-    edges: [
-      {
-        from: "/app/main.js",
-        specifier: "large",
-        to: "/node_modules/large/index.js",
-        kind: "require",
-      },
-      {
-        from: "/app/main.js",
-        specifier: "large",
-        to: "/node_modules/large/index.js",
-        kind: "import",
-      },
-    ],
-  };
-  add("level-nine module and facade compression", compressed);
-
-  const chunked = module();
-  // A deterministic byte distribution prevents this source from being a
-  // single repeated run while forcing several source-literal chunks.
-  let state = 1;
-  let text = "";
-  for (let i = 0; i < 12_000; i++) {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-    text += String.fromCharCode(32 + (state % 95));
-  }
-  chunked.embedded = {
-    modules: [
-      { key: "/node_modules/random/data.json", format: "json", source: JSON.stringify(text) },
-    ],
-    edges: [],
-  };
-  add("large source literal chunk boundaries", chunked);
-
   const library = module();
   library.lib = {
     profileName: "native-test",

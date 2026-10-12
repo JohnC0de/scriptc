@@ -30,7 +30,7 @@ const format = option("format") ?? "summary";
 const limit = integerOption("limit", format === "summary" ? 20 : Number.MAX_SAFE_INTEGER);
 
 for (const [name, value, allowed] of [
-  ["tier", tierFilter, ["static", "dynamic"]],
+  ["tier", tierFilter, ["static"]],
   [
     "action",
     actionFilter,

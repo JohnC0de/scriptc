@@ -37,12 +37,10 @@ import {
   type IrBytesElem,
   type IrExpr,
   type IrFunction,
-  type IrJsOp,
   type IrLocal,
   type IrRecordShape,
   type IrStmt,
   type IrType,
-  JSVAL,
   NULL_T,
   REF_TRUTHY_KINDS,
   REGEX,
@@ -60,7 +58,6 @@ import {
   isDynTypedRefType,
   isSupportedArrayElem,
   isUnitType,
-  jsOpResultKind,
   shapeHasAccessorSlots,
   typeEquals,
   typeKey,
@@ -86,7 +83,7 @@ import {
   builtinModuleFnOf,
   COMPOUND_ASSIGN_OPS,
   type CompoundOp,
-  ISLAND_SURFACE,
+  STDLIB_SURFACE,
   isChildSurfaceMember,
   MAP_METHODS,
   NARROW_FIRST,
@@ -100,7 +97,7 @@ import {
 import {
   UNSUPPORTED,
   blockedBindingUseDiag,
-  requiresDynamicPackageDiag,
+  unsupportedPackageValueDiag,
   unsupportedDiag,
 } from "../../diagnostics/diagnostic.js";
 import { PoisonError, dynFallbackType, jsFuncNameOf, neverTaintedJsType, own } from "./lowerer.js";
@@ -164,11 +161,7 @@ import { lowerYield } from "./lower-generators.js";
 import { errorPropertyRead, errorPropertyWrite, errorToStringCall } from "./error-methods.js";
 import { lowerStreamProperty, lowerStreamStateProperty, streamSidesOf } from "./lower-stream.js";
 import { unionWideningTags } from "../../ir/analysis.js";
-import {
-  isSafeToDiscard,
-  isSafeToMoveConditionEarlier,
-  isSafeToRepeat,
-} from "./expressions/evaluation-safety.js";
+import { isSafeToDiscard, isSafeToRepeat } from "./expressions/evaluation-safety.js";
 import { globalSymbolKey } from "./expressions/global-symbols.js";
 import { lowerShortCircuitAssignment } from "./expressions/nullish-assignment.js";
 import {
@@ -176,7 +169,7 @@ import {
   isOptionalChainTail,
   isRequireMainFilename,
 } from "./expressions/optional-chains.js";
-import { conditionalSpreadOf, foldedStringKeyOf } from "./expressions/object-literals.js";
+import { foldedStringKeyOf } from "./expressions/object-literals.js";
 import { tryLowerExpression } from "./expressions/try-lower-expression.js";
 import {
   fenceNodeModuleMutation,
@@ -582,373 +575,6 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       "'void' with an effectful operand in value position (hoist the operand to its own statement — statement-position 'void e' and void-returning arrow bodies compile)",
     );
   }
-  // Literals in an `any`-typed slot (the CONTEXTUAL type is what the
-  // record/array lowerings would consult) build natively in the island:
-  // each value lowers statically and marshals in. An UNMAPPABLE
-  // contextual type falls back to the literal's own type, exactly like
-  // lowerObjectLiteral's fallback — a package call's options parameter
-  // is often an unmappable intersection while the literal's own type
-  // absorbs to jsval (a bare-jsval field, an npm-typed member).
-  if (
-    (ts.isObjectLiteralExpression(expr) || ts.isArrayLiteralExpression(expr)) &&
-    (() => {
-      const ctxTs = lowerer.checker.getContextualType(expr);
-      const mapped =
-        (ctxTs ? lowerer.mapTypeOf(ctxTs) : null) ?? lowerer.mapTypeOf(lowerer.typeOf(expr));
-      if (mapped?.kind !== "jsval") return false;
-      // The tsgo readonly-[] panic repair (see lowerArrayLiteral): an
-      // EMPTY array literal under a const assertion is the empty tuple —
-      // its `any` answer is a panicked query, not an island slot.
-      if (
-        ts.isArrayLiteralExpression(expr) &&
-        expr.elements.length === 0 &&
-        underConstAssertion(expr)
-      ) {
-        return false;
-      }
-      // A JS variable INITIALIZER whose BINDING registered as a
-      // checked-dynamic module global (the typedef-annotated
-      // doc-builder consts whose JSDoc types degraded — DYN slots):
-      // the island build could never land (no engine→dyn crossing
-      // exists), so the literal takes its own world's path instead —
-      // the dyn literal, or a static record the slot converts.
-      if (
-        isJsSourceFile(expr.getSourceFile()) &&
-        ts.isVariableDeclaration(expr.parent) &&
-        expr.parent.initializer === expr &&
-        ts.isIdentifier(expr.parent.name)
-      ) {
-        const bindSym = lowerer.checker.getSymbolAtLocation(expr.parent.name);
-        const g = bindSym ? lowerer.globalsBySymbol.get(bindSym) : undefined;
-        if (g?.type.kind === "dyn") return false;
-      }
-      // A PROJECT-DECLARED contextual type that only ABSORBED to the
-      // island (a doc-builder typedef whose field's JSDoc type
-      // reference degraded to checker-`any` — the tsgo multi-file
-      // value-as-type residue) is not an npm slot: when the literal's
-      // OWN type maps statically, it builds that way — the binding's
-      // checked-dynamic slot takes the dyn conversion. Genuinely
-      // island slots (npm .d.ts provenance, plain `any`) keep the
-      // native build.
-      if (ctxTs !== undefined && (ctxTs.flags & ts.TypeFlags.Any) === 0) {
-        // Intersection/tuple typedefs (`Line & {readonly soft: true}`)
-        // carry provenance on the ALIAS symbol.
-        const sym = ctxTs.getSymbol() ?? ctxTs.getAliasSymbol();
-        const decls = sym ? lowerer.checker.declarationsOf(sym) : [];
-        const projectDeclared =
-          decls.length > 0 &&
-          decls.every((d) => {
-            const sf = d.getSourceFile();
-            return !sf.isDeclarationFile && !sf.fileName.includes("/node_modules/");
-          });
-        if (projectDeclared) {
-          // A spread already stored in the island must copy there too.
-          // Later overrides can make the literal's own inferred shape
-          // appear static without making that source a native record.
-          if (
-            ts.isObjectLiteralExpression(expr) &&
-            expr.properties.some(
-              (p) =>
-                ts.isSpreadAssignment(p) &&
-                lowerer.mapTypeOf(lowerer.typeOf(p.expression))?.kind === "jsval",
-            )
-          ) {
-            return true;
-          }
-          const own = lowerer.mapTypeOf(lowerer.typeOf(expr));
-          if (own?.kind === "record" || own?.kind === "array") return false;
-        }
-      }
-      return true;
-    })()
-  ) {
-    if (ts.isObjectLiteralExpression(expr)) {
-      // Two engine literals when a CONDITIONAL spread participates
-      // (`{ a, ...(c ? { k: v } : {}) }` — the optional-key idiom): the
-      // whole literal becomes `c ? objLit(with) : objLit(without)`. The
-      // shared properties' nodes ride BOTH arms (exactly one arm
-      // evaluates, so each property still evaluates once); the reorder
-      // of `c` before earlier properties is unobservable because the
-      // condition must be a side-effect-free read. The spread arm's keys
-      // are truly ABSENT when the empty arm is taken — engine-exact
-      // (`"k" in o` is false), which the static record path can't say.
-      const argsWithout: IrExpr[] = [];
-      const argsWith: IrExpr[] = [];
-      const getters: { name: string; fn: IrExpr; loc: SrcLoc }[] = [];
-      let spread: { cond: IrExpr; whenTrue: boolean } | null = null;
-      // A MEMBER a JS file cannot lower or marshal: defer like a
-      // statement fence, shaped by what the member IS. A FUNCTION-shaped
-      // member (a generic function as a value, a signature with
-      // checked-dynamic parameters — the doc-builder public aggregate's
-      // degraded pieces) becomes a host closure that THROWS the captured
-      // diagnostic when invoked — building the aggregate compiles and
-      // only a CALL through the island stops the run. A DATA-shaped
-      // member must NOT become a callable (the retired fence box's
-      // silent wrong answers: typeof said "function", downstream errors
-      // blamed the wrong thing — the withPlugins `plugins:` slot), so it
-      // defines through the engine's getter machinery instead: READING
-      // the member throws the diagnostic — the honest granularity, since
-      // using the value is exactly what cannot be answered. `getterName`
-      // null keeps the closure shape (function-shaped members, and the
-      // conditional-spread arms where getters cannot combine).
-      const islandMemberFence = (
-        diagsBefore: number,
-        err: PoisonError,
-        valueNode: ts.Node,
-        getterName: string | null = null,
-      ): IrExpr | null => {
-        if (!isJsSourceFile(expr.getSourceFile())) throw err;
-        const fence = lowerer.deferToRuntimeFence(diagsBefore, valueNode, {
-          kind: "closure",
-          name: () => `%fn${lowerer.lambdaCounter++}_islfence`,
-          returnType: VOID,
-          type: { kind: "func", params: [], ret: VOID },
-        });
-        if (!fence) throw err;
-        if (getterName !== null) {
-          getters.push({
-            name: getterName,
-            fn: lowerer.jsvalIn(fence, valueNode),
-            loc: locOf(valueNode),
-          });
-          return null;
-        }
-        return lowerer.jsvalIn(fence, valueNode);
-      };
-      // The member's SHAPE decides the fence's granularity: syntactic
-      // functions and checker-callable values keep the call-time
-      // closure; everything else (call results, awaits, data reads —
-      // the withPlugins `plugins:` shape) fences at the READ.
-      const funcShapedMember = (p: ts.ObjectLiteralElementLike): boolean => {
-        if (ts.isMethodDeclaration(p)) return true;
-        const src: ts.Node | null = ts.isPropertyAssignment(p)
-          ? p.initializer
-          : ts.isShorthandPropertyAssignment(p)
-            ? p.name
-            : null;
-        if (!src || !ts.isExpression(src)) return true; // unknown form: keep the closure shape
-        let inner: ts.Expression = src;
-        while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
-        if (ts.isArrowFunction(inner) || ts.isFunctionExpression(inner)) return true;
-        return lowerer.checker.getCallSignatures(lowerer.typeOf(src)).length > 0;
-      };
-      const pushProp = (
-        name: ts.Identifier | ts.StringLiteral,
-        value: IrExpr,
-        valueNode: ts.Node,
-        into: IrExpr[][],
-      ): void => {
-        const diagsBefore = lowerer.diags.length;
-        let marshaled: IrExpr;
-        try {
-          marshaled = lowerer.jsvalIn(value, valueNode);
-        } catch (err) {
-          // A value that LOWERED but cannot cross (a promise, a class
-          // instance): func-typed values keep the call-time closure;
-          // data-shaped values fence at the read (the getter), unless a
-          // conditional spread owns the literal (getters cannot combine).
-          if (!(err instanceof PoisonError)) throw err;
-          const asGetter = value.type.kind !== "func" && spread === null;
-          const fence = islandMemberFence(diagsBefore, err, valueNode, asGetter ? name.text : null);
-          if (fence === null) return; // registered as a fence getter — no data property
-          marshaled = fence;
-        }
-        for (const args of into) {
-          args.push({
-            kind: "jsMarshal",
-            value: { kind: "strLit", value: name.text, type: STRING, loc: locOf(name) },
-            type: JSVAL,
-            loc: locOf(name),
-          });
-          args.push(marshaled);
-        }
-      };
-      const spreadSrcs: IrExpr[] = [];
-      let sawPlainProp = false;
-      for (const prop of expr.properties) {
-        if (ts.isSpreadAssignment(prop)) {
-          const cs = conditionalSpreadOf(prop.expression);
-          if (cs && cs !== "unsupported" && !spread) {
-            if (spreadSrcs.length > 0) {
-              lowerer.unsupported(
-                "SC1090",
-                prop,
-                "a conditional spread mixed with plain spreads in an 'any'-typed object literal",
-              );
-            }
-            const cond = lowerer.lowerCondition(cs.cond);
-            if (!isSafeToMoveConditionEarlier(cond)) {
-              lowerer.unsupported(
-                "SC1090",
-                prop,
-                "conditional spreads with effectful conditions in an 'any'-typed object literal (bind the condition to a const first)",
-              );
-            }
-            spread = { cond, whenTrue: cs.whenTrue };
-            for (const p of cs.props) {
-              const v = ts.isPropertyAssignment(p)
-                ? lowerer.lowerExpr(p.initializer)
-                : lowerer.lowerShorthandValue(p);
-              pushProp(p.name, v, p, [argsWith]);
-            }
-            continue;
-          }
-          // A PLAIN spread (`{ ...options, plugins }` — the withPlugins
-          // argument-rebuild shape): the source copies into the fresh
-          // engine object through the spec's CopyDataProperties (the
-          // objSpread op). Spreads must precede explicit properties
-          // (the composition applies explicit keys AFTER the copies —
-          // JS's later-wins — which a spread after them would invert);
-          // mixing with a conditional spread keeps the fence.
-          if (cs === undefined || cs === null) {
-            if (sawPlainProp || spread) {
-              lowerer.unsupported(
-                "SC1090",
-                prop,
-                "object spread after explicit properties (or mixed with a conditional spread) in an 'any'-typed object literal — spreads must come first",
-              );
-            }
-            spreadSrcs.push(lowerer.jsvalIn(lowerer.lowerExpr(prop.expression), prop.expression));
-            continue;
-          }
-          lowerer.unsupported(
-            "SC1090",
-            prop,
-            "this spread form in an 'any'-typed object literal (one `...(c ? { k: v } : {})` conditional spread is supported — bind other shapes to a const and set keys explicitly)",
-          );
-        }
-        sawPlainProp = true;
-        // `name: value`, the shorthand `{ name }` (the value is the
-        // identifier itself, resolved through the shorthand VALUE symbol
-        // like the static record path), and METHODS — `{ load() {...} }`
-        // is a function expression under a shorthand name, marshaled
-        // like any closure value (this-uses keep the static path's
-        // rejection); everything else keeps the fence. Identifier and
-        // string-literal keys — engine property names have no
-        // identifier restriction ("content-type").
-        const name = prop.name;
-        // A GET accessor (`get root() { return ROOT_INDENT; }` — the
-        // doc-printer's self-referential root-indent shape): the body
-        // lowers as a zero-param closure marshaled into the engine, and
-        // the property defines through the engine's own getter
-        // machinery AFTER the literal builds (the defineGetter op) —
-        // reads through the handle invoke it natively. `this` in the
-        // body keeps the object-method rejection; setters stay fenced.
-        if (
-          ts.isGetAccessorDeclaration(prop) &&
-          prop.body &&
-          name &&
-          (ts.isIdentifier(name) || ts.isStringLiteral(name))
-        ) {
-          lowerer.rejectThisInObjectMethod(prop.body);
-          getters.push({
-            name: name.text,
-            fn: lowerer.jsvalIn(lowerer.lowerLambda(prop), prop),
-            loc: locOf(prop),
-          });
-          continue;
-        }
-        // A member VALUE that cannot lower at all (a generic function
-        // referenced as a value — the aggregate's `align`): the same
-        // call-time fence deferral pushProp applies to marshal failures.
-        let value: IrExpr | null = null;
-        const valueDiagsBefore = lowerer.diags.length;
-        try {
-          value = ts.isPropertyAssignment(prop)
-            ? lowerer.lowerExpr(prop.initializer)
-            : ts.isShorthandPropertyAssignment(prop)
-              ? lowerer.lowerShorthandValue(prop)
-              : ts.isMethodDeclaration(prop) && prop.body
-                ? (lowerer.rejectThisInObjectMethod(prop.body), lowerer.lowerLambda(prop))
-                : null;
-        } catch (err) {
-          if (!(err instanceof PoisonError)) throw err;
-          const nameText =
-            name && (ts.isIdentifier(name) || ts.isStringLiteral(name)) ? name.text : null;
-          const asGetter = nameText !== null && spread === null && !funcShapedMember(prop);
-          value = islandMemberFence(valueDiagsBefore, err, prop, asGetter ? nameText : null);
-          if (value === null) continue; // registered as a fence getter — no data property
-        }
-        if (value && name && (ts.isIdentifier(name) || ts.isStringLiteral(name))) {
-          pushProp(name, value, prop, [argsWithout, argsWith]);
-        } else {
-          lowerer.unsupported(
-            "SC1090",
-            prop,
-            "this property form in an 'any'-typed object literal (only `name: value`, shorthand names, methods, and get accessors are supported)",
-          );
-        }
-      }
-      const withGetters = (obj: IrExpr): IrExpr =>
-        getters.reduce<IrExpr>(
-          (acc, g) => ({
-            kind: "jsOp",
-            op: "defineGetter",
-            args: [
-              acc,
-              {
-                kind: "jsMarshal",
-                value: { kind: "strLit", value: g.name, type: STRING, loc: g.loc },
-                type: JSVAL,
-                loc: g.loc,
-              },
-              g.fn,
-            ],
-            type: JSVAL,
-            loc: g.loc,
-          }),
-          obj,
-        );
-      if (!spread) {
-        if (spreadSrcs.length === 0) {
-          return withGetters({ kind: "jsOp", op: "objLit", args: argsWithout, type: JSVAL, loc });
-        }
-        // Plain spreads compose left to right onto a fresh object, the
-        // explicit properties merging LAST (JS's later-wins): spread
-        // sources evaluate before later property values by nesting
-        // order, exactly the source order.
-        let acc: IrExpr = { kind: "jsOp", op: "objLit", args: [], type: JSVAL, loc };
-        for (const src of spreadSrcs) {
-          acc = { kind: "jsOp", op: "objSpread", args: [acc, src], type: JSVAL, loc };
-        }
-        if (argsWithout.length > 0) {
-          acc = {
-            kind: "jsOp",
-            op: "objSpread",
-            args: [acc, { kind: "jsOp", op: "objLit", args: argsWithout, type: JSVAL, loc }],
-            type: JSVAL,
-            loc,
-          };
-        }
-        return withGetters(acc);
-      }
-      if (getters.length > 0) {
-        lowerer.unsupported(
-          "SC1090",
-          expr,
-          "get accessors combined with conditional spreads in an 'any'-typed object literal",
-        );
-      }
-      const withLit: IrExpr = { kind: "jsOp", op: "objLit", args: argsWith, type: JSVAL, loc };
-      const withoutLit: IrExpr = {
-        kind: "jsOp",
-        op: "objLit",
-        args: argsWithout,
-        type: JSVAL,
-        loc,
-      };
-      return {
-        kind: "ternary",
-        cond: spread.cond,
-        then: spread.whenTrue ? withLit : withoutLit,
-        else_: spread.whenTrue ? withoutLit : withLit,
-        type: JSVAL,
-        loc,
-      };
-    }
-    const args = expr.elements.map((el) => lowerer.jsvalIn(lowerer.lowerExpr(el), el));
-    return { kind: "jsOp", op: "arrLit", args, type: JSVAL, loc };
-  }
   if (ts.isTypeOfExpression(expr)) {
     if (lowerer.isStdlibGlobal(expr.expression, "process"))
       return { kind: "strLit", value: "object", type: STRING, loc };
@@ -1003,7 +629,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     while (ts.isParenthesizedExpression(tested)) tested = tested.expression;
     if (ts.isIdentifier(tested)) {
       const sym = lowerer.checker.getSymbolAtLocation(tested);
-      if (!sym && !lowerer.dynamic) {
+      if (!sym) {
         return { kind: "strLit", value: "undefined", type: STRING, loc };
       }
       if (lowerer.isStdlibSymbol(sym)) {
@@ -1023,9 +649,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       lowerer,
       runtimeOptionalStorageOperand(lowerer, expr.expression) ?? lowerer.lowerExpr(expr.expression),
     );
-    if (operand.type.kind === "jsval") {
-      return { kind: "jsOp", op: "typeof", args: [operand], type: STRING, loc };
-    }
+
     // A checker-narrowed dyn read arrives as a VALIDATED extraction
     // (maybeNarrow's dynCheck bridge). typeof needs no extraction — the
     // dyn kind table answers the question directly, and answers it even
@@ -1555,23 +1179,18 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
         `module namespace objects as values (access '${expr.text}' members directly)`,
       );
     }
-    if (lowerer.islandGlobalFnOf(expr)) {
-      // Island-backed functions have no closure representation (they
-      // lower to engine ops at call sites only).
+    if (lowerer.stdlibGlobalFnOf(expr)) {
       lowerer.unsupported(
         "SC1090",
         expr,
         `library functions as values (call '${expr.text}' directly)`,
       );
     }
-    // npm import bindings in a STATIC build: the binding's value lives
-    // in the embedded engine — the per-package requires-dynamic
-    // diagnostic, not the generic fallthrough. (Under --dynamic these
-    // resolve as jsval globals above.)
-    if (!lowerer.dynamic) {
+    // A declaration-only npm binding has no compiled runtime value.
+    {
       const pkg = lowerer.npmPackageOfSymbol(lowerer.resolveValueSymbol(expr) ?? undefined);
       if (pkg) {
-        lowerer.pushDiag(requiresDynamicPackageDiag(pkg, loc));
+        lowerer.pushDiag(unsupportedPackageValueDiag(pkg, loc));
         throw new PoisonError();
       }
     }
@@ -1676,13 +1295,13 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       }
       return { kind: "closure", fnName: name, captures: [], type, loc };
     }
-    if (!lowerer.dynamic && lowerer.isStdlibGlobal(expr, "crypto"))
+    if (lowerer.isStdlibGlobal(expr, "crypto"))
       return { kind: "libCall", fn: "crypto.native", args: [], type: DYN, loc };
     const nativeAlias = stdlibGlobalNameOf(lowerer, expr);
     if (nativeAlias === "Buffer" && expr.text !== "Buffer") {
       return { kind: "strLit", value: "[builtin Buffer]", type: STRING, loc };
     }
-    if (!lowerer.dynamic && lowerer.isStdlibGlobal(expr, "fetch")) {
+    if (lowerer.isStdlibGlobal(expr, "fetch")) {
       return { kind: "libCall", fn: "fetch.function", args: [], type: DYN, loc };
     }
     // The lib fence's IDENTIFIER chokepoint: the real standard library
@@ -1698,7 +1317,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     // global, one token; what a token cannot do (be called, answer
     // typeof "function") meets per-site fences/divergences, and
     // SEMANTICS.md documents the stance.
-    if (!lowerer.dynamic && stdlibGlobalNameOf(lowerer, expr) === "globalThis") {
+    if (stdlibGlobalNameOf(lowerer, expr) === "globalThis") {
       return lowerGlobalValue(lowerer, expr);
     }
     {
@@ -1707,13 +1326,6 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
         if (isJsSourceFile(expr.getSourceFile())) {
           const canonical = stdlibGlobalNameOf(lowerer, expr) ?? expr.text;
           return { kind: "strLit", value: `[builtin ${canonical}]`, type: STRING, loc };
-        }
-        // In a dynamic TypeScript build, the real global object is the
-        // escape hatch for host capabilities without static lowering.
-        // Direct globalThis.member uses still take their static surface
-        // paths; an explicit `as any` or `: any` can reach engine ops.
-        if (lowerer.dynamic && expr.text === "globalThis") {
-          return { kind: "jsOp", op: "globalGet", name: "globalThis", args: [], type: JSVAL, loc };
         }
         // The families with a WHY: each hint states what makes the
         // surface genuinely non-static (or what to use instead).
@@ -1980,9 +1592,9 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
         const promiseArm = def.arms[promiseTag]!;
         const inner = promiseArm.kind === "promise" ? promiseArm.inner : VOID;
         const units = def.arms.filter(isUnitType);
-        if (inner.kind === "union" || inner.kind === "dyn" || inner.kind === "jsval") {
+        if (inner.kind === "union" || inner.kind === "dyn") {
           // A union inner would need an arm-wise re-tag into the result
-          // union; dyn/jsval inners have their own boundary stories.
+
           lowerer.unsupported(
             "SC1090",
             expr,
@@ -2018,28 +1630,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       if (value.type.kind === "dyn") {
         return { kind: "libCall", fn: "async.awaitDyn", args: [value], type: DYN, loc };
       }
-      // A jsval whose CHECKER type is a promise is a package-returned
-      // promise: the value lives in the engine. Bridge it — a static
-      // promise the engine promise settles (fulfillment = the retained
-      // handle or void, rejection = the bridged reason) — and await
-      // THAT: the fiber parks like any await, resumes with the settled
-      // jsval, or re-throws the crossed rejection.
-      if (value.type.kind === "jsval") {
-        // ANY island value bridges — the runtime's Promise.resolve(v)
-        // .then(...) wiring awaits thenables and non-thenables exactly
-        // like JS (`await reg.load()` where the checker only knows
-        // 'any' must still park on the returned engine promise).
-        const mapped = lowerer.mapTypeOf(lowerer.typeOf(expr.expression));
-        const inner: IrType =
-          mapped?.kind === "promise" && mapped.inner.kind === "void" ? VOID : JSVAL;
-        const bridged: IrExpr = {
-          kind: "jsBridgePromise",
-          value,
-          type: { kind: "promise", inner },
-          loc,
-        };
-        return { kind: "awaitExpr", value: bridged, type: inner, loc };
-      }
+
       // A TYPED non-promise operand (`await 42`, an awaited record):
       // JS awaits non-thenables through exactly one microtask turn and
       // yields the value itself — evaluate the operand, hop, answer it.
@@ -2105,9 +1696,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
   if (ts.isBinaryExpression(expr)) return lowerer.lowerBinary(expr);
   if (ts.isCallExpression(expr)) {
     // The tail of an optional chain whose `?.` sits deeper
-    // (`x?.trim().toLowerCase()`): the whole tail short-circuits with
-    // the guard, so it lowers as one chain (dyn/island receivers keep
-    // their own undefined-propagating reads — see isOptionalChainTail).
+    // (`x?.trim().toLowerCase()`): the whole tail short-circuits together.
     if (isOptionalChainTail(lowerer, expr)) return lowerer.lowerOptionalChain(expr);
     return lowerer.lowerCall(expr);
   }
@@ -2145,7 +1734,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
       return lowerer.lowerSuperAccessorRead(expr);
     }
     // Enum member reads (`E.A`) fold to their compile-time constants —
-    // claimed FIRST so no receiver-shaped path (records, islands, the
+    // claimed FIRST so no receiver-shaped path (records, the
     // identifier fence on the enum object) sees them. lower-enums.ts.
     {
       const en = lowerEnumAccess(lowerer, expr);
@@ -2202,7 +1791,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
         loc,
       };
     }
-    if (!lowerer.dynamic && lowerer.stdlibGlobalMember(expr, "Object") === "freeze") {
+    if (lowerer.stdlibGlobalMember(expr, "Object") === "freeze") {
       const name = "%builtin.Object.freeze";
       if (!lowerer.liftedFns.some((fn) => fn.name === name))
         lowerer.liftedFns.push({
@@ -2244,7 +1833,6 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     // arbitrary global-object mutation remains fenced. Preserve a dyn
     // undefined value so stored probes compose with optional calls.
     if (
-      !lowerer.dynamic &&
       stdlibGlobalNameOf(lowerer, expr.expression) === "globalThis" &&
       !lowerer.checker.getPropertyOfType(lowerer.typeOf(expr.expression), expr.name.text)
     ) {
@@ -2271,65 +1859,13 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     lowerer.fenceStaticResponseMember(expr, "read");
     lowerer.fenceStaticHeadersMember(expr, "read");
     lowerer.fenceStaticReadableStreamMember(expr, "read");
-    // Island receiver: o.x is an engine property read (getProp may throw
+
     // — reading off null/undefined — bridged catchably like everything
     // at the boundary). `o?.x` arrives here too, through the chain
     // lowering's re-dispatch (a questionDotToken past the gate above is
     // always chain-handled; the receiver reads back as the chain's
     // bound handle).
-    if (lowerer.isIslandExpr(expr.expression)) {
-      const receiver = lowerer.lowerExpr(expr.expression);
-      // The checker said 'any' but the VALUE lives in the checked-dynamic tree (`this`
-      // in a plain JS function — dyn.this — or a checked-dynamic local
-      // behind an any-typed spelling): the property read is the checked-dynamic tree's
-      // own keyed read, dyn results and dyn chains exactly like every
-      // checked-dynamic member access (a nullish receiver throws V8's
-      // catchable TypeError, exactly Node). Never a jsOp over a dyn —
-      // the two dynamic worlds don't share a value representation.
-      if (receiver.type.kind === "dyn") {
-        return {
-          kind: "dynKeyGet",
-          key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
-          value: receiver,
-          type: DYN,
-          loc,
-        };
-      }
-      const read: IrExpr = {
-        kind: "jsOp",
-        op: "getProp",
-        name: expr.name.text,
-        args: [receiver],
-        type: JSVAL,
-        loc,
-      };
-      // A member the .d.ts DECLARES as a primitive exits eagerly to that
-      // static type (`f.mediaType` on a package handle IS a string):
-      // primitives copy by value across the boundary — no aliasing, no
-      // cost — and every static consumer (intrinsics, templates,
-      // comparisons) works on the result. Trust-but-verify: a lying
-      // declaration throws the catchable TypeError instead of smuggling
-      // a mistyped handle into string ops. A Uint8Array member exits the
-      // same way (`result.audio.uint8Array` — the generated-media
-      // payload) as a validated u8 COPY, the boundary's aliasing stance
-      // (divergences 44/45; engine Buffers pass — they ARE Uint8Arrays).
-      // Other composites stay handles (eager JSON copies would change
-      // aliasing), and chain-handled reads stay jsval (the chain's unit
-      // path is the engine's undefined — see lowerOptionalChain).
-      if (!expr.questionDotToken) {
-        const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
-        if (
-          declared &&
-          (declared.kind === "f64" ||
-            declared.kind === "bool" ||
-            declared.kind === "string" ||
-            (declared.kind === "bytes" && declared.elem === "u8"))
-        ) {
-          return { kind: "jsExit", value: read, type: declared, loc };
-        }
-      }
-      return read;
-    }
+
     // `m.index` on a for-of-over-matchAll binding reads the companion-
     // index array at this iteration's cursor — always a number: every
     // drained row matched, so the lib's `.index` is never undefined
@@ -2627,12 +2163,12 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
     ) {
       const canonical = stdlibGlobalNameOf(lowerer, expr);
       if (canonical !== null) {
-        if (!lowerer.dynamic && canonical === "globalThis") return lowerGlobalValue(lowerer, expr);
-        if (!lowerer.dynamic && canonical === "ArrayBuffer")
+        if (canonical === "globalThis") return lowerGlobalValue(lowerer, expr);
+        if (canonical === "ArrayBuffer")
           return { kind: "libCall", fn: "arrayBuffer.constructor", args: [], type: DYN, loc };
-        if (!lowerer.dynamic && canonical === "fetch")
+        if (canonical === "fetch")
           return { kind: "libCall", fn: "fetch.function", args: [], type: DYN, loc };
-        if (!lowerer.dynamic && Object.values(BYTES_ELEMENT_NAME).includes(canonical))
+        if (Object.values(BYTES_ELEMENT_NAME).includes(canonical))
           return {
             kind: "libCall",
             fn: "bytes.constructor",
@@ -3403,7 +2939,7 @@ export function lowerTernary(
       const a = thenRaw.type;
       const b = elseRaw.type;
       const staticArm = (t: IrType): boolean =>
-        t.kind !== "dyn" && t.kind !== "caught" && t.kind !== "jsval" && t.kind !== "void";
+        t.kind !== "dyn" && t.kind !== "caught" && t.kind !== "void";
       if (staticArm(a) && staticArm(b)) {
         if (typeEquals(a, b)) {
           anyJoin = a;
@@ -3712,9 +3248,8 @@ export function maybeNarrow(lowerer: Lowerer, expr: IrExpr, node: ts.Node): IrEx
   const narrowedTs = lowerer.typeOf(node);
   const narrowed = lowerer.mapTypeOf(narrowedTs);
   // `Array.isArray(u)` on a union with one readonly array/tuple arm: the
-  // lib predicate narrows to `any[]`, either directly or intersected
-  // with the original union. That checker type can map to the island's
-  // array-of-handles, nothing, or a synthetic intersection record — but
+  // lib predicate narrows to `any[]`, possibly intersected with another
+  // type. That mapping may be a checked value or a synthetic record, but
   // the tag test proved the union's one array-valued arm, so bridge to it
   // with the same trusted unionNarrow the mapped case below builds.
   if (lowerer.checkerAnyArrayType(narrowedTs)) {
@@ -4375,18 +3910,6 @@ function volatileEnvRead(e: IrExpr): IrExpr | null {
   return null;
 }
 
-/** `x == null` / `x != null` — JS's idiomatic null-OR-undefined test, the
- * ONE loose comparison with static semantics: `== null` matches exactly
- * null and undefined (0, "", and false do not). Requires a syntactic
- * null LITERAL on either side; the other operand's unit arms become a
- * runtime tag test — one `unionIsTag` when the union has a single unit
- * arm, a short-circuit pair over both tags otherwise (that shape re-emits
- * the operand, so only side-effect-free reads compose; anything else
- * keeps the fence). A unit-literal operand folds (null and undefined are
- * mutually loose-equal), and a non-nullable operand folds statically —
- * the same trust-the-checker bet as lowerUnitComparison. Null (fence)
- * when this isn't a null-literal comparison or the operand has no
- * lowering here (dyn/jsval/void). */
 function lowerLooseNullCompare(
   lowerer: Lowerer,
   expr: ts.BinaryExpression,
@@ -4457,7 +3980,7 @@ function lowerLooseNullCompare(
       loc,
     };
   }
-  if (other.type.kind === "jsval" || other.type.kind === "void") {
+  if (other.type.kind === "void") {
     return null; // no static tag to test — keep the fence
   }
   // The env-volatility escape (see lowerUnitComparison): a narrowed
@@ -4650,10 +4173,8 @@ function lowerNullishPair(
 ): IrExpr {
   if (left.type.kind === "dyn") {
     // `a ?? b` on a CHECKED-DYNAMIC left: the deciding test is the
-    // runtime kind (scr_dyn_is_nullish — UNDEF/NULL take the default;
-    // a wrapped island value routes to the engine's test, defensively:
-    // the wrap constructor scalar-normalizes engine null/undefined
-    // away). Both sides live in the checked-dynamic tree — the right converts through
+    // runtime kind (scr_dyn_is_nullish — UNDEF/NULL take the default).
+    // Both sides live in the checked-dynamic tree — the right converts through
     // the usual boundary and evaluates lazily in its branch; a default
     // with no dyn representation keeps the fence.
     const right = lowerer.coerceToExpected(lowerer.lowerExpr(expr.right), DYN);
@@ -4666,13 +4187,7 @@ function lowerNullishPair(
     }
     return { kind: "nullish", left, right, type: DYN, loc };
   }
-  if (left.type.kind === "jsval") {
-    // `a ?? b` on an ISLAND value: the engine's own nullish test — the
-    // left evaluates once, the right runs lazily in its branch and
-    // marshals in (the emitter's jsval nullish arm).
-    const right = lowerer.jsvalIn(lowerer.lowerExpr(expr.right), expr.right);
-    return { kind: "nullish", left, right, type: JSVAL, loc };
-  }
+
   if (left.type.kind !== "union") return left;
   const def = lowerer.unions.get(left.type.unionId);
   if (!def) lowerer.badType(expr.left, lowerer.typeOf(expr.left));
@@ -5177,10 +4692,7 @@ export function ensureBool(lowerer: Lowerer, e: IrExpr, node: ts.Expression): Ir
     // tag (plus the scalar payload for number/string).
     return { kind: "dynTest", test: "truthy", value: e, type: BOOL, loc: e.loc };
   }
-  if (e.type.kind === "jsval") {
-    // ToBoolean of an island value — the engine answers (never throws).
-    return { kind: "jsOp", op: "truthy", args: [e], type: BOOL, loc: e.loc };
-  }
+
   if (e.type.kind === "union") {
     lowerer.requireTruthyUnion(e.type.unionId, node);
     return { kind: "toBool", operand: e, type: BOOL, loc: e.loc };
@@ -5199,10 +4711,6 @@ export function ensureBool(lowerer: Lowerer, e: IrExpr, node: ts.Expression): Ir
   lowerer.badType(node, lowerer.typeOf(node));
 }
 
-/** Truthiness needs a ToBoolean per arm: dyn/caught arms have none (a
- * dynamic ToBoolean over the checked-dynamic tree / the snapshot box) — fence those
- * unions; every other arm kind is answerable (units false, scalars and
- * strings by value, refs true, jsval by the engine). */
 export function requireTruthyUnion(lowerer: Lowerer, unionId: string, node: ts.Expression): void {
   const def = lowerer.unions.get(unionId);
   if (def && def.arms.every((a) => a.kind !== "dyn" && a.kind !== "caught")) return;
@@ -5213,15 +4721,9 @@ export function requireTruthyUnion(lowerer: Lowerer, unionId: string, node: ts.E
   );
 }
 
-/** Strict equality needs a per-arm comparison: units, scalars, strings,
- * and ref kinds (pointer identity) all have one; dyn/caught arms have no
- * static equality and jsval arms would need the engine's `===` — those
- * unions keep the narrow-first fence. */
 export function eqComparableUnion(lowerer: Lowerer, unionId: string): boolean {
   const def = lowerer.unions.get(unionId);
-  return (
-    !!def && def.arms.every((a) => a.kind !== "dyn" && a.kind !== "caught" && a.kind !== "jsval")
-  );
+  return !!def && def.arms.every((a) => a.kind !== "dyn" && a.kind !== "caught");
 }
 
 /** Property access on a string or array receiver: `.length` lowers to the
@@ -5697,9 +5199,7 @@ export function lowerIntrinsicProperty(
     return null;
   }
   if (kind === "f64") {
-    // The only ambient members on numbers are island-backed methods; a
-    // bare reference has no value form regardless of --dynamic.
-    if (own(ISLAND_SURFACE.number, name) !== undefined) {
+    if (own(STDLIB_SURFACE.number, name) !== undefined) {
       lowerer.unsupported("SC1090", expr, `number methods as values (call '${name}' directly)`);
     }
     return null;
@@ -5748,21 +5248,9 @@ export function lowerIntrinsicProperty(
           ? lowerer.checkedNarrowCall(helper, receiver, present, locOf(expr.expression))
           : lowerer.maybeNarrow(receiver, expr.expression);
       }
-      // An island handle behind a typed-array .d.ts surface: the engine
+
       // property read, exiting at the declared number type (the array
-      // .length rule). Chain-handled reads stay jsval.
-      if (receiver.type.kind === "jsval") {
-        const read: IrExpr = {
-          kind: "jsOp",
-          op: "getProp",
-          name,
-          args: [receiver],
-          type: JSVAL,
-          loc,
-        };
-        if (expr.questionDotToken) return read;
-        return { kind: "jsExit", value: read, type: F64, loc };
-      }
+
       return { kind: "bytesIntrinsic", method: name, receiver, args: [], type: F64, loc };
     }
     if (name === "byteOffset") {
@@ -5855,23 +5343,7 @@ export function lowerIntrinsicProperty(
         ? lowerer.checkedNarrowCall(helper, receiver, present, locOf(expr.expression))
         : lowerer.maybeNarrow(receiver, expr.expression);
     }
-    // An island handle behind an array-typed .d.ts surface
-    // (`parts().length` on a declared `string[]` return — arrays never
-    // exit eagerly, so the value stays jsval): an engine property read,
-    // exiting at the declared number type. Chain-handled reads stay
-    // jsval (the island chain's body must be a handle).
-    if (receiver.type.kind === "jsval") {
-      const read: IrExpr = {
-        kind: "jsOp",
-        op: "getProp",
-        name: "length",
-        args: [receiver],
-        type: JSVAL,
-        loc: locOf(expr),
-      };
-      if (expr.questionDotToken) return read;
-      return { kind: "jsExit", value: read, type: F64, loc: locOf(expr) };
-    }
+
     // A CHECKED-DYNAMIC value behind an array-typed checker spelling
     // (`Object.keys(u).length` — the dyn walk answers a dyn array while
     // tsc spells string[]): the runtime-world dispatch — a dyn keyed
@@ -5897,7 +5369,7 @@ export function lowerIntrinsicProperty(
     kind === "string"
       ? own(STR_METHODS, name) !== undefined ||
         STRING_INDEX_METHODS.has(name) ||
-        own(ISLAND_SURFACE.string, name) !== undefined
+        own(STDLIB_SURFACE.string, name) !== undefined
       : ARRAY_METHODS.has(name)
   ) {
     lowerer.unsupported("SC1090", expr, `${kind} methods as values (call '${name}' directly)`);
@@ -6016,11 +5488,8 @@ export function lowerArrayLiteral(
       const ownUnhelpful =
         mapped === null ||
         mapped.kind === "dyn" ||
-        // The checker echoing the context union back as the literal's
-        // own type decides nothing either — nor does an island ('any')
-        // residue under a STATIC union slot.
+        // The checker may echo the context union rather than infer this literal.
         mapped.kind === "union" ||
-        mapped.kind === "jsval" ||
         (mapped.kind === "array" && nonUnitElems && lowerer.unitOnlyElem(mapped.elem));
       if (ownUnhelpful) {
         const def = lowerer.unions.get(ctxUnion.unionId);
@@ -6080,12 +5549,10 @@ export function lowerArrayLiteral(
   )
     mapped = DYN;
   // An EMPTY literal under a CONST ASSERTION whose type queries panicked
-  // (tsgo's readonly-[] TupleType conversion — the facade answers `any`,
-  // which maps to nothing statically and to an island value under
-  // --dynamic): the value is provably the empty tuple; ride the
-  // unit-element array, mapType's own `[] as const` rule.
+  // (tsgo's readonly-[] TupleType conversion) uses a unit-element array,
+  // mapType's own `[] as const` rule.
   if (
-    (mapped === null || mapped.kind === "jsval") &&
+    mapped === null &&
     expr.elements.length === 0 &&
     (tsType.flags & ts.TypeFlags.Any) !== 0 &&
     underConstAssertion(expr)
@@ -6119,24 +5586,7 @@ export function lowerArrayLiteral(
         // tsc padded an UNDER-LENGTH literal against an optional-element
         // tuple context (`options || []` with `options?: [string?,
         // number?]` — the instantiated type spells every position, the
-        // literal spells fewer): no fixed shape holds it, but the
-        // engine's real arrays do — under --dynamic the literal builds
-        // island-native with its ACTUAL elements, length exact. Static
-        // builds keep the type fence (badType's dynamic probe tells the
-        // --dynamic story).
-        if (
-          lowerer.dynamic &&
-          expr.elements.length < shape.fields.length &&
-          expr.elements.every((el) => !ts.isOmittedExpression(el))
-        ) {
-          return {
-            kind: "jsOp",
-            op: "arrLit",
-            args: expr.elements.map((el) => lowerer.jsvalIn(lowerer.lowerExpr(el), el)),
-            type: JSVAL,
-            loc,
-          };
-        }
+        // literal spells fewer): no fixed shape holds it.
         lowerer.badType(expr, tsType);
       }
       const byName = new Map(shape.fields.map((f) => [f.name, f.type]));
@@ -6242,11 +5692,9 @@ export function lowerArrayLiteral(
       let srcNode: ts.Expression = el.expression;
       while (ts.isParenthesizedExpression(srcNode)) srcNode = srcNode.expression;
       lowerer.fenceStaticHeadersIteration(el.expression);
-      let src =
-        lowerer.lowerDynamicHeadersSpread(el.expression, type) ??
-        (ts.isConditionalExpression(srcNode)
-          ? lowerTernary(lowerer, srcNode, type)
-          : lowerer.lowerExpr(el.expression));
+      let src = ts.isConditionalExpression(srcNode)
+        ? lowerTernary(lowerer, srcNode, type)
+        : lowerer.lowerExpr(el.expression);
       src = lowerCollectionSpread(lowerer, src, el.expression) ?? src;
       // `[...new SymbolIterator]`: a CLASS ITERABLE drains through its
       // own protocol into a fresh element array (classIteratorDrainCall
@@ -6834,36 +6282,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
       );
     }
   }
-  if (receiverIr?.kind === "jsval") {
-    // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
-    // receiver whose value LOWERED checked-dynamic (`bag.list[0]` where
-    // bag.list is a routed keyed read off a wrapped island value) takes
-    // the dyn keyed read below — the routed JSVAL arm reads the real
-    // engine element; a jsval-lowered receiver keeps the island read.
-    const recv = lowerer.lowerExpr(expr.expression);
-    if (recv.type.kind !== "dyn") return islandElementRead(lowerer, expr, recv);
-    const rawKey = lowerer.lowerExpr(expr.argumentExpression);
-    const key: IrExpr | null =
-      rawKey.type.kind === "string"
-        ? rawKey
-        : rawKey.type.kind === "f64"
-          ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
-          : null;
-    if (key) {
-      const opt = hasOptionalChainGuard(expr.expression);
-      return lowerer.maybeNarrow(
-        {
-          kind: "dynKeyGet",
-          key,
-          ...(opt ? { optional: true as const } : {}),
-          value: recv,
-          type: DYN,
-          loc: locOf(expr),
-        },
-        expr,
-      );
-    }
-  }
+
   // Typed-array element read `b[i]` — like arrayGet with a scalar
   // result; any invalid index traps (the array discipline; JS would
   // read undefined — divergence 4's policy).
@@ -6880,11 +6299,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
         ? lowerer.checkedNarrowCall(helper, recv, present, locOf(expr.expression))
         : lowerer.maybeNarrow(recv, expr.expression);
     }
-    // A typed-array .d.ts surface whose VALUE is an island handle
-    // (`data()[0]` on a declared Uint8Array return — call results only
-    // exit primitives eagerly): the engine element read, exiting at the
-    // declared number type.
-    if (recv.type.kind === "jsval") return islandElementRead(lowerer, expr, recv);
+
     const index = lowerOptionalNumber(
       lowerer,
       lowerer.lowerExpr(expr.argumentExpression),
@@ -6944,13 +6359,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
     const shape = lowerer.shapes.get(receiverIr.shapeId);
     if (shape?.tuple) {
       let obj = lowerer.lowerExpr(expr.expression);
-      // A tuple-typed .d.ts surface whose VALUE is an island handle
-      // (`pair()[0]` on a declared `[number, string]` return — the
-      // anonymous tuple type has no npm symbol, so the checker maps it
-      // structurally while the call result stays an engine array): the
-      // read rides engine ops, exiting at the declared per-index type
-      // like the array path.
-      if (obj.type.kind === "jsval") return islandElementRead(lowerer, expr, obj);
+
       if (obj.type.kind === "dyn") {
         // Object.entries over a checked value stores each pair in the
         // dynamic tree even when the checker names a tuple type.
@@ -7012,13 +6421,6 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
         : lowerer.maybeNarrow(get, expr);
     }
     if (shape && !shape.tuple) {
-      // A record-typed .d.ts surface whose VALUE is an island handle
-      // (`headers()["x-id"]` on a declared `Record<string, string>`
-      // return — the stdlib alias maps structurally while the call
-      // result stays an engine object): the read rides engine ops with
-      // the declared-value exit, never a recordKeyGet over a jsval.
-      const obj = lowerer.lowerExpr(expr.expression);
-      if (obj.type.kind === "jsval") return islandElementRead(lowerer, expr, obj);
       return lowerer.lowerRecordKeyRead(expr, receiverIr.shapeId, shape);
     }
   }
@@ -7305,13 +6707,7 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
       ? lowerer.checkedNarrowCall(helper, arr, present, locOf(expr.expression))
       : lowerer.maybeNarrow(arr, expr.expression);
   }
-  // The checker sees an array but the VALUE is an island handle (an
-  // array-typed .d.ts surface: `parts()[0]` on a declared `string[]`
-  // return, `issue.path[0]` on a declared member — arrays never exit
-  // eagerly, so the call/member read stays jsval): the read rides
-  // engine ops with the declared-element exit, never a static arrayGet
-  // over a jsval (the validator ICE).
-  if (arr.type.kind === "jsval") return islandElementRead(lowerer, expr, arr);
+
   // The checker sees an array but the VALUE lowered checked-dynamic (a
   // jsdoc-typed default export from a .js module — signature 14): the
   // read rides the dynCheck boundary when the array shape is one the checked-dynamic tree
@@ -7408,40 +6804,6 @@ export function lowerElementAccess(lowerer: Lowerer, expr: ts.ElementAccessExpre
   // narrowed THIS occurrence (`if (a[0] !== undefined) use(a[0])` — tsc
   // narrows literal-index element accesses).
   return lowerer.maybeNarrow({ kind: "arrayGet", arr, index, type: elemT, loc: locOf(expr) }, expr);
-}
-
-/** `o[k]` where the RECEIVER is an island value — a jsval-mapped checker
- * type, or an array/tuple-typed .d.ts surface whose lowered value is a
- * handle. The key marshals in (any JS key kind — the engine does its
- * own ToPropertyKey) and the result stays island, EXCEPT when the
- * checker declares the element a primitive (`parts()[0]` on a declared
- * `string[]`): those exit eagerly to the static type, exactly the
- * island property-read rule (trust-but-verify — a lying declaration
- * throws the catchable TypeError; tsc puts the `| undefined` of a
- * short-circuiting chain on the OUTERMOST expression, so chain tails
- * never map primitive here). Chain-handled reads (`v?.[0]`) stay jsval
- * — the chain's unit path is the engine's undefined. */
-function islandElementRead(
-  lowerer: Lowerer,
-  expr: ts.ElementAccessExpression,
-  obj: IrExpr,
-): IrExpr {
-  const loc = locOf(expr);
-  const key = lowerer.jsvalIn(lowerer.lowerExpr(expr.argumentExpression), expr.argumentExpression);
-  const read: IrExpr = { kind: "jsOp", op: "getIdx", args: [obj, key], type: JSVAL, loc };
-  if (!expr.questionDotToken) {
-    const declared = lowerer.mapTypeOf(lowerer.typeOf(expr));
-    if (
-      declared &&
-      (declared.kind === "f64" ||
-        declared.kind === "bool" ||
-        declared.kind === "string" ||
-        (declared.kind === "bytes" && declared.elem === "u8"))
-    ) {
-      return { kind: "jsExit", value: read, type: declared, loc };
-    }
-  }
-  return read;
 }
 
 /** `r[k]` over a (non-tuple) record shape. A LITERAL key naming a declared
@@ -8286,51 +7648,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
     const receiver = tryLowerExpression(lowerer, target.expression);
     if (receiver?.type.kind === "array") receiverIr = receiver.type;
   }
-  if (receiverIr?.kind === "jsval") {
-    const obj = lowerer.lowerExpr(target.expression);
-    // Dispatch follows the RUNTIME world (383(d)): a checker-'any'
-    // receiver whose value LOWERED checked-dynamic takes the dyn keyed
-    // write — the routed JSVAL arm lands it on the real engine object.
-    if (obj.type.kind === "dyn") {
-      const loc = locOf(expr);
-      const rawKey = lowerer.lowerExpr(target.argumentExpression);
-      const key: IrExpr =
-        rawKey.type.kind === "f64" || rawKey.type.kind === "bool" || rawKey.type.kind === "dyn"
-          ? { kind: "toString", operand: rawKey, type: STRING, loc: rawKey.loc }
-          : rawKey;
-      if (key.type.kind !== "string") {
-        lowerer.unsupported(
-          "SC1090",
-          target.argumentExpression,
-          `'${lowerer.fmt(key.type)}'-typed keys in keyed writes through 'unknown' values`,
-        );
-      }
-      const value = lowerer.coerceToExpected(lowerer.lowerExpr(expr.right), DYN);
-      if (value.type.kind !== "dyn") {
-        lowerer.unsupported(
-          "SC1100",
-          expr.right,
-          `assigning '${lowerer.fmt(value.type)}' values through 'unknown' receivers`,
-        );
-      }
-      return {
-        kind: "exprStmt",
-        expr: { kind: "libCall", fn: "dyn.keySet", args: [obj, key, value], type: VOID, loc },
-        loc,
-      };
-    }
-    const key = lowerer.jsvalIn(
-      lowerer.lowerExpr(target.argumentExpression),
-      target.argumentExpression,
-    );
-    const value = lowerer.jsvalIn(lowerer.lowerExpr(expr.right), expr.right);
-    const loc = locOf(expr);
-    return {
-      kind: "exprStmt",
-      expr: { kind: "jsOp", op: "setIdx", args: [obj, key, value], type: VOID, loc },
-      loc,
-    };
-  }
+
   // A checked-dynamic receiver TYPE (`unknown[]` and the collapsed
   // `(string | object)[]` map to DYN wholesale now): the dyn keyed
   // write — dyn.keySet. Number keys canonicalize through the JS-exact
@@ -8405,21 +7723,6 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
   // the runtime coerces JS-exactly; invalid indices are ignored.
   if (receiverIr?.kind === "bytes") {
     const recv = lowerer.lowerExpr(target.expression);
-    // The write twin: a typed-array .d.ts surface whose VALUE is a
-    // handle takes the engine keyed write.
-    if (recv.type.kind === "jsval") {
-      const key = lowerer.jsvalIn(
-        lowerer.lowerExpr(target.argumentExpression),
-        target.argumentExpression,
-      );
-      const value = lowerer.jsvalIn(lowerer.lowerExpr(expr.right), expr.right);
-      const loc = locOf(expr);
-      return {
-        kind: "exprStmt",
-        expr: { kind: "jsOp", op: "setIdx", args: [recv, key, value], type: VOID, loc },
-        loc,
-      };
-    }
     const index = lowerer.lowerExpr(target.argumentExpression);
     if (index.type.kind === "dyn" && recv.type.kind === "bytes") {
       return {
@@ -8442,9 +7745,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
   // — literal indices only, like the read.
   if (receiverIr?.kind === "record") {
     const shape = lowerer.shapes.get(receiverIr.shapeId);
-    // A record/tuple-typed .d.ts surface whose VALUE is an island
-    // handle: the engine keyed write (the read dispatch's twin), never
-    // a recordSet/recordKeySet over a jsval.
+
     if (shape) {
       const obj = lowerer.lowerExpr(target.expression);
       if (hasClassPayload(lowerer, obj.type)) {
@@ -8454,19 +7755,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
           "computed property writes through structural views of class instances (use a declared literal key)",
         );
       }
-      if (obj.type.kind === "jsval") {
-        const key = lowerer.jsvalIn(
-          lowerer.lowerExpr(target.argumentExpression),
-          target.argumentExpression,
-        );
-        const value = lowerer.jsvalIn(lowerer.lowerExpr(expr.right), expr.right);
-        const loc = locOf(expr);
-        return {
-          kind: "exprStmt",
-          expr: { kind: "jsOp", op: "setIdx", args: [obj, key, value], type: VOID, loc },
-          loc,
-        };
-      }
+
       // A record-mapped CHECKER type over a VALUE living in the checked-dynamic tree (a
       // JS file-scope object-literal global): the checked-dynamic keyed
       // write — dyn.keySet (later writes win, insertion order; Node's
@@ -8668,9 +7957,8 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
   // arm above — later writes win in insertion order, number keys
   // canonicalize through the JS-exact formatter (ToPropertyKey's string
   // side), index keys on dyn arrays set/extend elements, and non-object
-  // receivers throw Node's TypeErrors at runtime. An UNMAPPED checker
-  // type (static `any` — mapTypeOf answers null without --dynamic)
-  // probes the receiver's own lowered world: a dyn value takes the same
+  // receivers throw Node's TypeErrors at runtime. An unmapped checker type
+  // probes the receiver's lowered representation: a dyn value takes the same
   // write, anything else falls through to the fences.
   if (receiverIr?.kind === "dyn" || receiverIr?.kind === "object" || receiverIr === null) {
     const obj =
@@ -8722,22 +8010,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
     lowerer.unsupported("SC1090", target, "assignment to non-array elements");
   }
   let arr = lowerer.lowerExpr(target.expression);
-  // The write twin of the island element read: an array-typed .d.ts
-  // surface whose VALUE is a handle takes the engine keyed write, never
-  // a static arraySet over a jsval.
-  if (arr.type.kind === "jsval") {
-    const key = lowerer.jsvalIn(
-      lowerer.lowerExpr(target.argumentExpression),
-      target.argumentExpression,
-    );
-    const value = lowerer.jsvalIn(lowerer.lowerExpr(expr.right), expr.right);
-    const loc = locOf(expr);
-    return {
-      kind: "exprStmt",
-      expr: { kind: "jsOp", op: "setIdx", args: [arr, key, value], type: VOID, loc },
-      loc,
-    };
-  }
+
   if (
     arr.type.kind === "union" &&
     lowerer.armTag(arr.type.unionId, UNDEFINED_T) >= 0 &&
@@ -8851,10 +8124,7 @@ export function ensureString(lowerer: Lowerer, e: IrExpr, node: ts.Node): IrExpr
     const boxed: IrExpr = { kind: "dynFrom", value: e, type: DYN, loc: e.loc };
     return { kind: "toString", operand: boxed, type: STRING, loc: e.loc };
   }
-  if (e.type.kind === "jsval") {
-    // String(v) in the engine — JS-exact (and Node-exact in templates).
-    return { kind: "jsOp", op: "toStr", args: [e], type: STRING, loc: e.loc };
-  }
+
   if (e.type.kind === "object") {
     // String(err) / `${err}` uses the same dispatch as err.toString().
     for (let c = lowerer.classes.get(e.type.className) ?? null; c; c = c.base) {
@@ -9130,12 +8400,8 @@ export function lowerAsExpression(
   const use = runtimeOptionalUseOf(expr);
   if (inner.type.kind === "union" && runtimeOptionalAssertionErases(lowerer, expr, inner, use))
     return inner;
-  if (inner.type.kind !== "dyn" && inner.type.kind !== "jsval") {
-    // A STATIC value cast `as any` is the explicit island entrance.
+  if (inner.type.kind !== "dyn") {
     const targetTs0 = lowerer.checker.getTypeFromTypeNode(expr.type);
-    if (targetTs0.flags & ts.TypeFlags.Any && lowerer.dynamic) {
-      return lowerer.jsvalIn(inner, expr.expression);
-    }
     const target = lowerer.mapTypeOf(targetTs0);
     if (target?.kind === "object") {
       const asserted = checkedClassAssertion(lowerer, inner, target, locOf(expr));
@@ -9224,27 +8490,7 @@ export function lowerAsExpression(
     }
     return inner; // erasure, unchanged
   }
-  if (inner.type.kind === "jsval") {
-    // The island exit. `as any` on an island value is erasure; a static
-    // target compiles to a VALIDATED extraction (strict primitives; the
-    // JSON round-trip + dynCheck walker for composites) that throws a
-    // catchable TypeError on mismatch — same trust-but-verify rule as
-    // the dyn boundary. Targets with no extraction are rejected.
-    const targetTs = lowerer.checker.getTypeFromTypeNode(expr.type);
-    if (targetTs.flags & ts.TypeFlags.Any) return inner;
-    const target = lowerer.mapTypeOf(targetTs);
-    if (!target) lowerer.badType(expr.type, targetTs);
-    if (!lowerer.boundarySafe(target)) {
-      lowerer.unsupported(
-        "SC1090",
-        expr,
-        `a checked cast of 'any' to '${lowerer.fmt(target)}' ` +
-          `(an 'any' value can only be validated against JSON-representable types: ` +
-          `number, string, boolean, records, arrays, and unions of those)`,
-      );
-    }
-    return { kind: "jsExit", value: inner, type: target, loc: locOf(expr) };
-  }
+
   const targetTs = lowerer.checker.getTypeFromTypeNode(expr.type);
   const target = lowerer.mapTypeOf(targetTs) ?? dynFallbackType(lowerer, expr.type, targetTs);
   if (!target) lowerer.badType(expr.type, targetTs);
@@ -9330,9 +8576,7 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
   switch (expr.operator) {
     case ts.SyntaxKind.MinusToken: {
       const raw = lowerer.lowerExpr(expr.operand);
-      if (raw.type.kind === "jsval") {
-        return { kind: "jsOp", op: "neg", args: [raw], type: JSVAL, loc };
-      }
+
       if (raw.type.kind === "bigint") {
         return { kind: "libCall", fn: "bigint.neg", args: [raw], type: BIGINT_T, loc };
       }
@@ -9353,9 +8597,7 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
       // Unary + is ToNumber; on an already-number operand it's identity,
       // and a STRING operand runs the runtime's ECMA-exact StringToNumber
       // (num.fromString — Number(aString)'s lowering, scr_string.c).
-      if (raw.type.kind === "jsval") {
-        return { kind: "jsOp", op: "plus", args: [raw], type: JSVAL, loc };
-      }
+
       if (raw.type.kind === "string") {
         return { kind: "libCall", fn: "num.fromString", args: [raw], type: F64, loc };
       }
@@ -9716,49 +8958,6 @@ function seqExprSafeStmt(s: IrStmt): boolean {
   }
 }
 
-/** Run one supported `any` binary operation in the island. Checked-dynamic
- * operands marshal in only after lowerBinary's identity-preserving native
- * cases have had their chance (notably dyn strict equality). */
-function lowerAnyBinaryInIsland(
-  lowerer: Lowerer,
-  expr: ts.BinaryExpression,
-  left: IrExpr,
-  right: IrExpr,
-  loc: SrcLoc,
-): IrExpr {
-  const op = expr.operatorToken.kind;
-  const JS_BIN: Partial<Record<ts.SyntaxKind, IrJsOp>> = {
-    [ts.SyntaxKind.PlusToken]: "add",
-    [ts.SyntaxKind.MinusToken]: "sub",
-    [ts.SyntaxKind.AsteriskToken]: "mul",
-    [ts.SyntaxKind.SlashToken]: "div",
-    [ts.SyntaxKind.PercentToken]: "mod",
-    [ts.SyntaxKind.AsteriskAsteriskToken]: "pow",
-    [ts.SyntaxKind.LessThanToken]: "lt",
-    [ts.SyntaxKind.LessThanEqualsToken]: "le",
-    [ts.SyntaxKind.GreaterThanToken]: "gt",
-    [ts.SyntaxKind.GreaterThanEqualsToken]: "ge",
-    [ts.SyntaxKind.EqualsEqualsEqualsToken]: "eq",
-    [ts.SyntaxKind.ExclamationEqualsEqualsToken]: "neq",
-  };
-  const jop = JS_BIN[op];
-  if (jop === undefined) {
-    lowerer.unsupported(
-      "SC1090",
-      expr,
-      `operator '${ts.tokenToString(op) ?? ts.syntaxKindName(op)}' on 'any' values`,
-    );
-  }
-  const type = jsOpResultKind(jop) === "bool" ? BOOL : JSVAL;
-  return {
-    kind: "jsOp",
-    op: jop,
-    args: [lowerer.jsvalIn(left, expr.left), lowerer.jsvalIn(right, expr.right)],
-    type,
-    loc,
-  };
-}
-
 export function lowerCompoundValueToTarget(
   lowerer: Lowerer,
   expr: ts.BinaryExpression,
@@ -9775,26 +8974,7 @@ export function lowerCompoundValueToTarget(
   const rhs = lowerer.lowerExpr(expr.right);
   const numericRead = lowerOptionalNumber(lowerer, read, loc);
   const numericRhs = lowerOptionalNumber(lowerer, rhs, loc);
-  if (target.type.kind === "jsval" || rhs.type.kind === "jsval") {
-    const JS_COMPOUND: Record<string, IrJsOp> = {
-      "+": "add",
-      "-": "sub",
-      "*": "mul",
-      "/": "div",
-      "%": "mod",
-      "**": "pow",
-    };
-    const jop = JS_COMPOUND[compound];
-    if (jop === undefined) lowerer.unsupported("SC1043", expr);
-    const wrapped: IrExpr = {
-      kind: "jsOp",
-      op: jop,
-      args: [lowerer.jsvalIn(read, expr.left), lowerer.jsvalIn(rhs, expr.right)],
-      type: JSVAL,
-      loc,
-    };
-    return lowerer.coerceInto(expr, wrapped, target.type);
-  }
+
   if (
     compound === "+" &&
     (target.type.kind === "string" ||
@@ -10112,51 +9292,7 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
           };
         }
       }
-      // `h.k = v` on an ISLAND receiver in VALUE position: the engine
-      // property write (setProp throws the engine's TypeErrors on
-      // nullish receivers, bridged catchably), the RHS value threaded
-      // through as the expression's value.
-      if (
-        ts.isPropertyAccessExpression(expr.left) &&
-        !expr.left.questionDotToken &&
-        lowerer.isIslandExpr(expr.left.expression)
-      ) {
-        const recv = lowerer.lowerExpr(expr.left.expression);
-        const recvTmp = lowerer.declareHiddenLocal("%setRecv", recv.type);
-        const rhsVal = lowerer.lowerExpr(expr.right);
-        const valTmp = lowerer.declareHiddenLocal("%setVal", rhsVal.type);
-        const valRef = (): IrExpr => ({
-          kind: "varRef",
-          localId: valTmp.id,
-          type: rhsVal.type,
-          loc,
-        });
-        return {
-          kind: "seqExpr",
-          stmts: [
-            { kind: "varDecl", localId: recvTmp.id, init: recv, loc },
-            { kind: "varDecl", localId: valTmp.id, init: rhsVal, loc },
-            {
-              kind: "exprStmt",
-              expr: {
-                kind: "jsOp",
-                op: "setProp",
-                name: expr.left.name.text,
-                args: [
-                  { kind: "varRef", localId: recvTmp.id, type: recv.type, loc },
-                  lowerer.jsvalIn(valRef(), expr.right),
-                ],
-                type: VOID,
-                loc,
-              },
-              loc,
-            },
-          ],
-          result: valRef(),
-          type: rhsVal.type,
-          loc,
-        };
-      }
+
       // `h.k = v` on a CHECKED-DYNAMIC receiver in VALUE position
       // (`var _ = module.exports = foo`): receiver first, then RHS
       // (JS's reference-before-value order), the keyed write, and the
@@ -10499,11 +9635,8 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
         }
       }
     }
-    // `any`-origin operands (tsc rejects these operator forms on real
-    // `unknown`, so in a checker-clean TS program only `any` reaches
-    // here): JS's full coercion semantics (ToPrimitive, NaN, string +)
-    // live in the engine — the dynamic-family fence, so the island
-    // retry lifts the site. Genuine unknown keeps the SC1100 story.
+    // Unsupported `any`-origin operations get their specific diagnostic;
+    // unknown retains the narrowing diagnostic below.
     if (
       (left.type.kind === "dyn" && lowerer.anyOrigin(expr.left)) ||
       (right.type.kind === "dyn" && lowerer.anyOrigin(expr.right))
@@ -10511,23 +9644,14 @@ export function lowerBinary(lowerer: Lowerer, expr: ts.BinaryExpression): IrExpr
       // `JSON.parse` and other checked-dynamic producers deliberately
       // remain dyn when assigned to an `any` local: eagerly converting
       // the binding would deep-copy its data and sever aliases. At an
-      // operator the dynamic build can cross only the operands and let
-      // the engine apply JS's exact coercion semantics. Static builds
-      // retain the SC2011 promise that --dynamic lifts this site.
-      if (lowerer.dynamic) return lowerAnyBinaryInIsland(lowerer, expr, left, right, loc);
+      // unsupported operator, require an explicit represented type.
       lowerer.anyOpFence(`the '${ts.tokenToString(op) ?? ts.syntaxKindName(op)}' operator`, expr);
     }
     // tsc allows ===/!== on unknown (arithmetic/comparisons it rejects
     // itself); a dynamic equality would need a dyn walk — validate first.
     lowerer.unsupported("SC1100", expr, "operators on 'unknown' values");
   }
-  // Operators over 'any' execute in the island with JS-exact semantics
-  // (ToPrimitive, NaN, string +): both operands marshal in, the engine
-  // computes. Comparisons come back as static bools; arithmetic stays
-  // an island value ('1 as any + "x"' is a string over there).
-  if (left.type.kind === "jsval" || right.type.kind === "jsval") {
-    return lowerAnyBinaryInIsland(lowerer, expr, left, right, loc);
-  }
+
   if (left.type.kind === "bigint" && right.type.kind === "bigint") {
     const binary: Partial<
       Record<
@@ -11270,16 +10394,7 @@ function lowerLogicalPair(lowerer: Lowerer, expr: ts.BinaryExpression, left: IrE
       loc,
     };
   }
-  if (left.type.kind === "jsval" || right.type.kind === "jsval") {
-    return {
-      kind: "logical",
-      op: op === ts.SyntaxKind.AmpersandAmpersandToken ? "&&" : "||",
-      left: lowerer.jsvalIn(left, expr.left),
-      right: lowerer.jsvalIn(right, expr.right),
-      type: JSVAL,
-      loc,
-    };
-  }
+
   if (
     isJsSourceFile(expr.getSourceFile()) &&
     op === ts.SyntaxKind.AmpersandAmpersandToken &&
@@ -11338,11 +10453,7 @@ function lowerLogicalPair(lowerer: Lowerer, expr: ts.BinaryExpression, left: IrE
         right.type.kind === "union" ? lowerer.unions.get(right.type.unionId)?.arms : [right.type];
       const rightIsStatic =
         rightArms?.every(
-          (arm) =>
-            arm.kind !== "dyn" &&
-            arm.kind !== "caught" &&
-            arm.kind !== "jsval" &&
-            arm.kind !== "void",
+          (arm) => arm.kind !== "dyn" && arm.kind !== "caught" && arm.kind !== "void",
         ) ?? false;
       if (
         leftArms &&
@@ -11706,12 +10817,6 @@ export function lowerCaughtTypeofTest(
   return null;
 }
 
-/** The static `typeof` answer for a union ARM's IR type, or null when the
- * arm has no fixed answer. Unit arms are known (`typeof undefined` is
- * "undefined", `typeof null` is "object" — JS's oldest wart, preserved
- * exactly); every ref kind is a JS object ("object"), func arms would be
- * "function" (unions never carry them — defensive), and the jsval/dyn/
- * caught/void/union kinds cannot appear as arms. */
 function typeofAnswer(arm: IrType): string | null {
   switch (arm.kind) {
     case "f64":
@@ -12300,24 +11405,8 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
   // h2 compat 'connect' narrowing (lower-server.ts): a union tag test.
   const sockTest = lowerSocketInstanceOf(lowerer, expr, loc);
   if (sockTest !== null) return sockTest;
-  // An ISLAND class as the RHS (`v instanceof Boom` on a package-
-  // exported class — the safeParse-style error narrowing): the spec's
-  // InstanceofOperator runs in the engine (Symbol.hasInstance included;
-  // a non-object RHS throws the engine's own TypeError, catchably).
-  // The LHS marshals in — island handles pass through, static
-  // primitives answer false exactly like the spec's non-object rule,
-  // and unmarshalable statics (class instances, catch bindings — the
-  // payload is a name/message snapshot, never the engine object) keep
-  // jsvalIn's honest fences.
-  if (lowerer.isIslandExpr(expr.right) && !lowerer.caughtLocalOf(expr.left)) {
-    const left = lowerer.jsvalIn(lowerer.lowerExpr(expr.left), expr.left);
-    const right = lowerer.lowerExpr(expr.right);
-    return { kind: "jsOp", op: "instanceOf", args: [left, right], type: BOOL, loc };
-  }
-  if (
-    !lowerer.dynamic &&
-    (lowerer.isStdlibGlobal(expr.right, "Set") || lowerer.isStdlibGlobal(expr.right, "Map"))
-  ) {
+
+  if (lowerer.isStdlibGlobal(expr.right, "Set") || lowerer.isStdlibGlobal(expr.right, "Map")) {
     const collection = lowerer.isStdlibGlobal(expr.right, "Map") ? "map" : "set";
     const value = lowerer.lowerExpr(expr.left);
     if (value.type.kind === "union") {
@@ -12379,18 +11468,6 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
     lowerer.isStdlibGlobal(expr.right, "WeakMap") ||
     lowerer.isStdlibGlobal(expr.right, "WeakSet")
   ) {
-    if (lowerer.dynamic) {
-      const value = lowerer.jsvalIn(lowerer.lowerExpr(expr.left), expr.left);
-      const ctor: IrExpr = {
-        kind: "jsOp",
-        op: "globalGet",
-        name: lowerer.isStdlibGlobal(expr.right, "WeakMap") ? "WeakMap" : "WeakSet",
-        args: [],
-        type: JSVAL,
-        loc,
-      };
-      return { kind: "jsOp", op: "instanceOf", args: [value, ctor], type: BOOL, loc };
-    }
     const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
     return {
       kind: "libCall",
@@ -14440,16 +13517,12 @@ function lowerUnionKeyedRead(
     if (!pushAnswer(shape.indexValue)) return null;
   }
   if (joinArms.length === 0) return null;
-  // The join must be a BUILDABLE union: arm kinds the union invariants
-  // admit (no dyn/jsval/generator arms; containers only beside unit
-  // siblings). The caller owns the diagnostic for a refused join.
+  // The join must satisfy native union invariants. The caller owns the
+  // diagnostic when a container or opaque arm prevents that join.
   if (
     joinArms.length > 1 &&
     (!unionContainerArmsOk(joinArms) ||
-      joinArms.some(
-        (a) =>
-          a.kind === "dyn" || a.kind === "jsval" || a.kind === "generator" || a.kind === "caught",
-      ))
+      joinArms.some((a) => a.kind === "dyn" || a.kind === "generator" || a.kind === "caught"))
   ) {
     return null;
   }

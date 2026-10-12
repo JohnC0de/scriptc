@@ -54,7 +54,7 @@ test("published types close over fields, containers and whole hierarchies", () =
     cls("Other", [["n", F64]]),
   ];
   const mod: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     classes,

@@ -1,15 +1,14 @@
 {
-  "schemaVersion": 1,
-  "compilerVersion": "0.2.9",
+  "schemaVersion": 2,
+  "compilerVersion": "0.2.10",
   "coverage": [
     "Entries are projected mechanically from the compiler's own decision tables: the diagnostics registry, the unsupported-syntax dispatch tables, the stdlib and node-builtin lowering tables, and the supported-builtin-module list. Nothing is hand-maintained; the manifest regenerates byte-identically from the source tree at this version.",
     "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, global functions (parseInt, parseFloat, isNaN, isFinite), and the process surface outside its ambient slice.",
     "The ambient-nondeterminism and ambient-authority surfaces the library sidecar's determinism attestation scans ARE projected even where they lower through dedicated code paths — the Date compositions (stdlib.date.*), perf_hooks' performance.now, and the process global's ambient reads and authority calls (node-builtin.process.*) — so a determinism fence can name every surface the attestation demotes on.",
     "stdlib and node-builtin member entries name surface whose LOWERED call forms are constrained (arity, argument shapes); declared call forms outside the lowered set are refused per site, with code SC2020 for standard-library and node-builtin surface.",
-    "Entries with status 'unsupported' or 'dynamic-only' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
-    "Entries with status 'dynamic-only' compile when the build embeds the dynamic engine (--dynamic); without the flag each use site is refused with the entry's code.",
+    "Entries with status 'unsupported' describe where the named code is raised: forms of the construct outside the supported subset are refused with that code — not that every form of the named feature is refused. Supported forms appear as their own static entries where a table projects them.",
     "The engine-free fetch projection targets Node 24.15.0 with bundled Undici 7.24.4. Each projected row names the differential evidence that guards it; changing the pinned Node or Undici version is an explicit profile update.",
-    "The fetch profile also contains a runtime-reflected census of the selected fetch, abort, Headers, and readable-stream interfaces plus RequestInit/ResponseInit dictionary reads. Static, dynamic-only, and unsupported census rows are projected here; its explicitly out-of-scope metadata rows and adjacent-interface exclusions remain in the profile so absence is deliberate rather than ambiguous.",
+    "The fetch profile also contains a runtime-reflected census of the selected fetch, abort, Headers, and readable-stream interfaces plus RequestInit/ResponseInit dictionary reads. Static and unsupported census rows are projected here; its explicitly out-of-scope metadata rows and adjacent-interface exclusions remain in the profile so absence is deliberate rather than ambiguous.",
     "Process-level diagnostic codes are not surface entries: SC0001-SC0004 are preflight gates, SC1110 is a comptime evaluation failure, SC3001/SC3002 are backend/target tier refusals, SC9001/SC9002 are internal errors.",
     "Entry statuses are projected for the desktop targets. The mobile targets (aarch64-apple-ios, aarch64-apple-ios-simulator, aarch64-linux-android) compile library-mode archives only: the library-admissible surface (what SC4005's async_free requirement and the library link set admit) is supported there, the executable lane refuses those triples with SC3002, and no entry outside the library-admissible surface carries a mobile support claim. iOS archives build for iOS 15.0 on darwin hosts; Android archives build against NDK API level 26.",
     "No scheduling metadata is published; entry ids are the stable diff keys across releases."
@@ -21,7 +20,7 @@
       "name": "package imports",
       "status": "unsupported",
       "code": "SC1010",
-      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), installed npm packages (their code runs under --dynamic), and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, module, and console modules (bare or node:-prefixed) and node:test (node:-prefixed only, like in Node) are supported"
+      "note": "relative imports (./file, ../dir/file), package.json-mediated project imports (#alias via the imports field, self-name references via exports), statically compiled npm packages, and the built-in fs, fs/promises, path, os, url, crypto, zlib, child_process, net, http, tls, https, http2, dgram, dns, util, util/types, string_decoder, querystring, readline, events, stream, stream/promises, stream/consumers, buffer, assert, assert/strict, worker_threads, cluster, tty, async_hooks, timers, timers/promises, diagnostics_channel, perf_hooks, module, and console modules (bare or node:-prefixed) and node:test (node:-prefixed only, like in Node) are supported"
     },
     {
       "id": "diagnostic.sc1012",
@@ -261,29 +260,29 @@
     {
       "id": "diagnostic.sc2010",
       "kind": "diagnostic-fence",
-      "name": "constructs that exist only in the embedded dynamic engine",
-      "status": "dynamic-only",
+      "name": "runtime JavaScript execution",
+      "status": "unsupported",
       "code": "SC2010"
     },
     {
       "id": "diagnostic.sc2011",
       "kind": "diagnostic-fence",
       "name": "'any'-typed values and the operations on them",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2011"
     },
     {
       "id": "diagnostic.sc2012",
       "kind": "diagnostic-fence",
-      "name": "standard-library surface that runs in the embedded dynamic engine",
-      "status": "dynamic-only",
+      "name": "standard-library forms without native lowering",
+      "status": "unsupported",
       "code": "SC2012"
     },
     {
       "id": "diagnostic.sc2013",
       "kind": "diagnostic-fence",
-      "name": "npm package imports and values (the package's implementation runs in the embedded engine)",
-      "status": "dynamic-only",
+      "name": "npm package imports and values without native lowering",
+      "status": "unsupported",
       "code": "SC2013"
     },
     {
@@ -292,13 +291,6 @@
       "name": "standard-library or @types/node surface with no lowering",
       "status": "unsupported",
       "code": "SC2020"
-    },
-    {
-      "id": "diagnostic.sc2030",
-      "kind": "diagnostic-fence",
-      "name": "npm package code that cannot be embedded for the dynamic engine",
-      "status": "unsupported",
-      "code": "SC2030"
     },
     {
       "id": "node-builtin.assert",
@@ -1283,7 +1275,7 @@
       "name": "module.createRequire",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "the lowered shape is a const binding (or a proven stable top-level let/var) over createRequire(import.meta.url) (or __filename) whose require calls take STATIC string literals — builtins, project modules (including #imports), relative .json documents, --npm-static packages, and installed npm packages under --dynamic resolve at build time; dynamic specifiers cannot exist in a compiled binary's fixed module graph"
+      "note": "the lowered shape is a const binding (or a proven stable top-level let/var) over createRequire(import.meta.url) (or __filename) whose require calls take STATIC string literals — builtins, project modules (including #imports), relative .json documents and natively compiled npm packages resolve at build time; dynamic specifiers cannot exist in a compiled binary's fixed module graph"
     },
     {
       "id": "node-builtin.module.isBuiltin",
@@ -2441,7 +2433,7 @@
       "name": "AbortSignal constructor",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Node exposes the interface object but constructing it throws; neither compiler tier currently preserves that constructor behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; Node exposes the interface object but constructing it throws; the compiler does not preserve that constructor behavior"
     },
     {
       "id": "stdlib.abort-signal.dispatch-event",
@@ -2843,7 +2835,7 @@
       "name": "RequestInit.cache",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.credentials",
@@ -2851,15 +2843,15 @@
       "name": "RequestInit.credentials",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.dispatcher",
       "kind": "stdlib",
       "name": "RequestInit.dispatcher",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic tier recognizes Vercel CLI's EnvProxyDispatcher and applies equivalent native environment-proxy routing"
+      "note": "Node 24.15.0 / Undici 7.24.4; custom dispatchers are unsupported; native environment-proxy routing uses NODE_USE_ENV_PROXY"
     },
     {
       "id": "stdlib.fetch.request-init.duplex",
@@ -2881,7 +2873,7 @@
       "name": "RequestInit.integrity",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.keepalive",
@@ -2889,7 +2881,7 @@
       "name": "RequestInit.keepalive",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.method",
@@ -2904,7 +2896,7 @@
       "name": "RequestInit.mode",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.priority",
@@ -2912,7 +2904,7 @@
       "name": "RequestInit.priority",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.redirect",
@@ -2927,7 +2919,7 @@
       "name": "RequestInit.referrer",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.referrerPolicy",
@@ -2935,7 +2927,7 @@
       "name": "RequestInit.referrerPolicy",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.fetch.request-init.signal",
@@ -2950,7 +2942,7 @@
       "name": "RequestInit.window",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior"
+      "note": "Node 24.15.0 / Undici 7.24.4; the compiler does not preserve this RequestInit member's conversion or transport behavior"
     },
     {
       "id": "stdlib.headers.append",
@@ -2977,7 +2969,7 @@
       "id": "stdlib.headers.entries",
       "kind": "stdlib",
       "name": "Headers.entries",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
       "note": "Node 24.15.0 / Undici 7.24.4; native Headers iteration does not yet expose a static iterator handle"
     },
@@ -3013,7 +3005,7 @@
       "id": "stdlib.headers.keys",
       "kind": "stdlib",
       "name": "Headers.keys",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
       "note": "Node 24.15.0 / Undici 7.24.4; native Headers iteration does not yet expose a static iterator handle"
     },
@@ -3028,7 +3020,7 @@
       "id": "stdlib.headers.symbol.iterator",
       "kind": "stdlib",
       "name": "Headers.[Symbol.iterator]",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
       "note": "Node 24.15.0 / Undici 7.24.4; native Headers iteration does not expose an engine-free iterator handle"
     },
@@ -3036,7 +3028,7 @@
       "id": "stdlib.headers.values",
       "kind": "stdlib",
       "name": "Headers.values",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
       "note": "Node 24.15.0 / Undici 7.24.4; native Headers iteration does not yet expose a static iterator handle"
     },
@@ -3158,105 +3150,105 @@
       "kind": "stdlib",
       "name": "Math.abs",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.acos",
       "kind": "stdlib",
       "name": "Math.acos",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.acosh",
       "kind": "stdlib",
       "name": "Math.acosh",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.asin",
       "kind": "stdlib",
       "name": "Math.asin",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.asinh",
       "kind": "stdlib",
       "name": "Math.asinh",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.atan",
       "kind": "stdlib",
       "name": "Math.atan",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.atan2",
       "kind": "stdlib",
       "name": "Math.atan2",
       "status": "static",
-      "note": "compiles statically at arity 2; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 2; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.atanh",
       "kind": "stdlib",
       "name": "Math.atanh",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.cbrt",
       "kind": "stdlib",
       "name": "Math.cbrt",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.ceil",
       "kind": "stdlib",
       "name": "Math.ceil",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.clz32",
       "kind": "stdlib",
       "name": "Math.clz32",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.cos",
       "kind": "stdlib",
       "name": "Math.cos",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.cosh",
       "kind": "stdlib",
       "name": "Math.cosh",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.exp",
       "kind": "stdlib",
       "name": "Math.exp",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.expm1",
       "kind": "stdlib",
       "name": "Math.expm1",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.floor",
@@ -3270,7 +3262,7 @@
       "kind": "stdlib",
       "name": "Math.fround",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.hypot",
@@ -3284,35 +3276,35 @@
       "kind": "stdlib",
       "name": "Math.imul",
       "status": "static",
-      "note": "compiles statically at arity 2; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 2; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.log",
       "kind": "stdlib",
       "name": "Math.log",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.log10",
       "kind": "stdlib",
       "name": "Math.log10",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.log1p",
       "kind": "stdlib",
       "name": "Math.log1p",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.log2",
       "kind": "stdlib",
       "name": "Math.log2",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.max",
@@ -3333,7 +3325,7 @@
       "kind": "stdlib",
       "name": "Math.pow",
       "status": "static",
-      "note": "compiles statically at arity 2; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 2; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.random",
@@ -3347,56 +3339,56 @@
       "kind": "stdlib",
       "name": "Math.round",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.sign",
       "kind": "stdlib",
       "name": "Math.sign",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.sin",
       "kind": "stdlib",
       "name": "Math.sin",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.sinh",
       "kind": "stdlib",
       "name": "Math.sinh",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.sqrt",
       "kind": "stdlib",
       "name": "Math.sqrt",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.tan",
       "kind": "stdlib",
       "name": "Math.tan",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.tanh",
       "kind": "stdlib",
       "name": "Math.tanh",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.math.trunc",
       "kind": "stdlib",
       "name": "Math.trunc",
       "status": "static",
-      "note": "compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic)"
+      "note": "compiles statically at arity 1; other declared call shapes are refused with SC2012"
     },
     {
       "id": "stdlib.number.toFixed",
@@ -3409,14 +3401,14 @@
       "id": "stdlib.number.toPrecision",
       "kind": "stdlib",
       "name": "number.prototype.toPrecision",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2012"
     },
     {
       "id": "stdlib.number.toString",
       "kind": "stdlib",
       "name": "number.prototype.toString",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2012"
     },
     {
@@ -3432,7 +3424,7 @@
       "name": "ReadableStreamDefaultController constructor",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the constructor object is unavailable in the dynamic engine; static controller handles come from underlying-source callbacks"
+      "note": "Node 24.15.0 / Undici 7.24.4; controller handles come from underlying-source callbacks; the constructor object is unsupported"
     },
     {
       "id": "stdlib.readable-stream-default-controller.desired-size",
@@ -3475,7 +3467,7 @@
       "name": "ReadableStreamDefaultReader constructor",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the constructor object is unavailable in the dynamic engine; static reader handles come from ReadableStream.getReader()"
+      "note": "Node 24.15.0 / Undici 7.24.4; reader handles come from ReadableStream.getReader(); the constructor object is unsupported"
     },
     {
       "id": "stdlib.readable-stream-default-reader.read",
@@ -3530,7 +3522,7 @@
       "id": "stdlib.readable-stream.pipeThrough",
       "kind": "stdlib",
       "name": "ReadableStream.pipeThrough",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
       "note": "Node 24.15.0 / Undici 7.24.4; the wider Web Streams graph is outside the native readable-stream slice"
     },
@@ -3540,7 +3532,7 @@
       "name": "ReadableStream.pipeTo",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation"
+      "note": "Node 24.15.0 / Undici 7.24.4; this operation is outside the native readable-stream implementation"
     },
     {
       "id": "stdlib.readable-stream.symbol.asyncIterator",
@@ -3548,7 +3540,7 @@
       "name": "ReadableStream.[Symbol.asyncIterator]",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; explicit symbol access and stored iterator handles have no compiler lowering in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; explicit symbol access and stored iterator handles have no compiler lowering"
     },
     {
       "id": "stdlib.readable-stream.tee",
@@ -3556,15 +3548,15 @@
       "name": "ReadableStream.tee",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation"
+      "note": "Node 24.15.0 / Undici 7.24.4; this operation is outside the native readable-stream implementation"
     },
     {
       "id": "stdlib.readable-stream.values",
       "kind": "stdlib",
       "name": "ReadableStream.values",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; storing or driving the first-class iterator handle requires --dynamic"
+      "note": "Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; storing or driving the first-class iterator handle is unsupported"
     },
     {
       "id": "stdlib.request.arrayBuffer",
@@ -3579,7 +3571,7 @@
       "name": "Request.attribute",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface"
     },
     {
       "id": "stdlib.request.blob",
@@ -3587,7 +3579,7 @@
       "name": "Request.blob",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface"
     },
     {
       "id": "stdlib.request.body",
@@ -3623,7 +3615,7 @@
       "name": "Request.clone",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface"
     },
     {
       "id": "stdlib.request.constructor",
@@ -3659,7 +3651,7 @@
       "name": "Request.formData",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface"
     },
     {
       "id": "stdlib.request.headers",
@@ -3793,7 +3785,7 @@
       "name": "Response.blob",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation"
+      "note": "Node 24.15.0 / Undici 7.24.4; the native fetch runtime does not implement this Response operation"
     },
     {
       "id": "stdlib.response.body",
@@ -3822,7 +3814,7 @@
       "name": "Response.clone",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation"
+      "note": "Node 24.15.0 / Undici 7.24.4; the native fetch runtime does not implement this Response operation"
     },
     {
       "id": "stdlib.response.constructor",
@@ -3837,7 +3829,7 @@
       "name": "Response.formData",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; the dynamic fetch bridge does not implement this Response operation"
+      "note": "Node 24.15.0 / Undici 7.24.4; the native fetch runtime does not implement this Response operation"
     },
     {
       "id": "stdlib.response.headers",
@@ -3873,7 +3865,7 @@
       "name": "Response.error",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering"
     },
     {
       "id": "stdlib.response.static.json",
@@ -3881,7 +3873,7 @@
       "name": "Response.json",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering"
     },
     {
       "id": "stdlib.response.static.redirect",
@@ -3889,7 +3881,7 @@
       "name": "Response.redirect",
       "status": "unsupported",
       "code": "SC2020",
-      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering in either tier"
+      "note": "Node 24.15.0 / Undici 7.24.4; Response static constructor-object operations have no compiler lowering"
     },
     {
       "id": "stdlib.response.status",
@@ -3916,7 +3908,7 @@
       "id": "stdlib.response.type",
       "kind": "stdlib",
       "name": "Response.type",
-      "status": "dynamic-only",
+      "status": "unsupported",
       "code": "SC2020",
       "note": "Node 24.15.0 / Undici 7.24.4; the member is outside the native static handle projection"
     },

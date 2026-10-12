@@ -37,7 +37,7 @@ $ file fib.exe
 fib.exe: PE32+ executable (console) x86-64, for MS Windows
 ```
 
-The full corpus runs in a differential lane against Windows Node, including `--dynamic` programs and `child_process`. The Windows fixture lanes also exercise real loopback traffic through `net`, `http`, `https`, `tls`, `http2`, `dgram`, and `dns`, plus the native `fetch` implementation (including redirects, streaming bodies, compression, cancellation, and proxy handling).
+The full corpus runs in a differential lane against Windows Node, including `child_process`. The Windows fixture lanes also exercise real loopback traffic through `net`, `http`, `https`, `tls`, `http2`, `dgram`, and `dns`, plus the native `fetch` implementation (including redirects, streaming bodies, compression, cancellation, and proxy handling).
 
 Windows executable builds use the console subsystem by default. Set <code>--windows-subsystem=gui</code> for an application that owns its own window so Windows does not open an extra console window. This selects the PE subsystem at link time.
 
@@ -65,7 +65,7 @@ The full library-mode feature set applies: profile-declared exports and ABI entr
 
 Set <code>SCRIPTC_TARGET=wasm32-wasi</code> to produce a standalone <code>.wasm</code> module. Without <code>-o</code>, <code>scriptc build hello.ts</code> writes <code>.scriptc/hello.wasm</code>. Compilation does not require Node. <code>scriptc run</code> requires Node.js 24 or newer on <code>PATH</code> to host the module with Node's WASI implementation, inherits stdio and environment, preopens the current working directory as <code>/</code>, and maps the host platform's temporary directory to the guest's <code>/tmp</code>. A built module can run in another WASI Preview 1 host instead.
 
-WASI is a production LLVM target with the same language tiers as the native targets. Its 32-bit LLVM ABI supports collections, closures, exceptions, classes, checked dynamic values, async/await, promises, synchronous and asynchronous generators, timers, stdin/readline events, process-exit listeners, filesystem callbacks and promises, and the <code>--dynamic</code> QuickJS island.
+WASI is a production LLVM target with the same native compilation model as the native targets. Its 32-bit LLVM ABI supports collections, closures, exceptions, classes, checked dynamic values, async/await, promises, synchronous and asynchronous generators, timers, stdin/readline events, process-exit listeners, filesystem callbacks and promises.
 
 The remaining executable boundary is host capability, not language coverage. WASI Preview 1 has no portable socket, process-spawn, OS-signal, network-interface, or filesystem-notification APIs. Networking/fetch, child processes, signal APIs, <code>os.networkInterfaces()</code>, and <code>fs.watch</code> therefore fail before linking with diagnostic <code>SC3002</code>. <code>--sanitize</code> and native FFI are unavailable too. Filesystem behavior is bounded by the host's preopens, and process/OS introspection follows WASI's reduced model.
 
@@ -91,17 +91,17 @@ The remaining executable boundary is host capability, not language coverage. WAS
     <tr>
       <td>macOS arm64 / x64</td>
       <td>native host helper + runtime pack</td>
-      <td>Full surface, <code>--dynamic</code>, sanitizer lane (external C route)</td>
+      <td>Native surface, sanitizer lane (external C route)</td>
     </tr>
     <tr>
       <td>Linux arm64 / x86_64</td>
       <td>native host helper + runtime pack; <code>SCRIPTC_TARGET=&lt;arch&gt;-linux-musl</code> selects musl</td>
-      <td>Static and dynamic surfaces incl. servers, TLS, fetch, fs.watch, and child_process; executable linking needs the matching libc/sysroot</td>
+      <td>Native surface incl. servers, TLS, fetch, fs.watch, and child_process; executable linking needs the matching libc/sysroot</td>
     </tr>
     <tr>
       <td>Windows x86_64</td>
       <td>native x64 MSVC helper + runtime pack</td>
-      <td>Static and dynamic surfaces incl. servers, TLS, fetch, and child_process; executable linking uses Zig’s Windows sysroot</td>
+      <td>Native surface incl. servers, TLS, fetch, and child_process; executable linking uses Zig’s Windows sysroot</td>
     </tr>
     <tr>
       <td>iOS arm64 (device and simulator)</td>
@@ -116,7 +116,7 @@ The remaining executable boundary is host capability, not language coverage. WAS
     <tr>
       <td>WebAssembly / WASI Preview 1</td>
       <td>matching host helper + WASI runtime pack</td>
-      <td>Production LLVM target; full language and dynamic tiers, bounded by WASI P1 host capabilities</td>
+      <td>Production LLVM target; native language surface, bounded by WASI P1 host capabilities</td>
     </tr>
   </tbody>
 </table>

@@ -8,7 +8,6 @@ import {
   BOOL,
   DYN,
   type IrExpr,
-  JSVAL,
   STRING,
   type SrcLoc,
   canBoxFuncIntoDyn,
@@ -178,47 +177,7 @@ export function lowerJsonMethodCall(
         ? { kind: "toString", operand: raw, type: STRING, loc }
         : { kind: "dynCheck", value: raw, type: lowerer.withUndefinedArm(STRING), loc };
     }
-    // An ISLAND value (`JSON.stringify(err)` on a package handle — the
-    // island error-inspection idiom): the ENGINE's own JSON.stringify
-    // runs, so key order, nesting, toJSON, and getters match Node by
-    // construction, and the result converts to a static string through
-    // the engine's own ToString — a root the stringify DROPS (undefined,
-    // a bare function, a symbol) produces the TEXT "undefined" where
-    // Node produces the undefined VALUE, exactly the dyn-root rule
-    // (SEMANTICS.md 285: tsc's own lib types the return `string`, so no
-    // statically-typed consumer can distinguish them). The compile-time-
-    // resolved indent rides as the engine's own space argument.
-    if (value.type.kind === "jsval") {
-      const json: IrExpr = {
-        kind: "jsOp",
-        op: "globalGet",
-        name: "JSON",
-        args: [],
-        type: JSVAL,
-        loc,
-      };
-      const args: IrExpr[] = [json, value];
-      if (indent !== "") {
-        args.push(
-          { kind: "jsOp", op: "nullLit", args: [], type: JSVAL, loc },
-          {
-            kind: "jsMarshal",
-            value: { kind: "strLit", value: indent, type: STRING, loc },
-            type: JSVAL,
-            loc,
-          },
-        );
-      }
-      const raw: IrExpr = {
-        kind: "jsOp",
-        op: "callMethod",
-        name: "stringify",
-        args,
-        type: JSVAL,
-        loc,
-      };
-      return { kind: "jsOp", op: "toStr", args: [raw], type: STRING, loc };
-    }
+
     if (!lowerer.jsonStringifySafe(value.type)) {
       // Bare undefined-armed unions get their own wording: Node's
       // stringify of bare undefined is not a string at all — per-type

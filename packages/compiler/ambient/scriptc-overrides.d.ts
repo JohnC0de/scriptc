@@ -10,42 +10,18 @@
  * rejected over an override-manufactured error; the affected sites meet the
  * lowerer's honest fences instead (SC1100's checked-cast family for
  * JSON.parse results, the executor fences for Promise shapes). The
- * primitives every world needs (comptime, setTimeout, __island_eval) live
+ * primitives every world needs (comptime, setTimeout) live
  * in scriptc.d.ts, which ships to BOTH programs. */
 
-/* `at(): string`, not the lib's `string | undefined`: undefined is
- * unrepresentable, so an out-of-range at() THROWS a catchable TypeError at
- * the validated island exit instead of returning undefined (documented
- * divergence, SEMANTICS.md). */
 interface String {
   at(index: number): string;
 }
 
-/* Object.values/entries with the actual field-value union, not the lib's
- * `any` (the lib's precise overloads only cover index-signature and
- * ArrayLike sources). A PRECISION override, not a divergence: the lowering
- * emits the field list statically and the values are exactly T[keyof T] —
- * without this the result would be `any`-typed and drag every downstream
- * use into the island. An opaque object has no statically known keys;
- * its actual values remain unknown instead of becoming an impossible
- * never payload. */
 interface ObjectConstructor {
   values<T extends object>(o: T): Array<keyof T extends never ? unknown : T[keyof T]>;
   entries<T extends object>(o: T): Array<[string, keyof T extends never ? unknown : T[keyof T]]>;
 }
 
-/* `parse` returns `unknown`, not the lib's `any` — the dynamic boundary. A
- * checked cast (`JSON.parse(s) as Config`) validates the value against the
- * target type at runtime and THROWS on mismatch — the mechanism that makes
- * trusting TS types sound at data boundaries. Reviver results use the same
- * checked boundary. A function replacer can omit the root, so that form
- * returns string | undefined even though the stock lib promises string.
- *
- * `stringify` takes `unknown`, not the lib's `any`: the same honest
- * surface, but the parameter must not CONTEXTUALLY TYPE literal arguments
- * as `any` (an any-typed slot is the island boundary; `JSON.stringify([1,
- * 2])` must keep building a static array and serializing it
- * type-directedly). */
 interface JSON {
   parse(text: string): unknown;
   parse(text: string, reviver: (this: unknown, key: string, value: unknown) => unknown): unknown;

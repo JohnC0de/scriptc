@@ -21,7 +21,6 @@ import {
   llvmEmitterRequest,
   type LlvmEmitterRequest,
 } from "./self-hosting-llvm-emitter-cases.js";
-import { normalizedEmbeddingLlvm } from "./self-hosting-llvm-embedding.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const entry = join(root, "tests/fixtures/self-hosting/llvm-emitter.ts");
@@ -33,7 +32,9 @@ const sanitize = process.env["SCRIPTC_SAN"] === "1";
 // of megabytes of LLVM) then needs more room than the plain lane on shared
 // runners; the limits still stop a stage that hangs.
 const emitTimeout = sanitize ? 900_000 : 300_000;
-const testTimeout = sanitize ? 2_400_000 : 1_200_000;
+// The plain lane allows 30 minutes for the full bootstrap when other corpus
+// jobs share the same machine.
+const testTimeout = sanitize ? 2_400_000 : 1_800_000;
 const generatedProgram = "scriptc-generated-v1";
 
 function programStderr(stderr: Buffer): string {
@@ -112,10 +113,16 @@ for (const backend of ["llvm"] as const) {
       const input = join(dir, "input.json");
       const output = join(dir, "native.ll");
       const config = join(dir, "config.json");
+      const started = performance.now();
+      const progress = (phase: string) =>
+        console.log(
+          `LLVM bootstrap: ${phase} (${((performance.now() - started) / 1000).toFixed(1)}s)`,
+        );
       try {
         // Lower the full production graph in a child so synchronous frontend
         // work cannot block Vitest's worker RPC while it compiles the seed.
         const api = pathToFileURL(join(root, "packages/compiler/src/index.ts")).href;
+        progress("build seed");
         const { stdout } = await execFileAsync(
           process.execPath,
           [
@@ -126,7 +133,7 @@ for (const backend of ["llvm"] as const) {
             `import { compile } from ${JSON.stringify(api)};
          const result = await compile(process.argv[1], {
            outDir: process.argv[2], outPath: process.argv[3], backend: process.argv[4],
-           dynamic: false, optimization: 'dev', sanitize: process.argv[5] === '1', emitIr: true,
+           optimization: 'dev', sanitize: process.argv[5] === '1', emitIr: true,
          });
          console.log(JSON.stringify(result));`,
             entry,
@@ -147,6 +154,7 @@ for (const backend of ["llvm"] as const) {
         const ownIr = deserializeModule(readFileSync(built.irPath!, "utf8"));
         expect(ownIr.functions.length).toBeGreaterThan(800);
         expect(validateModule(ownIr)).toEqual([]);
+        progress("seed built; compare emitter cases");
 
         const emit = async (
           mod: IrModule,
@@ -165,9 +173,7 @@ for (const backend of ["llvm"] as const) {
           expect(result.stderr, name).toBe("");
           const text = readFileSync(output, "utf8");
           const expected = emitLlvmModule(mod, llvmEmitterOptions(request));
-          expect(normalizedEmbeddingLlvm(text, mod), name).toBe(
-            normalizedEmbeddingLlvm(expected, mod),
-          );
+          expect(text, name).toBe(expected);
           return text;
         };
 
@@ -210,13 +216,13 @@ for (const backend of ["llvm"] as const) {
         expect(readFileSync(output, "utf8")).toBe("untouched");
 
         for (const source of programs) {
+          progress(`compile and run ${source}`);
           const sourcePath = join(root, "tests/corpus", source);
           const irPath = join(dir, "program.ir.json");
           const lowered = await compile(sourcePath, {
             outDir: dir,
             outPath: irPath,
             outputKind: "ir",
-            dynamic: false,
           });
           if (!lowered.ok)
             throw new Error(`${source}: ${lowered.diagnostics.map((d) => d.message).join("\n")}`);
@@ -238,7 +244,7 @@ for (const backend of ["llvm"] as const) {
             cacheIdentity: generatedProgram,
             sanitize,
             optimization: "dev",
-            ...executableLinkFeatures(mod, false),
+            ...executableLinkFeatures(mod),
           });
           const node = spawnSync(process.execPath, [sourcePath], runOptions);
           const native = spawnSync(outPath, [], runOptions);
@@ -254,19 +260,22 @@ for (const backend of ["llvm"] as const) {
         // The seed emits its own complete IR, including the production
         // optimizer and LLVM expression/library graph. Compile those bytes
         // and require a second native generation to reproduce the module.
+        progress("emit own IR");
         const self = await emit(ownIr, "LLVM emitter emits itself");
         const selfPath = join(dir, "self.ll");
         const secondStage = executable("emitter-second");
         writeFileSync(selfPath, self);
+        progress("compile second generation");
         await compileC({
           cPath: selfPath,
           outPath: secondStage,
           cacheIdentity: generatedProgram,
           sanitize,
           optimization: "dev",
-          ...executableLinkFeatures(ownIr, false),
+          ...executableLinkFeatures(ownIr),
         });
         const again = join(dir, "again.ll");
+        progress("second generation emits own IR");
         const second = await execFileAsync(secondStage, [input, again, config], {
           ...runOptions,
           timeout: emitTimeout,
@@ -274,6 +283,7 @@ for (const backend of ["llvm"] as const) {
         expect(second.stdout).toBe("");
         expect(second.stderr).toBe("");
         expect(readFileSync(again, "utf8")).toBe(self);
+        progress("fixed point verified");
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

@@ -16,7 +16,7 @@ test("Map iterator construction refuses different reference layouts", () => {
       console.log(new Map<string, { id: number }>(records.entries()).size);
     `,
     );
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.diagnostics).toEqual(
       expect.arrayContaining([
@@ -62,7 +62,6 @@ test("array and Map consumers validate hidden reference layouts before exposing 
     `,
     );
     const result = await compile(entry, {
-      dynamic: false,
       optimization: "dev",
       sanitize: process.env["SCRIPTC_SAN"] === "1",
       outDir: dir,

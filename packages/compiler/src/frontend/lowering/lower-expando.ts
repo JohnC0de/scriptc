@@ -90,11 +90,11 @@ function memberKeyOf(
  * references qualify — routing is by symbol identity. */
 function expandoFnSymbolOf(lowerer: Lowerer, recv: ts.Expression): ts.Symbol | null {
   if (!ts.isIdentifier(recv)) return null;
-  // Island and checked-dynamic receivers never qualify by construction:
+
   // the declaration-shape checks below (a function DECLARATION, or a
   // const whose initializer is a function/arrow LITERAL in a TS file)
   // exclude import bindings, call results, and JS-file values — their
-  // member stories (engine property writes, dyn keyed writes) stay put.
+  // existing member paths stay put.
   const sym = lowerer.resolveValueSymbol(recv);
   if (!sym) return null;
   const decl = lowerer.checker.valueDeclarationOf(sym);
@@ -110,9 +110,8 @@ function expandoFnSymbolOf(lowerer: Lowerer, recv: ts.Expression): ts.Symbol | n
     )
       return null;
     if ((ts.getCombinedNodeFlags(decl) & ts.NodeFlags.Const) === 0) return null;
-    // The const's VALUE must be a function created here (arrow/function
-    // initializer) — a callable TYPE alone can be satisfied by island
-    // handles and other values whose members live elsewhere.
+    // The const's value must be a function created here, not an imported
+    // value whose properties belong to another lowering path.
     let init = decl.initializer;
     while (
       init !== undefined &&

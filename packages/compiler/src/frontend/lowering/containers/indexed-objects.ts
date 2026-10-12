@@ -444,7 +444,7 @@ export function lowerObjectFromEntriesCall(
     ts.isSpreadElement(call.arguments[0]!)
   )
     return null;
-  if (lowerer.dynamic) return null;
+
   return {
     kind: "libCall",
     fn: "dyn.fromEntries",

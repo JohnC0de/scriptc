@@ -29,10 +29,9 @@ const releaseContext = { context: "register:visit" };
 const profile = (format: number, functions: unknown[]) => ({ ffi_format: format, functions });
 
 test("the production FFI profile parser lowers entirely statically", () => {
-  const { coverage } = analyze(entry, { dynamic: false });
+  const { coverage } = analyze(entry, {});
   expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
   expect(coverage.stats.statementsFailed, JSON.stringify(coverage.diagnostics)).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -46,7 +45,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: join(dir, process.platform === "win32" ? "profile.exe" : "profile"),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });

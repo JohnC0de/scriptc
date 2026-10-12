@@ -2,7 +2,7 @@ import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, own } from "../lowerer.js";
 import { lowerCheckedPredicateValue } from "../lower-builtin-values.js";
 import { locOf } from "../../program.js";
-import { BOOL, F64, type IrExpr, type IrLibFn, JSVAL } from "../../../ir/ir.js";
+import { BOOL, F64, type IrExpr, type IrLibFn } from "../../../ir/ir.js";
 import { lowerBuiltinValuePreservingUndefined, lowerOptionalNumberPredicate } from "./arguments.js";
 import { tryLowerExpression } from "../expressions/try-lower-expression.js";
 import { lowerStaticNumberGlobal } from "../lower-calls.js";
@@ -43,12 +43,6 @@ const NUMBER_CONSTANTS: Record<string, number | undefined> = {
   NEGATIVE_INFINITY: -Infinity,
 };
 
-/** Method calls on THE `Number` global: the predicate statics lower to
- * plain C over f64 arguments; `Number.parseFloat`/`Number.parseInt` ARE
- * the global parsers (the spec aliases them), so they get the same
- * island lowering — engine execution under --dynamic, per-site SC2012
- * without it (parseInt takes an explicit radix, like the global). Null
- * for non-Number receivers. */
 export function lowerNumberStaticCall(
   lowerer: Lowerer,
   call: ts.CallExpression,
@@ -65,31 +59,7 @@ export function lowerNumberStaticCall(
     }
     const argNode = call.arguments[0]!;
     const arg = lowerBuiltinValuePreservingUndefined(lowerer, argNode);
-    // An ISLAND ('any'-typed) argument evaluates the predicate in the
-    // engine — the statics never coerce, so the engine's answer over the
-    // real value is JS-exact where a static fence would refuse the
-    // editorconfig `(value) => Number.isSafeInteger(value)` shape; the
-    // boolean exits validated like every island boolean.
-    if (arg.type.kind === "jsval") {
-      lowerer.requireDynamicApi(`'Number.${member}'`, call);
-      const numberGlobal: IrExpr = {
-        kind: "jsOp",
-        op: "globalGet",
-        name: "Number",
-        args: [],
-        type: JSVAL,
-        loc,
-      };
-      const raw: IrExpr = {
-        kind: "jsOp",
-        op: "callMethod",
-        name: member,
-        args: [numberGlobal, arg],
-        type: JSVAL,
-        loc,
-      };
-      return { kind: "jsExit", value: raw, type: BOOL, loc };
-    }
+
     const optional = lowerOptionalNumberPredicate(lowerer, arg, fn, loc);
     if (optional) return optional;
     if (arg.type.kind !== "f64") {
@@ -112,40 +82,21 @@ export function lowerNumberStaticCall(
     }
     // Number.parseFloat/Number.parseInt ARE the global parsers: over a
     // string argument they lower to the same static parse (parseInt with
-    // its explicit radix); only the coercing argument shapes need the
-    // engine.
+    // its explicit radix); only the coercing argument shapes are refused.
     const probed = tryLowerExpression(lowerer, call.arguments[0]!);
     if (probed !== null && isStringLike(lowerer, probed.type)) {
       const parsed = lowerStaticNumberGlobal(lowerer, member, call, call.arguments, loc);
       if (parsed !== null) return parsed;
     }
-    const argText = lowerer.dynamic
-      ? ""
-      : probed !== null
+    const argText =
+      probed !== null
         ? lowerer.fmt(probed.type)
         : lowerer.checker.typeToString(lowerer.checker.getTypeAtLocation(call.arguments[0]!));
-    lowerer.requireDynamicApi(
-      `'Number.${member}' with a '${argText}' argument (only a string argument compiles statically)`,
+    lowerer.refuseUnsupportedApi(
+      `'Number.${member}' with a '${argText}' argument`,
       call,
-      "convert the argument explicitly first (for example String(x), or narrow the union), or build with --dynamic to run the coercing call in the embedded engine (adds ~620KB to the binary)",
+      "only a string argument compiles statically: convert the argument explicitly first (for example String(x), or narrow the union)",
     );
-    const callee: IrExpr = {
-      kind: "jsOp",
-      op: "globalGet",
-      name: member,
-      args: [],
-      type: JSVAL,
-      loc,
-    };
-    const args = call.arguments.map((a) => lowerer.jsvalIn(lowerer.lowerExpr(a), a));
-    const result: IrExpr = {
-      kind: "jsOp",
-      op: "callFn",
-      args: [callee, ...args],
-      type: JSVAL,
-      loc,
-    };
-    return { kind: "jsExit", value: result, type: F64, loc };
   }
   return null; // other Number statics land on the member fence
 }

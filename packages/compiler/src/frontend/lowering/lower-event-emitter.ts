@@ -644,7 +644,6 @@ function dynListenerFlavor(lowerer: Lowerer, node: ts.Expression): "dyn" | "func
   // (the TS lane never reaches this: tsc rejects the argument first).
   if (
     t &&
-    t.kind !== "jsval" &&
     (isUnitType(t) ||
       canConvertToDyn(
         t,
@@ -862,7 +861,7 @@ function lowerListenerArg(
             return null;
           }
         })();
-        if (mapped === null || mapped.kind === "dyn" || mapped.kind === "jsval") {
+        if (mapped === null || mapped.kind === "dyn") {
           lowerer.noLowering(
             `'${member}' listeners with unannotated parameters`,
             p,
@@ -1025,8 +1024,7 @@ export function lowerEmitterMethodCall(
         const nT = lowerer.mapTypeOf(lowerer.typeOf(args[0]!));
         const tT = lowerer.mapTypeOf(lowerer.typeOf(args[1]!));
         const nPure = ts.isIdentifier(args[0]!) || ts.isLiteralExpression(args[0]!);
-        const targetNotEmitter =
-          tT !== null && tT.kind !== "dyn" && tT.kind !== "jsval" && !(tT.kind === "object");
+        const targetNotEmitter = tT !== null && tT.kind !== "dyn" && !(tT.kind === "object");
         if (nT?.kind === "f64" && nPure && targetNotEmitter) {
           const raw = lowerer.lowerExpr(args[1]!);
           if (
@@ -1598,7 +1596,7 @@ export function emitOverrideShapeReason(
     const jsUnannotated =
       p0.type === undefined &&
       isJsSourceFile(member.getSourceFile()) &&
-      (p0T === null || p0T.kind === "dyn" || p0T.kind === "jsval");
+      (p0T === null || p0T.kind === "dyn");
     if (p0T?.kind !== "string" && !jsUnannotated) {
       return "the event parameter must be typed 'string' (symbol event names have no lowering)";
     }

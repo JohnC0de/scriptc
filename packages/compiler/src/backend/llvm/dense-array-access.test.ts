@@ -25,7 +25,7 @@ const index = ref("i", F64);
 
 function module(name: string, returnType: IrExpr["type"], body: IrStmt[]): IrModule {
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "__main",
     functions: [

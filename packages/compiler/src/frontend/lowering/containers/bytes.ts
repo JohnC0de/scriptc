@@ -957,7 +957,7 @@ function lowerBufferInstanceMethod(
   // The checked-dynamic crossing for a compare/equals argument slot: dyn
   // passes through, convertible statics (the invalid-input probes'
   // literals) wrap in dynFrom, `undefined` literals ride the same wrap.
-  // Fences (never returns) when the value cannot cross — an island jsval.
+
   const chkArg = (i: number): IrExpr => {
     // Object literals take the dyn literal path directly (method members
     // box as dyn functions — the typed record fence never applies).

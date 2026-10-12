@@ -74,8 +74,5 @@ export function isSafeToMoveConditionEarlier(expr: IrExpr): boolean {
   if (expr.kind === "logical") {
     return isSafeToMoveConditionEarlier(expr.left) && isSafeToMoveConditionEarlier(expr.right);
   }
-  if (expr.kind === "jsOp" && (expr.op === "truthy" || expr.op === "not")) {
-    return expr.args.every(isSafeToRepeat);
-  }
   return isSafeToRepeat(expr);
 }

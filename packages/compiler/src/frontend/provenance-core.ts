@@ -1,33 +1,3 @@
-/* `--provenance-sources` — the provenance-assisted static compilation
- * pipeline (EXPERIMENTAL prototype; the registry doc in
- * provenance-registry.ts states the thesis).
- *
- * For every bare npm specifier the entry's module graph imports, this
- * asks the npm registry for the package's PROVENANCE ATTESTATION
- * (GET registry.npmjs.org/-/npm/v1/attestations/<pkg>@<version> — the
- * SLSA predicate names the exact {repository, commit} the published dist
- * was built from), fetches that source tree once (content-addressed cache
- * under ~/.cache/scriptc/provenance/<gitCommit>), locates the package
- * directory inside it (monorepos publish from subdirectories), and maps
- * the published entry to its TypeScript source (dist/lib/build targets
- * rewritten to their src twins). Mapped packages compile as ordinary
- * program modules — real types, real statements, the static frontier —
- * and everything that cannot be mapped FALLS BACK to the island path
- * with a note; a fallback is never a build failure.
- *
- * PRODUCTION GAPS, deliberately unbuilt in the prototype: no sigstore
- * bundle verification (the attestation is trusted as served), no
- * dist-tarball ↔ source build reproduction (the behavior differential is
- * the honest check today), source-entry mapping is heuristic (exports
- * targets rewritten dist→src), and transitive dependency versions
- * resolve from the DRIVER's installed tree rather than the package's own
- * lockfile.
- *
- * Offline/test hook: SCRIPTC_PROVENANCE_MANIFEST=<path.json> pre-seeds
- * {"packages": {"<name>": {"dir": "<source pkg dir>", "commit"?, "repo"?}}}
- * — those packages skip the network entirely (harness fixtures ride
- * this); unlisted packages still take the live pipeline. */
-
 import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
@@ -362,10 +332,6 @@ function readManifest(): Map<string, ManifestEntry> {
   return out;
 }
 
-/** Resolves provenance sources for everything the entry's module graph
- * imports (one transitive round per newly-mapped tree: source imports of
- * OTHER packages try the pipeline too). Never throws for a package
- * failure — those become notes and the package keeps its island path. */
 export async function resolveProvenanceSourcesWithParser(
   entryPath: string,
   parseSourceFile: ProvenanceParser,
@@ -398,14 +364,16 @@ export async function resolveProvenanceSourcesWithParser(
     if (processed.size >= MAX_PACKAGES) {
       processed.set(name, null);
       notes.push(
-        `${name}: skipped — provenance package limit (${MAX_PACKAGES}) reached; island path used`,
+        `${name}: skipped — provenance package limit (${MAX_PACKAGES}) reached; published package resolution used`,
       );
       return;
     }
     processed.set(name, null); // claimed; overwritten on success
     const installed = findInstalled(dirname(entry), name);
     if (installed === null) {
-      notes.push(`${name}: not installed under the entry's node_modules; island path used`);
+      notes.push(
+        `${name}: not installed under the entry's node_modules; published package resolution used`,
+      );
       return;
     }
     let dir: string;
@@ -438,7 +406,7 @@ export async function resolveProvenanceSourcesWithParser(
         const source = target === null ? null : mapEntryToSource(dir, target, subpath);
         if (source === null) {
           notes.push(
-            `${name}@${installed.version}: no source mapping for '${spec}' (published target: ${target ?? "unexported"}); island path used`,
+            `${name}@${installed.version}: no source mapping for '${spec}' (published target: ${target ?? "unexported"}); published package resolution used`,
           );
           continue;
         }
@@ -472,7 +440,7 @@ export async function resolveProvenanceSourcesWithParser(
       for (const n of inner) await mapOne(n);
     } catch (e) {
       notes.push(
-        `${name}@${installed.version}: ${e instanceof Error ? e.message : String(e)}; island path used`,
+        `${name}@${installed.version}: ${e instanceof Error ? e.message : String(e)}; published package resolution used`,
       );
     }
   };

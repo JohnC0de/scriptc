@@ -176,9 +176,8 @@ export function rejectComptimeCaptures(
                   "(the callback already runs at compile time — compute the value directly)",
               );
             }
-            // console is the one ambient global V8 installs on every vm
-            // context (a silent inspector hook) — a log inside the island
-            // would no-op at compile time instead of printing at runtime.
+            // V8 installs console in vm contexts, where calls could no-op
+            // at compile time instead of printing at runtime.
             // Rejected so side effects can't silently vanish; the other
             // Node-isms (process, setTimeout) don't exist in the vm and
             // fail loudly at evaluation.

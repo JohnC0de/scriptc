@@ -143,9 +143,8 @@ static uint64_t scr_map_hash_dyn(const ScrDyn *d) {
     // must also agree when a key crosses the boundary in either form.
     kind = SCR_DYN_OBJ;
     break;
-  /* The optional island bridge exposes equality but no hash. A shared
-   * bucket still preserves correctness without adding an engine dependency. */
-  case SCR_DYN_JSVAL: value = 0; break;
+
+
   default: value = scr_map_slot_from_ptr((void *)d); break;
   }
   return scr_map_hash_word(value) ^ kind;

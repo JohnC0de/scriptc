@@ -3,10 +3,8 @@ export const effectFiles = ["tests/harness/effect.test.ts", "tests/harness/effec
 export const corpusFiles = [
   "tests/harness/differential.test.ts",
   "tests/harness/llvm-differential.test.ts",
-  "tests/harness/npm.test.ts",
   "tests/harness/server.test.ts",
   "tests/harness/test262.test.ts",
-  "tests/harness/vercel-e2e.test.ts",
   "tests/harness/three.test.ts",
 ];
 const coverageFile = "tests/harness/coverage.test.ts";

@@ -7,10 +7,8 @@ import {
   type IrExpr,
   type IrFunction,
   type IrType,
-  JSVAL,
   UNDEFINED_T,
   VOID,
-  canMarshalTypedFuncIntoIsland,
   isUnitType,
   typeEquals,
 } from "../../ir/ir.js";
@@ -33,7 +31,7 @@ import { implicitMonoFile, implicitAnyParamSymbolsOf } from "./generic-functions
  * `rest` (always last) receives the surplus arguments packed into one array
  * literal at each call site. `arguments` is a hidden slot containing every
  * actual argument, including those bound to named parameters. */
-export type ParamMode = "required" | "omittable" | "rest" | "dynRest" | "islandRest" | "arguments";
+export type ParamMode = "required" | "omittable" | "rest" | "dynRest" | "arguments";
 
 /** One parameter of a signature, as call sites and callee prologues see it.
  * `type` is the ABI type — what the emitted LLVM parameter carries: the
@@ -64,11 +62,6 @@ export interface FnSig {
   generator?: { yieldT: IrType; nextT: IrType; resultType: IrType & { kind: "record" } };
 }
 
-/** The one func-type projection of completed parameter shapes. Typed rest
- * parameters keep their packed array as the trailing native ABI slot and
- * mark the value variadic so indirect call sites run completeArgs before
- * callValue. Dynamic rest remains the historical hidden ScrDyn slot, while
- * island rest spells its engine-array slot directly. */
 export function funcTypeFromParamShapes(
   shapes: readonly ParamShape[],
   ret: IrType,
@@ -76,18 +69,15 @@ export function funcTypeFromParamShapes(
   const typedRest = shapes.some((shape) => shape.mode === "rest");
   const dynRest = shapes.some((shape) => shape.mode === "dynRest");
   const argumentsAll = shapes.some((shape) => shape.mode === "arguments");
-  const islandRest = shapes.some((shape) => shape.mode === "islandRest");
   return {
     kind: "func",
     params: shapes
       .filter((shape) => shape.mode !== "dynRest" && shape.mode !== "arguments")
       .map((shape) => shape.type),
     ret,
-    ...(typedRest || dynRest || islandRest || argumentsAll ? { rest: true as const } : {}),
+    ...(typedRest || dynRest || argumentsAll ? { rest: true as const } : {}),
     ...(argumentsAll ? { argumentsAll: true as const } : {}),
-    ...(typedRest || islandRest
-      ? { restAbi: typedRest ? ("typed" as const) : ("jsval" as const) }
-      : {}),
+    ...(typedRest ? { restAbi: "typed" as const } : {}),
   };
 }
 
@@ -221,12 +211,6 @@ export function paramShape(lowerer: Lowerer, param: ts.ParameterDeclaration): Pa
   if (moduleNs !== undefined) {
     return { type: moduleNs, mode: param.questionToken ? "omittable" : "required" };
   }
-  // Island-handle params (a then-handler receiving a dynamic import's
-  // namespace handle — markJsvalHandlerParams): jsval, whatever the
-  // contextual type spelled.
-  if (ts.isIdentifier(param.name) && lowerer.jsvalParamOverrides.has(param)) {
-    return { type: JSVAL, mode: param.questionToken ? "omittable" : "required" };
-  }
   if (!ts.isIdentifier(param.name)) {
     // A destructuring pattern parameter — `([label, value]) => ...`,
     // `({ x }) => ...`. The ABI slot carries the SOURCE value (the
@@ -273,15 +257,8 @@ export function paramShape(lowerer: Lowerer, param: ts.ParameterDeclaration): Pa
     // `rest`, and the value only ever calls through the boxed thunk).
     if (isJsSourceFile(param.getSourceFile())) {
       const restMapped = lowerer.mapTypeOf(lowerer.typeOf(param.name));
-      // `any[]` under --dynamic maps to an island-element array — that
-      // is inference residue, not element information; the binding is
-      // the ENGINE's own arguments array (an island handle) and the
-      // value crosses as a REST host function (the withPlugins
-      // `async (...args) =>` shape). Static builds keep the variadic
-      // dyn form for every unmappable JS rest.
-      if (restMapped?.kind === "array" && restMapped.elem.kind === "jsval" && lowerer.dynamic) {
-        return { type: JSVAL, mode: "islandRest" };
-      }
+
+      // Unmapped JS rest parameters use the native variadic checked-value ABI.
       if (restMapped?.kind !== "array") {
         return { type: DYN, mode: "dynRest" };
       }
@@ -310,12 +287,7 @@ export function paramShape(lowerer: Lowerer, param: ts.ParameterDeclaration): Pa
   }
   let type = lowerer.runtimeOptionalBindingType(param.name, lowerer.irTypeOf(param.name));
   const body = param.parent?.body;
-  if (
-    isJsSourceFile(param.getSourceFile()) &&
-    body &&
-    type.kind !== "dyn" &&
-    type.kind !== "jsval"
-  ) {
+  if (isJsSourceFile(param.getSourceFile()) && body && type.kind !== "dyn") {
     const symbol = lowerer.checker.getSymbolAtLocation(param.name);
     let acceptsUndefined = false;
     ts.walkPreorder(body, (node) => {
@@ -344,19 +316,9 @@ export function paramShape(lowerer: Lowerer, param: ts.ParameterDeclaration): Pa
   if (type.kind === "void") {
     return { type: DYN, mode: param.questionToken ? "omittable" : "required" };
   }
-  if (
-    param.questionToken &&
-    !lowerer.bareUndefinedArmedUnion(type) &&
-    type.kind !== "dyn" &&
-    type.kind !== "jsval"
-  ) {
-    // `x?: unknown` where unknown came from an annotation: undefined is
-    // absorbed into the hole type, so no undefined ARM exists — but a
-    // checked-dynamic slot holds the dyn undefined directly (`bar?: any`
-    // — an omitted call passes it, undefinedArgFor), and an island slot
-    // the engine's own undefined likewise (`options?: [string?]` — an
-    // optional-tuple param, jsval-mapped), so dyn and jsval params stay
-    // omittable.
+  if (param.questionToken && !lowerer.bareUndefinedArmedUnion(type) && type.kind !== "dyn") {
+    // An omitted argument requires an undefined union arm or a native
+    // checked-value slot that can hold undefined directly.
     lowerer.unsupported("SC1090", param, `optional parameters of type '${lowerer.fmt(type)}'`);
   }
   return { type, mode: param.questionToken ? "omittable" : "required" };
@@ -424,7 +386,7 @@ function defaultParameterShape(
   param: ts.ParameterDeclaration,
   raw: IrType,
 ): ParamShape {
-  if (raw.kind === "dyn" || raw.kind === "jsval") {
+  if (raw.kind === "dyn") {
     return { type: raw, mode: "omittable", bodyType: raw };
   }
   if (lowerer.bareUndefinedArmedUnion(raw) && param.initializer) {
@@ -461,7 +423,6 @@ export function checkDefaultParamBodyType(
     bodyType.kind === "regex" ||
     bodyType.kind === "date" ||
     bodyType.kind === "dyn" ||
-    bodyType.kind === "jsval" ||
     isUnitType(bodyType)
   ) {
     lowerer.unsupported(
@@ -487,19 +448,18 @@ export function requireExactArityValue(
 ): void {
   // dynRest params ride the boxed thunk (JS arity — no completed-ABI
   // spelling exists or is needed); they don't gate the value form.
-  // Dynamic-tier omittable params (`{} = a` with `a: any` — jsval/dyn
-  // slots) don't either: their ABI slot IS the declared param type (no
+
+  // Omittable checked-value slots also keep their declared param type (no
   // synthesized union), so every func-type spelling of the signature
   // already matches and short calls through the value complete with the
-  // tier's undefined (omittedArgFor).
+  // native undefined value (omittedArgFor).
   if (
     shapes.every(
       (s) =>
         s.mode === "required" ||
         s.mode === "dynRest" ||
         s.mode === "arguments" ||
-        s.mode === "islandRest" ||
-        (s.mode === "omittable" && (s.type.kind === "dyn" || s.type.kind === "jsval")),
+        (s.mode === "omittable" && s.type.kind === "dyn"),
     )
   ) {
     return;
@@ -569,32 +529,15 @@ export function requireExactArityValue(
   ) {
     return;
   }
-  // An 'any'-typed slot is the ISLAND boundary: the host-function
-  // trampoline already implements JS call semantics over the completed
-  // signature — a missing engine argument arrives as undefined and takes
-  // the omittable param's undefined arm (which is what triggers the
-  // default), surplus arguments drop. So a function with optional/
-  // defaulted params may flow into a package API whenever the completed
-  // signature can cross at all (jsvalIn re-checks and speaks otherwise) —
-  // commander's `.option(flags, desc, collector, [])` pattern.
-  if (
-    mapped?.kind === "jsval" &&
-    canMarshalTypedFuncIntoIsland(
-      funcType,
-      (id) => lowerer.shapes.get(id),
-      (id) => lowerer.unions.get(id),
-    )
-  ) {
-    return;
-  }
+
   lowerer.unsupported(
     "SC1090",
     blame,
     "functions with optional or defaulted parameters as values, except where the " +
       "target type spells the completed signature with required parameters " +
       "(a '(x?: T) => R' function flows into a '(x: T | undefined) => R' slot, " +
-      "and a package/'any' slot takes any signature that can cross the island " +
-      "boundary; otherwise call the function directly)",
+      "and a package/'any' slot takes any natively representable signature; " +
+      "otherwise call the function directly)",
   );
 }
 
@@ -714,7 +657,7 @@ function appendArgumentsParameter(
   mode: "arguments" | "dynRest",
 ): void {
   if (
-    shapes.some((s) => s.mode === "rest" || s.mode === "dynRest" || s.mode === "islandRest") ||
+    shapes.some((s) => s.mode === "rest" || s.mode === "dynRest") ||
     !(
       ts.isFunctionExpression(node) ||
       ts.isFunctionDeclaration(node) ||
@@ -844,8 +787,7 @@ export function lambdaSignature(
   // ASYNC lambdas adopt through the promise: an inferred Promise<record>
   // against a Promise<union> slot returns the union promise (the fiber's
   // returns coerce; the spawn-wrapper ABI still returns a promise).
-  // jsval-returning bodies stay out (adoption would force validated
-  // exits the writer never asked for).
+
   // Array and record returns also need the destination during literal
   // construction: a callback building IrStmt[] must wrap each element at
   // that recursive layout instead of first inferring narrower arrays.
@@ -855,11 +797,10 @@ export function lambdaSignature(
   const innerRet = isAsyncLike && ret.kind === "promise" ? ret.inner : ret;
   // Union-inferred returns adopt too (a mixed-return body inferring a
   // SUB-union of the slot's union — adopting is a no-op when the two
-  // already agree); only jsval stays out.
+
   if (
     (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
-    (!isAsyncLike || ret.kind === "promise") &&
-    innerRet.kind !== "jsval"
+    (!isAsyncLike || ret.kind === "promise")
   ) {
     // The slot's signature: the contextual type stripped of its nullish
     // parts (an OPTIONAL callback field's context is the whole

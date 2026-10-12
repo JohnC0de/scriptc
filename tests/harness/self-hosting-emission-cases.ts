@@ -289,10 +289,8 @@ export function emissionCases(): EmissionCase[] {
   add("undefined field initialization", nullable, ["@native_unit_0", "starts undefined"]);
 
   const dynField = emissionModule();
-  dynField.classes = [
-    { name: "Island", fields: [{ name: "value", type: { kind: "jsval" } }], loc },
-  ];
-  add("island field initialization", dynField, ["@scr_jsval_undefined", "@scr_jsval_release"]);
+  dynField.classes = [{ name: "Checked", fields: [{ name: "value", type: { kind: "dyn" } }], loc }];
+  add("checked field initialization", dynField, ["@scr_dyn_undefined", "@scr_dyn_release"]);
 
   const emitter = emissionModule();
   emitter.classes = [

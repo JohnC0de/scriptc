@@ -31,10 +31,10 @@ for (const fixture of ["ir-refinements", "union-conversions"]) {
             "--input-type=module",
             "--eval",
             `import { analyze, compile } from ${JSON.stringify(api)};
-           const { coverage } = analyze(process.argv[1], { dynamic: false });
+           const { coverage } = analyze(process.argv[1], {});
            const built = await compile(process.argv[1], {
              outDir: process.argv[2], outPath: process.argv[3], backend: process.argv[4],
-             dynamic: false, optimization: 'dev', sanitize: process.argv[5] === '1',
+             optimization: 'dev', sanitize: process.argv[5] === '1',
            });
            console.log(JSON.stringify({ stats: coverage.stats, diagnostics: coverage.diagnostics, built }));`,
             entry,
@@ -54,7 +54,6 @@ for (const fixture of ["ir-refinements", "union-conversions"]) {
         expect(diagnostics).toEqual([]);
         expect(stats.statementsTotal).toBeGreaterThan(0);
         expect(stats.statementsFailed).toBe(0);
-        expect(stats.statementsIsland).toBe(0);
         expect(stats.functionsSkipped).toBe(0);
         if (!built.ok)
           throw new Error(built.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

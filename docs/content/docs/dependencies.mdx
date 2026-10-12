@@ -2,9 +2,7 @@
 title: "npm Dependencies"
 ---
 
-scriptc can embed an npm package's JavaScript and execute it inside the compiled binary. Enable this behavior with `--dynamic`. Dependency code runs in [quickjs-ng](https://github.com/quickjs-ng/quickjs), while supported statically typed application code compiles to native code.
-
-The embedded engine is also called the dynamic island. It has its own heap and job queue. Values crossing back into static types are validated at runtime.
+scriptc compiles eligible npm dependencies to native code alongside your application. Package support is partial: unsupported packages and operations receive diagnostics, and there is no runtime JavaScript engine fallback.
 
 ## Use a package
 
@@ -31,53 +29,33 @@ Install the dependency, then build and run the executable:
 
 ```console
 $ npm install commander
-$ scriptc build tool.ts --dynamic -o greet >/dev/null
+$ scriptc build tool.ts -o greet >/dev/null
 $ ./greet ada --upper
 HELLO, ADA
 ```
 
-The callback body compiles statically. The `commander` implementation runs in the embedded engine. Use [`scriptc coverage --dynamic`](/docs/coverage#analyze-with-dynamic) to inspect a program's static and dynamic statement counts and the builtin modules its dependencies import.
+Both the callback and the package implementation compile to native instructions. Use [coverage reports](/docs/coverage) to inspect package compilation and deferred operations.
 
-## Package resolution and embedding
+<span id="package-resolution-and-embedding" />
+<span id="runtime-behavior" />
+<span id="engine-and-builtin-modules" />
 
-The compiler resolves packages from `node_modules` using Node.js package resolution, including `package.json` export conditions. Shipped or installed type declarations provide the types used to check application code.
+## Package resolution
 
-The package's JavaScript and its resolved imports are embedded at build time. The executable does not load `node_modules` at runtime. Deploy it to a machine compatible with the build's target platform.
+The compiler resolves dependencies from `node_modules` using Node.js package resolution, including `package.json` export conditions. It recursively compiles eligible dependencies. The executable does not load `node_modules` at runtime.
 
-Packages can also expose TypeScript runtime entries (`.ts`, `.mts`, or `.cts`). The compiler emits JavaScript before collecting and embedding runtime imports, removing type annotations and type-only bindings. `import type` and `export type` declarations do not add runtime dependencies. See [Limitations](/docs/limitations#embedded-javascript-engine) for package source restrictions.
+Automatic selection requires readable runtime source and a package-owned declaration surface. Packages that fail eligibility or preflight receive a package-specific diagnostic. TypeScript workspace entries compile as program modules, including `.js` specifiers that resolve to `.ts` sources.
 
-Workspace packages with a TypeScript executable entry compile as program modules, including `.js` import specifiers that resolve to `.ts` source. Workspace packages with JavaScript executable entries use the same policy as other JavaScript dependencies: execute them with `--dynamic`, or attempt static compilation with `--npm-static`.
+<span id="value-conversion" />
+<span id="static-package-compilation-experimental" />
+<span id="type-declarations-and-boundary-restrictions" />
 
-## Runtime behavior
+## Explicit package selection
 
-### Engine and builtin modules
+`--npm-static <pkg[,pkg…]|auto>` remains available for explicit selection. Naming a package overrides the automatic declaration-surface eligibility check, allowing an attempt to compile packages that rely on separately installed declarations or inferred JavaScript types. `auto` uses the default automatic selection. Neither form bypasses compilation checks.
 
-Node.js builtin modules are provided by shims, some of which bridge to the native runtime. Each shim has a supported subset; the [coverage report](/docs/coverage#embedded-nodejs-builtins) lists the modules reached by the dependency graph, and the [compatibility reference](/compatibility) lists API support.
-
-The engine is created lazily on first use, with one engine per process. A `--dynamic` build that does not use the engine emits the same code as a static build. Supported `any`-typed expressions also execute in the engine when `--dynamic` is enabled.
-
-### Value conversion
-
-Values passed between static and dynamic code are copied. Mutations to a copied value in one execution tier do not change the original in the other tier. This differs from ordinary JavaScript reference sharing.
-
-Typed callback parameters and values returned to static code are validated. If the package supplies a value that does not match the expected type, the conversion throws a catchable `TypeError`. See [Limitations](/docs/limitations) for runtime differences and restrictions on values that can cross the boundary.
-
-## Static package compilation (experimental)
-
-`--npm-static <pkg[,pkg…]|auto>` attempts to compile packages' shipped JavaScript as static program modules, using their type declarations. Named packages are selected explicitly; `auto` selects eligible direct imports.
-
-Support is partial. An accepted package may contain deferred operations: the build succeeds and coverage lists those sites, but executing an unsupported deferred operation raises a runtime error. A package rejected during preflight falls back to the embedded engine with a coverage note; that path requires `--dynamic`. Other unsupported forms can still prevent a static build.
-
-Check the coverage report for each package before depending on static execution.
+An accepted package may contain deferred operations: the build succeeds and coverage lists those sites, but executing an unsupported deferred operation raises a runtime error. Review the coverage report and test the paths your application uses. See [Limitations](/docs/limitations) for native runtime differences.
 
 ## Provenance sources (experimental)
 
-`--provenance-sources` attempts to compile a package from source at its npm provenance-attested commit. This allows TypeScript source to compile as TypeScript instead of compiling the published JavaScript.
-
-Packages without usable attestations retain the embedded-engine path, with a note. This option has the same partial-support restrictions as `--npm-static`.
-
-## Type declarations and boundary restrictions
-
-Packages require shipped or installed type declarations. If TypeScript reports that it cannot find a declaration file, install the corresponding `@types` package or add a local declaration.
-
-Class instances and promises cannot pass into `any` slots in the engine. Closures can cross as host functions only in supported forms. Unsupported conversions produce compilation diagnostics with guidance where available.
+`--provenance-sources` attempts to compile a package from source at its npm provenance-attested commit. This allows TypeScript source to compile as TypeScript instead of compiling the published JavaScript. Packages without usable attestations keep their installed-source compilation path, subject to the same native eligibility and compilation checks.

@@ -11,7 +11,7 @@ function diagnostics(source: string) {
   try {
     const entry = join(dir, "main.ts");
     writeFileSync(entry, source);
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
     return coverage.diagnostics;
   } finally {

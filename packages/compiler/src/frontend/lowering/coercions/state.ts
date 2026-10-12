@@ -15,5 +15,4 @@ export class CoercionState {
   readonly checkedNarrowArms = new Map<string, { unionId: string; tag: number; target: IrType }>();
   readonly retags = new Map<string, string>();
   readonly narrows = new Map<string, string>();
-  readonly islandInputs = new Map<string, string>();
 }

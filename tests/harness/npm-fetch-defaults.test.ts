@@ -7,7 +7,7 @@ import { expect, test } from "vitest";
 
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
 for (const backend of ["llvm"] as const) {
-  test(`embedded package destructuring defaults retain global fetch (${backend})`, async () => {
+  test(`compiled package destructuring defaults retain global fetch (${backend})`, async () => {
     const directory = mkdtempSync(
       join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-fetch-defaults-"),
     );
@@ -32,7 +32,8 @@ for (const backend of ["llvm"] as const) {
         `
 const { value = fetch } = {};
 const [element = fetch] = [];
-function defaulted({ request = fetch } = {}) { return typeof request; }
+/** @param {{ request?: typeof fetch | string }} options */
+function defaulted(options = {}) { const { request = fetch } = options; return typeof request; }
 function local(fetch) { const { request = fetch } = {}; return typeof request; }
 export function run() {
   console.log(typeof value, typeof element, defaulted());
@@ -51,7 +52,6 @@ export function run() {
       expect(expected.stderr).toBe("");
       const built = await compile(entry, {
         backend,
-        dynamic: true,
         sanitize,
         optimization: "dev",
         outDir: directory,
