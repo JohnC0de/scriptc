@@ -35,6 +35,7 @@ import {
   integerArithmeticRange,
   withinInt32,
   type IntegerRange,
+  type IntegerRanges,
   type IntegerSlotFacts,
 } from "../ir/integer-ranges.js";
 import { findInitializerBindings, withInitializerBindings } from "../ir/initializer-bindings.js";
@@ -47,6 +48,9 @@ import {
   type ContractAnnotations,
   type ContractNote,
 } from "../frontend/contract-types.js";
+
+/** The largest array index: 2^32 - 2 (ECMA-262 array index). */
+const MAX_ARRAY_INDEX = 2 ** 32 - 2;
 
 export interface ContractCheckResult {
   diagnostics: ScrDiagnostic[];
@@ -901,12 +905,25 @@ class ImmutableContracts {
     );
     for (const p of fn.params) candidates.delete(p.localId);
     const allowed = new Set<IrExpr>();
+    let ranges: IntegerRanges | undefined;
+    // An element write at a negative, fractional or too-large index adds an
+    // ordinary property instead, and publication refuses arrays that carry
+    // properties: only writes at provable array indexes keep a value fresh.
+    // Typed-array writes never add properties.
+    const arrayIndex = (index: IrExpr): boolean => {
+      ranges ??= analyzeIntegerRanges(fn);
+      const range = ranges.get(index);
+      return (
+        range !== null && range !== undefined && range.min >= 0 && range.max <= MAX_ARRAY_INDEX
+      );
+    };
     walk(fn.body, {
       stmt: (s) => {
         if (s.kind === "return" && s.value?.kind === "varRef") allowed.add(s.value);
         if ((s.kind === "fieldSet" || s.kind === "recordSet") && s.obj.kind === "varRef")
           allowed.add(s.obj);
-        if ((s.kind === "arraySet" || s.kind === "bytesSet") && s.arr.kind === "varRef")
+        if (s.kind === "bytesSet" && s.arr.kind === "varRef") allowed.add(s.arr);
+        if (s.kind === "arraySet" && s.arr.kind === "varRef" && arrayIndex(s.index))
           allowed.add(s.arr);
       },
       expr: (e) => {

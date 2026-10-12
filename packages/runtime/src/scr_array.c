@@ -132,7 +132,7 @@ static void scr_elem_release(const ScrArr *a, uint64_t slot) {
   if (a->elem == SCR_ELEM_STR) scr_str_release((ScrStr *)p);
   else if (a->elem == SCR_ELEM_ARR) scr_arr_release((ScrArr *)p);
   else if (a->elem == SCR_ELEM_BYTES) scr_bytes_release((ScrBytes *)p);
-  else if (a->elem == SCR_ELEM_REF) a->elem_release(p);
+  else if (a->elem == SCR_ELEM_REF) a->ops->release(p);
 }
 
 static uint64_t scr_elem_retain_slot(const ScrArr *a, uint64_t slot) {
@@ -142,7 +142,7 @@ static uint64_t scr_elem_retain_slot(const ScrArr *a, uint64_t slot) {
   if (a->elem == SCR_ELEM_STR) p = scr_str_retain((ScrStr *)p);
   else if (a->elem == SCR_ELEM_ARR) p = scr_arr_retain((ScrArr *)p);
   else if (a->elem == SCR_ELEM_BYTES) p = scr_bytes_retain((ScrBytes *)p);
-  else p = a->elem_retain(p);
+  else p = a->ops->retain(p);
   return scr_slot_from_ptr(p);
 }
 
@@ -661,9 +661,8 @@ ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
   a->len = 0;
   a->cap = 0;
   a->elem = elem;
-  a->elem_retain = NULL;
-  a->elem_release = NULL;
-  a->elem_trace = NULL;
+  a->cyc = 0;
+  a->ops = NULL;
   a->data = NULL;
   a->present = NULL;
   a->ext = NULL;
@@ -693,7 +692,7 @@ void scr_arr_swap_indexed_ext(ScrArr *a, ScrArr *b) {
 }
 
 /* Collector trace of a cycle-capable array: every element is a headered
- * child (elem_trace non-NULL means the element TYPE carries a header, and
+ * child (`cyc` means the element TYPE carries a header, and
  * arrays are monomorphic), so trace visits all of them and the teardown
  * below releases none — the complement contract in scr_runtime.h. */
 void scr_arr_trace_v(void *a0, ScrTraceVisit visit, void *ctx) {
@@ -737,11 +736,10 @@ static void scr_arr_gc_free(void *a0) {
   scr_cyc_free_inline(a);
 }
 
-ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
-                         void (*elem_release)(void *),
-                         ScrTraceFn elem_trace, size_t initial_cap) {
+ScrArr *scr_arr_new_ops(const ScrArrOps *ops, size_t initial_cap) {
   ScrArr *a;
-  if (elem_trace) {
+  bool cyc = ops->trace != NULL;
+  if (cyc) {
     static const ScrCycType cyc_type = { &scr_arr_trace_v, &scr_arr_gc_free, SCR_CYC_KIND_ARRAY };
     a = scr_cyc_alloc_inline(sizeof(ScrArr), &cyc_type);
   } else {
@@ -752,9 +750,8 @@ ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
   a->len = 0;
   a->cap = 0;
   a->elem = SCR_ELEM_REF;
-  a->elem_retain = elem_retain;
-  a->elem_release = elem_release;
-  a->elem_trace = elem_trace;
+  a->cyc = cyc;
+  a->ops = ops;
   a->data = NULL;
   a->present = NULL;
   a->ext = NULL;
@@ -799,7 +796,7 @@ static void scr_arr_destroy(void *object) {
       }
     }
   }
-  if (a->elem_trace) {
+  if (a->cyc) {
     scr_arr_gc_free(a);
   } else {
     scr_mem_free(a->data);
@@ -815,9 +812,9 @@ static void scr_arr_destroy(void *object) {
 void scr_arr_release(ScrArr *a) {
   if (!a || a->rc == SIZE_MAX) return; /* NULL: an uninitialized `let` local */
   if (--a->rc == 0) {
-    if (a->elem_trace) scr_cyc_dead(a);
+    if (a->cyc) scr_cyc_dead(a);
     scr_rc_destroy(a, scr_arr_destroy);
-  } else if (a->elem_trace) {
+  } else if (a->cyc) {
     scr_cyc_released(a); /* possible cycle root; may collect */
   }
 }
@@ -1213,7 +1210,7 @@ void *scr_arr_get_ref(ScrArr *a, double i) {
   if (!p) return NULL;
   if (a->elem == SCR_ELEM_STR) scr_str_retain((ScrStr *)p);
   else if (a->elem == SCR_ELEM_BYTES) scr_bytes_retain((ScrBytes *)p);
-  else if (a->elem == SCR_ELEM_REF) p = a->elem_retain(p);
+  else if (a->elem == SCR_ELEM_REF) p = a->ops->retain(p);
   else scr_arr_retain((ScrArr *)p);
   return p;
 }
@@ -1630,7 +1627,7 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
   size_t hint = scr_arr_is_dense(a) || n <= SCR_ARR_DENSE_LIMIT ? n : SCR_ARR_DENSE_LIMIT;
   ScrArr *out =
       a->elem == SCR_ELEM_REF
-          ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace, hint ? hint : 1)
+          ? scr_arr_new_ops(a->ops, hint ? hint : 1)
           : scr_arr_new(a->elem, hint ? hint : 1);
   out->len = n;
   size_t old_len = a->len;
@@ -1699,7 +1696,7 @@ ScrArr *scr_arr_splice_insert(ScrArr *a, double start, double deleteCount,
     ScrArr *snapshot = items == a ? scr_arr_slice(a, 0, INFINITY) : NULL;
     if (snapshot) items = snapshot;
     ScrArr *removed = a->elem == SCR_ELEM_REF
-        ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace, n)
+        ? scr_arr_new_ops(a->ops, n)
         : scr_arr_new(a->elem, n);
     if (n) {
       memcpy(removed->data, a->data + from, n * sizeof(*a->data));
@@ -1743,7 +1740,7 @@ void scr_arr_splice_drop(ScrArr *a, double start, double deleteCount, size_t cou
   bool refs = scr_elem_is_ref(a->elem);
   if (!scr_arr_is_dense(a) || !scr_arr_dense_ok(a, next_len, count)) {
     ScrArr *items = a->elem == SCR_ELEM_REF
-        ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace, count)
+        ? scr_arr_new_ops(a->ops, count)
         : scr_arr_new(a->elem, count);
     scr_arr_push_many(items, count, slots);
     scr_arr_release(scr_arr_splice_insert(a, start, deleteCount, items));
@@ -1812,10 +1809,10 @@ ScrArr *scr_arr_flat_copy(const ScrArr *a, ScrArr *out, bool flatten) {
 static bool scr_arr_ref_eq(const ScrArr *a, uint64_t slot, void *v) {
   void *p = scr_slot_to_ptr(slot);
   if (a->elem == SCR_ELEM_STR) return scr_str_eq((ScrStr *)p, (ScrStr *)v);
-  if (a->elem == SCR_ELEM_REF && a->elem_retain == scr_dyn_retain_v) {
+  if (a->elem == SCR_ELEM_REF && a->ops->retain == scr_dyn_retain_v) {
     return scr_dyn_strict_eq((ScrDyn *)p, (ScrDyn *)v);
   }
-  if (a->elem == SCR_ELEM_REF && a->elem_retain == scr_closure_retain_v)
+  if (a->elem == SCR_ELEM_REF && a->ops->retain == scr_closure_retain_v)
     return scr_closure_identity_equal((ScrClosure *)p, (ScrClosure *)v);
   return p == v;
 }
@@ -1869,7 +1866,7 @@ bool scr_arr_includes_bool(ScrArr *a, bool v) {
 }
 
 bool scr_arr_includes_ref(ScrArr *a, void *v) {
-  if (a->elem == SCR_ELEM_REF && a->elem_retain == scr_dyn_retain_v) {
+  if (a->elem == SCR_ELEM_REF && a->ops->retain == scr_dyn_retain_v) {
     const ScrDyn *needle = (const ScrDyn *)v;
     if (needle->kind == SCR_DYN_NUM && needle->v.num != needle->v.num) {
       for (size_t i = 0; i < a->cap && i < a->len; i++) {
@@ -1932,7 +1929,7 @@ ScrArr *scr_arr_slice(ScrArr *a, double start, double end) {
   size_t hint = to <= a->cap || n <= SCR_ARR_DENSE_LIMIT ? n : SCR_ARR_DENSE_LIMIT;
   ScrArr *out =
       a->elem == SCR_ELEM_REF
-          ? scr_arr_new_ref(a->elem_retain, a->elem_release, a->elem_trace, hint ? hint : 1)
+          ? scr_arr_new_ops(a->ops, hint ? hint : 1)
           : scr_arr_new(a->elem, hint ? hint : 1);
   out->len = n;
   if (to <= a->cap) {
@@ -2202,7 +2199,7 @@ void scr_arr_sort_values(ScrArr *a, double count, ScrClosure *f, uint32_t arity)
     if (a->elem == SCR_ELEM_STR) c.retain = scr_sort_retain_str;
     else if (a->elem == SCR_ELEM_ARR) c.retain = scr_sort_retain_arr;
     else if (a->elem == SCR_ELEM_BYTES) c.retain = scr_sort_retain_bytes;
-    else if (a->elem == SCR_ELEM_REF) c.retain = a->elem_retain;
+    else if (a->elem == SCR_ELEM_REF) c.retain = a->ops->retain;
     else scr_trap("scriptc: invalid comparator sort element kind\n");
   }
   uint64_t *src = malloc(n * sizeof(*src));

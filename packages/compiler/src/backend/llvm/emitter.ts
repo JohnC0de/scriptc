@@ -1921,12 +1921,14 @@ export class LlEmitter {
       `%ScrFfiTable = type { ptr, ${this.sizeType}, ${this.sizeType}, ptr, i8, ptr, ptr, ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, ptr, ptr }`,
       `%ScrRegex = type { ${this.sizeType}, ptr, ptr, ptr, double, ptr, ptr }`,
       // ScrArr mirrors scr_runtime.h field-for-field: { rc, len, cap, elem,
-      // elem_retain, elem_release, elem_trace, data, present, ext }, where
-      // ext points at the out-of-line sparse, property and metadata storage
-      // (NULL until first used). Live dynamic stream commits swap its dense,
-      // presence and out-of-line storage while preserving the target
-      // object's identity.
-      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr, ptr, ptr }`,
+      // cyc, ops, data, present, ext } (field numbers in SCR_ARR_FIELD),
+      // where ops points at the element type's constant RC descriptor
+      // (%ScrArrOps, SCR_ELEM_REF only) and ext at the out-of-line sparse,
+      // property and metadata storage (NULL until first used). Live dynamic
+      // stream commits swap its dense, presence and out-of-line storage while
+      // preserving the target object's identity.
+      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, i32, ptr, ptr, ptr, ptr }`,
+      `%ScrArrOps = type { ptr, ptr, ptr }`,
       // The ScrMap prefix { rc, key_kind, val_kind, val_retain, val_release,
       // val_trace, key_retain, key_release, key_trace } — the inline RC
       // fast paths test the two trace slots (shapes.ts).
@@ -2111,7 +2113,7 @@ export class LlEmitter {
       out.push(
         `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
         `@${inst.sym}_present = internal constant [${n} x i8] ${present}`,
-        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null }`,
+        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, i32 0, ptr null, ptr @${inst.sym}_data, ptr @${inst.sym}_present, ptr null }`,
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);
@@ -6029,8 +6031,27 @@ export class LlEmitter {
           // fresh, publishable and never written): its graph becomes
           // immortal, so reads skip reference counting and the collector
           // never visits it.
-          for (const line of this.publishWalkers.emitPublish(v.name, v.type, s.loc))
-            B.line(line.trimStart());
+          const lines = this.publishWalkers.emitPublish(v.name, v.type, s.loc);
+          for (const line of lines) B.line(line.trimStart());
+          // Reads of this global skip retains from here on, which is only
+          // sound once the graph really is immortal. Node.js never fails
+          // here, so a refusal means the contract proof was wrong: stop
+          // rather than keep running with a mortal graph read as immortal.
+          if (lines.length > 0) {
+            this.declare(`declare zeroext i1 @scr_exc_pending()`);
+            this.declare(`declare void @scr_trap(ptr)`);
+            const refused = B.tmp();
+            B.line(`${refused} = call zeroext i1 @scr_exc_pending()`);
+            const stop = B.newLabel("immutable.refused");
+            const done = B.newLabel("immutable.published");
+            B.condBr(refused, stop, done);
+            B.startBlock(stop);
+            B.line(
+              `call void @scr_trap(ptr ${this.cstr("scriptc: internal error: an Immutable value could not be published\n")})`,
+            );
+            B.terminate("unreachable");
+            B.startBlock(done);
+          }
         }
         break;
       }
