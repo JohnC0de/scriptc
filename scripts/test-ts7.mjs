@@ -1,19 +1,16 @@
 #!/usr/bin/env node
 
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { allOrderEntries } from "./ts7-order-fixtures.mjs";
+import { allOrderEntries, orderBaselinePath } from "./ts7-order-fixtures.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const baseline = JSON.parse(
-  readFileSync(resolve(repoRoot, "packages/compiler/test/ts7/baselines/order-parity.json"), "utf8"),
-);
 const missingBaselines = allOrderEntries(repoRoot)
   .map((path) => relative(repoRoot, path).replaceAll("\\", "/"))
-  .filter((path) => !Object.hasOwn(baseline.entries, `<repo>/${path}`));
+  .filter((path) => !existsSync(orderBaselinePath(repoRoot, path)));
 if (missingBaselines.length > 0) {
   console.error(`Missing TypeScript preflight/order baselines:\n${missingBaselines.join("\n")}`);
   console.error(

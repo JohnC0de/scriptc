@@ -1,0 +1,16 @@
+{
+ "order": [
+  "<repo>/tests/diagnostics/bigint-fences.ts"
+ ],
+ "diags": [
+  {
+   "code": "SC0001",
+   "message": "Expected 1 arguments, but got 2.",
+   "loc": {
+    "file": "<repo>/tests/diagnostics/bigint-fences.ts",
+    "start": 439,
+    "end": 455
+   }
+  }
+ ]
+}

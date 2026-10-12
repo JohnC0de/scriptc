@@ -26,8 +26,7 @@ test("baseline preflight reports every missing fixture before loading the compil
       "tests/fixtures/node-types/api.ts",
     ];
     for (const path of [...fixtures, "tests/corpus/modules/helper.ts"]) put(path, "");
-    const baselinePath = "packages/compiler/test/ts7/baselines/order-parity.json";
-    put(baselinePath, JSON.stringify({ entries: {} }));
+    const baselineDir = "packages/compiler/test/ts7/baselines/order-parity";
     const run = () =>
       spawnSync(process.execPath, [join(root, "scripts/test-ts7.mjs"), "--baselines-only"], {
         encoding: "utf8",
@@ -38,14 +37,9 @@ test("baseline preflight reports every missing fixture before loading the compil
     expect(missing.stderr).not.toContain("helper.ts");
     expect(missing.stderr).toContain("SCRIPTC_UPDATE_BASELINES=1");
 
-    put(
-      baselinePath,
-      JSON.stringify({
-        entries: Object.fromEntries(
-          fixtures.map((path) => [`<repo>/${path}`, { order: [], diags: [] }]),
-        ),
-      }),
-    );
+    for (const path of fixtures) {
+      put(`${baselineDir}/${path}.json`, JSON.stringify({ order: [], diags: [] }));
+    }
     const complete = run();
     expect(complete.status, complete.stderr).toBe(0);
     expect(complete.stdout).toContain("Every TypeScript preflight/order fixture");
