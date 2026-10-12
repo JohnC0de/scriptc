@@ -5,7 +5,8 @@
  * in the whole program:
  *
  * - NoThrow<T>: the function is outside the may-throw fixpoint
- *   (backend/may-throw.ts), or the diagnostic names the throwing path.
+ *   (backend/may-throw.ts, where handlers discharge what they catch), or
+ *   the diagnostic names the throwing path.
  * - Int32: every value stored into the slot is an int32 by construction,
  *   proven by the same integer range analysis the int32 storage uses,
  *   assuming every Int32 slot holds an int32 (sound by induction: every
@@ -476,6 +477,8 @@ class ContractChecker {
         continue;
       }
       const steps: string[] = [];
+      // The function's own stack guard throws on entry, outside any handler.
+      const ownStackGuard = mt.stackChecks?.has(fn.name) === true;
       const seen = new Set<string>();
       let current: string | undefined = fn.name;
       while (current !== undefined && !seen.has(current) && steps.length < 8) {
@@ -501,7 +504,11 @@ class ContractChecker {
         "SC7001",
         note.loc,
         `'${note.name}' is declared NoThrow but may throw: ${steps.join(" → ")}`,
-        "remove the throwing operation from the path (or the recursion), or remove NoThrow; a surrounding try/catch does not discharge the contract in this version",
+        ownStackGuard
+          ? "remove the recursion or remove NoThrow; a recursive function's stack guard throws on entry, outside any try/catch"
+          : this.mod.workers === true
+            ? "remove the throwing operation from the path (or the recursion), or remove NoThrow; in worker programs try/catch does not discharge the contract, since a termination request unwinds through catch"
+            : "remove the throwing operation from the path (or the recursion), catch it with try/catch, or remove NoThrow",
       );
     }
     this.record("noThrow", proven);
