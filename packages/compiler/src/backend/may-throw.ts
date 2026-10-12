@@ -788,6 +788,7 @@ const BOUNDED_KINDS: ReadonlySet<string> = new Set([
   "chainRecv",
   "selfRef",
   "unionWrap",
+  "unionRetype",
   "unionNarrow",
   "unionDisc",
   "unionIsTag",

@@ -2,6 +2,7 @@
 import { InternalCompilerError } from "../../errors.js";
 import { type IrExpr } from "../../ir/ir.js";
 import type { LlvmEmitterContext, LlValue } from "./expr-context.js";
+import { emitUnionRetype } from "./expr-records.js";
 
 export function emitExpr(host: LlvmEmitterContext, e: IrExpr): LlValue {
   switch (e.kind) {
@@ -111,6 +112,8 @@ export function emitExpr(host: LlvmEmitterContext, e: IrExpr): LlValue {
       return host.emitAsyncExpr(e);
     case "libCall":
       return host.emitLibCall(e);
+    case "unionRetype":
+      return emitUnionRetype(host, e);
     default: {
       const _exhaustive: never = e;
       void _exhaustive;

@@ -532,6 +532,10 @@ export class LlEmitter {
   private readonly unitInstances = new Map<string, string>();
   /** unionId → symbol of the union's immortal ABSENT field-slot instance. */
   private readonly absentInstances = new Map<string, string>();
+  /** unionId → symbol of a flag set once a checked-dynamic cast caches one
+   * of the union's boxes. A cached box is refreshed in place, possibly with
+   * a tag that another union numbers apart, so it is never shared. */
+  private readonly retypeGuards = new Map<string, string>();
   /** The nullable-union ABSENT sentinel was referenced (absentInstanceRef). */
   private needsNullableAbsent = false;
   private readonly immortalValues = new Set<string>();
@@ -1001,6 +1005,7 @@ export class LlEmitter {
       internLiteral: (text) => this.internLiteral(text),
       cstr: (text) => this.cstr(text),
       unitInstanceRef: (unionId, tag) => this.unitInstanceRef(unionId, tag),
+      retypeGuardRef: (unionId) => this.retypeGuardRef(unionId),
       fieldAbsentTestIn: (B, value, unionId) => this.fieldAbsentTestIn(B, value, unionId),
       absentInstanceRef: (unionId) => this.absentInstanceRef(unionId),
       liveDynRefAdapter: (type) => this.liveDynRefAdapter(type),
@@ -1969,6 +1974,12 @@ export class LlEmitter {
       );
     }
     if (this.unitInstances.size > 0) out.push(``);
+    for (const [unionId, sym] of this.retypeGuards) {
+      // Thread-local like module globals: a thread's cast caches hold only
+      // its own boxes. Never written, the flag folds to false.
+      out.push(`@${sym} = internal ${tl}global i8 0 ; ${unionId} boxes in a cast cache`);
+    }
+    if (this.retypeGuards.size > 0) out.push(``);
     for (const [unionId, sym] of this.absentInstances) {
       // One immortal ABSENT field-slot instance per undefined-armed union:
       // the undefined arm's tag with payload 1 (ordinary unit instances
@@ -3530,6 +3541,17 @@ export class LlEmitter {
     const name = `@${sym}`;
     this.immortalValues.add(name);
     return name;
+  }
+
+  /** The i8 flag that a checked-dynamic cast sets before caching one of
+   * this tagged union's boxes (unionRetype rebuilds once it is set). */
+  retypeGuardRef(unionId: string): string {
+    let sym = this.retypeGuards.get(unionId);
+    if (!sym) {
+      sym = `sc_retype_guard_${this.retypeGuards.size}`;
+      this.retypeGuards.set(unionId, sym);
+    }
+    return `@${sym}`;
   }
 
   /** The immortal ABSENT state of an undefined-armed record field slot

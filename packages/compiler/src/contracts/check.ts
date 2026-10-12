@@ -996,6 +996,7 @@ const PASS_THROUGH = new Set<IrExpr["kind"]>([
   "upcast",
   "downcast",
   "unionWrap",
+  "unionRetype",
   "unionNarrow",
   "ternary",
   "logical",
@@ -1256,6 +1257,7 @@ class ImmutableContracts {
       case "upcast":
       case "downcast":
       case "unionWrap":
+      case "unionRetype":
       case "unionNarrow":
         return this.fresh(e.value, freshLocals, derived);
       case "ternary":
@@ -1559,6 +1561,7 @@ class ImmutableContracts {
         root.kind === "upcast" ||
         root.kind === "downcast" ||
         root.kind === "unionWrap" ||
+        root.kind === "unionRetype" ||
         root.kind === "unionNarrow" ||
         root.kind === "assignExpr"
       )
@@ -1636,6 +1639,7 @@ class ImmutableContracts {
       case "upcast":
       case "downcast":
       case "unionWrap":
+      case "unionRetype":
       case "unionNarrow":
         return derived(e.value);
       default: {

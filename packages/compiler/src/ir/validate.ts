@@ -1377,6 +1377,8 @@ function validateFunction(
       case "unionKeyGet":
       case "unionIsTag":
         return checkUnionExpr(e);
+      case "unionRetype":
+        return checkUnionRetype(e);
       case "intrinsic":
         return checkIntrinsicExpr(e);
       case "libCall":
@@ -3512,6 +3514,26 @@ function validateFunction(
         const _exhaustive: never = e;
         void _exhaustive;
       }
+    }
+  }
+
+  function checkUnionRetype(e: IrExpr & { kind: "unionRetype" }): void {
+    checkExpr(e.value);
+    const from = unions.get(e.fromId);
+    const to = unions.get(e.unionId);
+    if (!from || !to) {
+      err(`unionRetype between undeclared unions "${e.fromId}" and "${e.unionId}"`, e.loc);
+      return;
+    }
+    expectType(e.value, { kind: "union", unionId: e.fromId }, "unionRetype operand");
+    if (!typeEquals(e.type, { kind: "union", unionId: e.unionId }))
+      err(`unionRetype type ${e.type.kind} != union ${e.unionId}`, e.loc);
+    if (e.tags.length === 0) err(`unionRetype with no tags`, e.loc);
+    for (const tag of e.tags) {
+      const arm = from.arms[tag];
+      const target = to.arms[tag];
+      if (!Number.isInteger(tag) || !arm || !target || !typeEquals(arm, target))
+        err(`unionRetype tag ${tag} is not the same arm in ${e.fromId} and ${e.unionId}`, e.loc);
     }
   }
 

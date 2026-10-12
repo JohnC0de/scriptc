@@ -80,6 +80,8 @@ export const DYN_KIND = {
  * unit instances (undefined-armed dynCheck targets build them). */
 export interface DynHost extends WalkerHost {
   unitInstanceRef(unionId: string, tag: number): string;
+  /** See LlEmitter.retypeGuardRef. */
+  retypeGuardRef(unionId: string): string;
   /** See ClassHost.virtualEntry. */
   virtualEntry?(implFn: string): string;
   /** See ClassHost.programLifetime. */
@@ -1858,6 +1860,9 @@ export class LlDyn {
         B.line(`call void @scr_union_release(ptr ${checked})`);
         B.terminate(`ret ptr ${cached}`);
         B.startBlock(lCache);
+        // Later casts refresh this box in place (above), so from now on
+        // retypes of this union must not share a box (unionRetype).
+        B.line(`store i8 1, ptr ${host.retypeGuardRef(t.unionId)}`);
         B.line(
           `call void @scr_dyn_typed_ref_cache_cast(ptr %d, ptr ${host.cstr(key)}, ${host.sizeType} ${Buffer.byteLength(key, "utf8")}, ptr ${checked}, ptr ${rc.retain}, ptr ${rc.release}, i1 ${traceAdapter(host, t) !== null ? "true" : "false"})`,
         );

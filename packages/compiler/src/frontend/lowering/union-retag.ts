@@ -286,9 +286,35 @@ export function buildRecordUnionWrap(
   };
 }
 
+/** The source tags whose plan copies the payload into the same tag of an
+ * equal target arm. Such a value has the same tag, payload and arm entry
+ * points in both unions, so the conversion can keep the input itself. */
+export function identityRetagTags(
+  from: IrUnionDef,
+  to: IrUnionDef,
+  plan: readonly UnionRetagArm[],
+): number[] {
+  const tags: number[] = [];
+  plan.forEach((armPlan, tag) => {
+    const arm = from.arms[tag];
+    const target = to.arms[tag];
+    if (
+      armPlan.kind === "direct" &&
+      armPlan.route.tag === tag &&
+      armPlan.route.lift.how === "copy" &&
+      arm !== undefined &&
+      target !== undefined &&
+      typeEquals(arm, target)
+    )
+      tags.push(tag);
+  });
+  return tags;
+}
+
 /** Emit the already validated routes using ordinary typed IR. Each field
  * read uses the source shape; each result uses its own destination shape.
- * Identity routes retain the original payload and width routes copy it.
+ * Arms with the same tag and type keep the input (unionRetype); other
+ * exact routes retain the original payload and width routes copy it.
  * The caller interns the helper before invoking this build phase. */
 export function buildUnionRetag(
   name: string,
@@ -312,7 +338,50 @@ export function buildUnionRetag(
     body: [],
     loc,
   };
+  // Arms that keep their tag and exact type need no new box: the result
+  // is the input viewed as the target union. Test them together first.
+  const identities = identityRetagTags(from, to, plan);
+  const retype: IrExpr = {
+    kind: "unionRetype",
+    fromId: from.id,
+    unionId: to.id,
+    tags: identities,
+    value: input,
+    type: toType,
+    loc,
+  };
+  if (identities.length === from.arms.length) {
+    fn.body.push({ kind: "return", value: retype, loc });
+    return fn;
+  }
+  if (identities.length > 0) {
+    let cond: IrExpr | null = null;
+    for (const tag of identities) {
+      const test: IrExpr = {
+        kind: "unionIsTag",
+        unionId: from.id,
+        tag,
+        negated: false,
+        value: input,
+        type: BOOL,
+        loc,
+      };
+      cond =
+        cond === null
+          ? test
+          : { kind: "logical", op: "||", left: cond, right: test, type: BOOL, loc };
+    }
+    fn.body.push({
+      kind: "if",
+      cond: cond!,
+      then: [{ kind: "return", value: retype, loc }],
+      else_: null,
+      loc,
+    });
+  }
+  const shared = new Set(identities);
   for (let tag = 0; tag < from.arms.length; tag++) {
+    if (shared.has(tag)) continue;
     const arm = from.arms[tag]!;
     const armPlan = plan[tag]!;
     const statements: IrStmt[] = [];

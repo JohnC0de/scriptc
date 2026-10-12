@@ -305,6 +305,8 @@ export function everyExprChild(
       return true;
     case "unionWrap":
       return expr(node.value);
+    case "unionRetype":
+      return expr(node.value);
     case "unionFuncEq":
       return expr(node.union) && expr(node.func);
     case "caughtTest":
@@ -654,6 +656,8 @@ export function mapExprChildren(
     case "fieldAbsent":
       return node;
     case "unionWrap":
+      return { ...node, value: expr(node.value) };
+    case "unionRetype":
       return { ...node, value: expr(node.value) };
     case "unionFuncEq":
       return { ...node, union: expr(node.union), func: expr(node.func) };

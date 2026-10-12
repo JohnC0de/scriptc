@@ -508,6 +508,7 @@ export class ReferenceWrites {
       case "unionNarrow":
       case "unionIsTag":
       case "unionWrap":
+      case "unionRetype":
       case "downcast":
       case "upcast":
       case "instanceOf":

@@ -828,6 +828,10 @@ export function moduleArtifacts(
         case "fieldAbsent":
           visitUnion(node.unionId);
           break;
+        case "unionRetype":
+          visitUnion(node.fromId);
+          visitUnion(node.unionId);
+          break;
         case "yieldExpr":
           if (node.captureCompletion !== undefined) visitType(node.captureCompletion.returnType);
           break;

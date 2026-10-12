@@ -612,6 +612,79 @@ describe("retag IR construction", () => {
     });
   });
 
+  test("keeps the input when every arm has the same tag and type", () => {
+    const from: IrUnionDef = { id: "narrow", arms: [record("r0"), UNDEFINED_T] };
+    const to: IrUnionDef = { id: "wide", arms: [record("r0"), UNDEFINED_T, F64] };
+    const lifts: string[] = [];
+    const fn = buildUnionRetag(
+      "retag",
+      from,
+      to,
+      planUnionRetag(
+        from,
+        to,
+        () => undefined,
+        () => null,
+      )!,
+      loc,
+      (lift, value) => {
+        lifts.push(lift.how);
+        return value;
+      },
+      () => "source",
+    );
+    expect(lifts).toEqual([]);
+    expect(fn.body).toHaveLength(1);
+    const returned = fn.body[0]!;
+    if (returned.kind !== "return" || returned.value?.kind !== "unionRetype")
+      throw new Error("missing retype");
+    expect(returned.value).toMatchObject({ fromId: "narrow", unionId: "wide", tags: [0, 1] });
+    expect(returned.value.value).toMatchObject({ kind: "varRef", localId: "u.0" });
+  });
+
+  test("tests identity arms together and rebuilds renumbered arms", () => {
+    const from: IrUnionDef = { id: "narrow", arms: [record("r0"), STRING, UNDEFINED_T] };
+    const to: IrUnionDef = { id: "wide", arms: [record("r0"), F64, UNDEFINED_T, STRING] };
+    const plan = planUnionRetag(
+      from,
+      to,
+      () => undefined,
+      () => null,
+    )!;
+    const lifts: string[] = [];
+    const fn = buildUnionRetag(
+      "retag",
+      from,
+      to,
+      plan,
+      loc,
+      (lift, value) => {
+        lifts.push(`${lift.how}:${value.type.kind}`);
+        return value;
+      },
+      () => "source",
+    );
+    expect(lifts).toEqual(["copy:string"]);
+    const shared = fn.body[0]!;
+    if (shared.kind !== "if" || shared.cond.kind !== "logical")
+      throw new Error("missing grouped identity test");
+    expect(shared.cond.left).toMatchObject({ kind: "unionIsTag", tag: 0 });
+    expect(shared.cond.right).toMatchObject({ kind: "unionIsTag", tag: 2 });
+    expect(shared.then[0]).toMatchObject({
+      kind: "return",
+      value: { kind: "unionRetype", tags: [0, 2] },
+    });
+    const rebuilt = fn.body[1]!;
+    if (rebuilt.kind !== "if") throw new Error("missing renumbered arm");
+    expect(rebuilt.cond).toMatchObject({ kind: "unionIsTag", tag: 1 });
+    expect(rebuilt.then[0]).toMatchObject({
+      kind: "return",
+      value: { kind: "unionWrap", unionId: "wide", tag: 3 },
+    });
+    expect(fn.body).toHaveLength(3);
+    expect(fn.body.at(-1)?.kind).toBe("throw");
+  });
+
   test("refuses an incomplete build plan", () => {
     const f = fixture();
     expect(() =>

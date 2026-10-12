@@ -259,6 +259,7 @@ const RECEIVER_FREE_EXPRS = new Set<IrExpr["kind"]>([
   "nullish",
   "orDefault",
   "unionWrap",
+  "unionRetype",
   "unionNarrow",
   "unionIsTag",
   "unionEq",

@@ -25,6 +25,7 @@ const EAGER_EXPRS: ReadonlySet<string> = new Set([
   "upcast",
   "downcast",
   "unionWrap",
+  "unionRetype",
   "dynFrom",
 ]);
 

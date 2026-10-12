@@ -46,6 +46,88 @@ export function emitUnionWiden(
   return result;
 }
 
+/** The identity union conversion (IR unionRetype). Two tagged unions
+ * share the operand's box: its +1 becomes the result, so no box is built
+ * and no payload is retained. The operand is a whole-value use in every
+ * lifetime analysis, so it is never a stack box. A nullable-pointer union
+ * on either side, or a source union whose boxes a checked-dynamic cast has
+ * cached (and refreshes in place), rebuilds each listed arm instead. */
+export function emitUnionRetype(
+  host: LlvmEmitterContext,
+  e: IrExpr & { kind: "unionRetype" },
+): LlValue {
+  const value = host.emitExpr(e.value);
+  host.moveTemp(value);
+  const from = host.nullableUnions.get(e.fromId);
+  const to = host.nullableUnions.get(e.unionId);
+  if (from && to) {
+    // Equal encodings make the pointer itself the target value.
+    if (from.refTag === to.refTag && from.unitTag === to.unitTag && from.nullTag === to.nullTag)
+      return host.own({ name: value.name, type: e.type });
+    return host.own({ name: rebuildRetype(host, value.name, e), type: e.type });
+  }
+  if (from || to) return host.own({ name: rebuildRetype(host, value.name, e), type: e.type });
+  const B = host.B;
+  const slot = B.slot();
+  B.entryAllocas.push(`${slot} = alloca ptr`);
+  const flag = B.tmp(),
+    refreshed = B.tmp();
+  B.line(`${flag} = load i8, ptr ${host.retypeGuardRef(e.fromId)}`);
+  B.line(`${refreshed} = icmp ne i8 ${flag}, 0`);
+  const share = B.newLabel("retype.share"),
+    rebuild = B.newLabel("retype.rebuild"),
+    join = B.newLabel("retype.join");
+  B.condBr(refreshed, rebuild, share);
+  B.startBlock(share);
+  B.line(`store ptr ${value.name}, ptr ${slot}`);
+  B.br(join);
+  B.startBlock(rebuild);
+  B.line(`store ptr ${rebuildRetype(host, value.name, e)}, ptr ${slot}`);
+  B.br(join);
+  B.startBlock(join);
+  const result = B.tmp();
+  B.line(`${result} = load ptr, ptr ${slot}`);
+  return host.own({ name: result, type: e.type });
+}
+
+/** A fresh target value for each listed tag of an owned source, which this
+ * consumes. Other tags cannot occur (the IR names every possible tag). */
+function rebuildRetype(
+  host: LlvmEmitterContext,
+  value: string,
+  e: IrExpr & { kind: "unionRetype" },
+): string {
+  const source = host.unionsById.get(e.fromId);
+  if (!source)
+    throw new InternalCompilerError(`llvm emitter bug: retype of unknown union ${e.fromId}`);
+  const listed = new Set(e.tags);
+  const B = host.B;
+  const slot = B.slot();
+  B.entryAllocas.push(`${slot} = alloca ptr`);
+  const join = B.newLabel("retype.built");
+  host.unionTagSwitch(value, source, (arm, tag) => {
+    if (!listed.has(tag)) {
+      B.line(`call void @sc_bad_tag()`);
+      B.terminate(`unreachable`);
+      return;
+    }
+    const result =
+      arm.kind === "undefinedT" || arm.kind === "nullT"
+        ? host.unitInstanceRef(e.unionId, tag)
+        : host.unionNewOwned(e.unionId, tag, {
+            name: host.unionExtract(value, e.fromId, arm),
+            type: arm,
+          });
+    B.line(`store ptr ${result}, ptr ${slot}`);
+    B.br(join);
+  });
+  B.startBlock(join);
+  host.releaseValue(value, { kind: "union", unionId: e.fromId });
+  const result = B.tmp();
+  B.line(`${result} = load ptr, ptr ${slot}`);
+  return result;
+}
+
 export function emitRegexIntrinsic(
   host: LlvmEmitterContext,
   e: IrExpr & { kind: "regexIntrinsic" },

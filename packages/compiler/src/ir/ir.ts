@@ -3124,6 +3124,22 @@ export type IrExpr =
    * (+1); ownership of a refcounted payload MOVES into the union. Unions are
    * immutable once constructed. */
   | { kind: "unionWrap"; unionId: string; tag: number; value: IrExpr; type: IrType; loc: SrcLoc }
+  /** Identity union conversion: `value` (union `fromId`) currently holds
+   * one of `tags`, and each listed tag names an equal arm at the same index
+   * of the target union `unionId` (`type`). The result is the same value
+   * viewed as the target union: owned (+1), and for two tagged unions the
+   * very same box (unions are immutable and box identity is unobservable).
+   * The operand is therefore a whole-value use: it escapes through the
+   * result, so it can never be a stack box. Never throws. */
+  | {
+      kind: "unionRetype";
+      fromId: string;
+      unionId: string;
+      tags: number[];
+      value: IrExpr;
+      type: IrType;
+      loc: SrcLoc;
+    }
   /** Strict identity comparison between a function arm of a union and a
    * function value with a potentially different static signature. This is
    * non-coercing: closures share one pointer representation, but the value
