@@ -6583,7 +6583,11 @@ export class LlEmitter {
           if (integerArrayLoop && s.init?.kind === "varDecl" && s.init.init) {
             const value = this.emitExpr(s.init.init);
             start = B.tmp();
-            B.line(`${start} = fptoui double ${value.name} to ${this.sizeType}`);
+            // The start is 0 or an enclosing array index plus one (at most
+            // 2^32 - 1): on 64-bit targets the signed conversion is exact
+            // and avoids x86-64's unsigned 64-bit conversion sequence.
+            const conversion = this.sizeType === "i64" ? "fptosi" : "fptoui";
+            B.line(`${start} = ${conversion} double ${value.name} to ${this.sizeType}`);
             this.integerArrayBindings.add(integerLoop.localId);
           }
           B.line(`store ${this.sizeType} ${start}, ptr ${integerSlot}`);

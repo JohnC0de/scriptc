@@ -15,7 +15,7 @@ import {
   type IrStmt,
   type IrType,
 } from "../ir/ir.js";
-import { computeTraced } from "./cycle-analysis.js";
+import { computeTraced, explainCycle } from "./cycle-analysis.js";
 import { computeTraced as llvmTraced } from "./llvm/shapes.js";
 
 const loc = { file: "cycles.ts", start: 0, end: 1 };
@@ -726,4 +726,63 @@ test("ProgramLifetime hierarchies are leaves: never traced and never closing a c
   // mortal Scope cycle remains.
   mod.contracts = { programLifetime: ["Node", "Sym"] };
   check(mod, ["object:Scope"]);
+});
+
+test("explanations name a cycle through a mutable edge, or the intrinsic field reached", () => {
+  const mod = module();
+  mod.records = [
+    shape("outer", [ref("a")]),
+    shape("a", [ref("b"), F64]),
+    shape("b", [ref("a")]),
+    shape("holder", [ref("callback")]),
+    shape("callback", [funcOf([], F64)]),
+    shape("items", [arrayOf(ref("items"))]),
+  ];
+  const mutated = withWrites(mod);
+  expect(explainCycle(mutated, "record:outer")).toBeNull();
+  expect(explainCycle(mutated, "record:a")).toEqual({
+    kind: "cycle",
+    steps: [
+      { from: "record:a", label: { kind: "field", field: "field0", mutable: true } },
+      { from: "record:b", label: { kind: "field", field: "field0", mutable: true } },
+    ],
+  });
+  expect(explainCycle(mutated, "record:holder")).toEqual({
+    kind: "intrinsic",
+    steps: [{ from: "record:holder", label: { kind: "field", field: "field0", mutable: true } }],
+    owner: "record:callback",
+    field: "field0",
+    holds: "func",
+  });
+  // Without writes, only the array keeps its cycle: containers are mutable.
+  expect(explainCycle(mod, "record:a")).toBeNull();
+  expect(explainCycle(mod, "record:items")).toEqual({
+    kind: "cycle",
+    steps: [
+      {
+        from: "record:items",
+        label: { kind: "field", field: "field0", mutable: true, via: "array" },
+      },
+    ],
+  });
+  expect(explainCycle(mod, "record:missing")).toBeNull();
+});
+
+test("a hierarchy member's explanation names the member that needs the header", () => {
+  const mod = module();
+  mod.classes = [
+    { name: "Derived", loc, base: "Base", fields: [{ name: "callback", type: funcOf([], VOID) }] },
+    { name: "Base", loc, fields: [] },
+  ];
+  expect(explainCycle(mod, "object:Base")).toEqual({
+    kind: "hierarchy",
+    member: "object:Derived",
+    because: {
+      kind: "intrinsic",
+      steps: [],
+      owner: "object:Derived",
+      field: "callback",
+      holds: "func",
+    },
+  });
 });

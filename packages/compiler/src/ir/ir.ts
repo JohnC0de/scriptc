@@ -1002,6 +1002,10 @@ export interface IrContracts {
   int32Locals?: string[];
   /** Functions that cannot throw (NoThrow). */
   noThrow?: string[];
+  /** Acyclic classes and object types, as cycle-analysis units
+   * (`object:<class>`, `record:<id>`, `union:<id>`): proven unable to lie
+   * on a reference cycle, so they carry no cycle header. */
+  acyclic?: string[];
   /** Immutable module constants built from fresh literals: the backend
    * makes their graphs immortal once initialized, and reads through them
    * need no reference counting. */

@@ -3,7 +3,7 @@
 // and the cycle collector never walks them. Node sees ordinary classes: the
 // annotation is erased. Everything else (the mortal scopes, arrays, maps and
 // closures around them) is still reference counted and collected.
-import type { ProgramLifetime } from "@scriptc/types";
+import type { Acyclic, ProgramLifetime } from "@scriptc/types";
 
 abstract class SyntaxNode implements ProgramLifetime {
   parent: SyntaxNode | undefined = undefined;
@@ -173,3 +173,19 @@ try {
   console.log("caught", (e as Error).message);
 }
 console.log(new Checked("ok").label);
+
+// A class can be both: Acyclic is still checked against the fields as
+// written, and the instances are never freed.
+class Interned implements Acyclic, ProgramLifetime {
+  readonly text: string;
+  readonly next: Interned | null;
+  constructor(text: string, next: Interned | null) {
+    this.text = text;
+    this.next = next;
+  }
+}
+let interned: Interned | null = null;
+for (const word of ["alpha", "beta", "gamma"]) interned = new Interned(word, interned);
+const words: string[] = [];
+for (let w = interned; w !== null; w = w.next) words.push(w.text);
+console.log(words.join(" "));

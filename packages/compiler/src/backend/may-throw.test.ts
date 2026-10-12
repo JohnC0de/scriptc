@@ -12,7 +12,7 @@ import {
   type IrModule,
   type IrStmt,
 } from "../ir/ir.js";
-import { computeMayThrow } from "./may-throw.js";
+import { completesNormally, computeMayThrow } from "./may-throw.js";
 
 const loc = { file: "tdz.ts", start: 0, end: 1 };
 const value: IrExpr = { kind: "numLit", value: 1, type: F64, loc };
@@ -563,4 +563,157 @@ test("explain names the first throwing operation and each call edge", () => {
   expect(result.why?.get("caller")).toEqual({ kind: "call", callee: "thrower", loc: callLoc });
   // Without the option the analysis records nothing extra.
   expect(computeMayThrow(mod).why).toBeUndefined();
+});
+
+test("handlers discharge the exceptions they take, and only those", () => {
+  const call = (callee: string): IrStmt =>
+    exprStmt({ kind: "call", callee, args: [], type: VOID, loc });
+  const throwing: IrStmt = { kind: "throw", value, loc };
+  const ret: IrStmt = { kind: "return", value: null, loc };
+  const tryCatch = (
+    tryBody: IrStmt[],
+    catchBody: IrStmt[] | null,
+    finallyBody: IrStmt[] | null = null,
+  ): IrStmt => ({ kind: "tryCatch", tryBody, catchBody, catchLocalId: null, finallyBody, loc });
+  const plain = (name: string, body: IrStmt[]): IrFunction => fn(name, body, []);
+  const cond: IrExpr = { kind: "boolLit", value: true, type: BOOL, loc };
+  const mod = moduleWith(
+    plain("thrower", [throwing]),
+    plain("caught", [tryCatch([call("thrower"), throwing], [])]),
+    plain("callsCaught", [call("caught")]),
+    plain("rethrows", [tryCatch([call("thrower")], [throwing])]),
+    plain("finallyOnly", [tryCatch([call("thrower")], null, [exprStmt(value)])]),
+    plain("finallyReturns", [tryCatch([call("thrower")], [throwing], [ret])]),
+    plain("finallyMayComplete", [
+      tryCatch([call("thrower")], null, [{ kind: "if", cond, then: [ret], else_: null, loc }]),
+    ]),
+    plain("finallyThrows", [tryCatch([], [], [call("thrower")])]),
+    plain("nested", [tryCatch([tryCatch([call("thrower")], [throwing])], [])]),
+    plain("indirectCaught", [
+      tryCatch(
+        [
+          exprStmt({
+            kind: "callValue",
+            callee: {
+              kind: "closure",
+              fnName: "thrower",
+              captures: [],
+              type: funcOf([], VOID),
+              loc,
+            },
+            args: [],
+            type: VOID,
+            loc,
+          }),
+        ],
+        [],
+      ),
+    ]),
+    plain("caller", []),
+  );
+  const answer = computeMayThrow(mod);
+  expect([...answer.fns].sort()).toEqual([
+    "finallyMayComplete",
+    "finallyOnly",
+    "finallyThrows",
+    "rethrows",
+    "thrower",
+  ]);
+  // The function value can still throw at other call sites.
+  expect(answer.indirect).toBe(true);
+  // Worker termination and generator returns unwind through catch.
+  expect(computeMayThrow({ ...mod, workers: true }).fns).toContain("caught");
+  const generator: IrFunction = {
+    ...plain("caughtGenerator", [tryCatch([call("thrower")], [])]),
+    generator: {} as unknown as NonNullable<IrFunction["generator"]>,
+  };
+  expect(computeMayThrow(moduleWith(...mod.functions, generator)).fns).toContain("caughtGenerator");
+  // Explanations skip the handled path and name the rethrow.
+  const explained = computeMayThrow(mod, { explain: true });
+  expect(explained.why?.get("rethrows")).toMatchObject({ kind: "seed", what: "throw statement" });
+});
+
+test("completesNormally is conservative about abrupt completion", () => {
+  const cond: IrExpr = { kind: "boolLit", value: true, type: BOOL, loc };
+  const ret: IrStmt = { kind: "return", value: null, loc };
+  const brk: IrStmt = { kind: "break", loc };
+  expect(completesNormally([])).toBe(true);
+  expect(completesNormally([exprStmt(value), ret])).toBe(false);
+  expect(completesNormally([brk])).toBe(false);
+  expect(completesNormally([{ kind: "if", cond, then: [ret], else_: [brk], loc }])).toBe(false);
+  expect(completesNormally([{ kind: "if", cond, then: [ret], else_: null, loc }])).toBe(true);
+  expect(completesNormally([{ kind: "block", body: [ret], loc }])).toBe(false);
+  // A labeled block can be the target of a break inside it.
+  expect(
+    completesNormally([
+      { kind: "block", body: [{ kind: "break", label: "l", loc }], labels: ["l"], loc },
+    ]),
+  ).toBe(true);
+  // A loop that runs forever completes only through a break that leaves it.
+  expect(completesNormally([{ kind: "while", cond, body: [ret], loc }])).toBe(false);
+  expect(completesNormally([{ kind: "while", cond, body: [brk], loc }])).toBe(true);
+  expect(
+    completesNormally([
+      { kind: "while", cond, body: [{ kind: "while", cond, body: [brk], loc }, ret], loc },
+    ]),
+  ).toBe(false);
+  const unknown: IrExpr = { kind: "varRef", localId: "flag", type: BOOL, loc };
+  expect(completesNormally([{ kind: "while", cond: unknown, body: [ret], loc }])).toBe(true);
+  const tryCatch = (catchBody: IrStmt[] | null, finallyBody: IrStmt[] | null = null): IrStmt => ({
+    kind: "tryCatch",
+    tryBody: [ret],
+    catchBody,
+    catchLocalId: null,
+    finallyBody,
+    loc,
+  });
+  expect(completesNormally([tryCatch([ret])])).toBe(false);
+  expect(completesNormally([tryCatch([])])).toBe(true);
+  expect(completesNormally([tryCatch(null, [])])).toBe(false);
+  expect(completesNormally([tryCatch([], [ret])])).toBe(false);
+  const kind: IrExpr = { kind: "numLit", value: 1, type: F64, loc };
+  const switchOf = (cases: { test: IrExpr | null; body: IrStmt[] }[]): IrStmt => ({
+    kind: "switch",
+    disc: kind,
+    cases,
+    loc,
+  });
+  expect(
+    completesNormally([
+      switchOf([
+        { test: kind, body: [] },
+        { test: null, body: [ret] },
+      ]),
+    ]),
+  ).toBe(false);
+  expect(completesNormally([switchOf([{ test: kind, body: [ret] }])])).toBe(true);
+  expect(
+    completesNormally([
+      switchOf([
+        { test: kind, body: [brk] },
+        { test: null, body: [ret] },
+      ]),
+    ]),
+  ).toBe(true);
+});
+
+test("unreachable statements do not seed", () => {
+  const ret: IrStmt = { kind: "return", value: null, loc };
+  const trap: IrStmt = { kind: "runtimeFence", code: "SC9002", message: "unreachable", loc };
+  const tryCatch: IrStmt = {
+    kind: "tryCatch",
+    tryBody: [exprStmt({ kind: "call", callee: "thrower", args: [], type: VOID, loc }), ret],
+    catchBody: [ret],
+    catchLocalId: null,
+    finallyBody: null,
+    loc,
+  };
+  const answer = computeMayThrow(
+    moduleWith(
+      fn("thrower", [{ kind: "throw", value, loc }], []),
+      fn("caller", [tryCatch, trap], []),
+      fn("reachable", [{ ...tryCatch, catchBody: [] }, trap], []),
+    ),
+  );
+  expect([...answer.fns].sort()).toEqual(["reachable", "thrower"]);
 });
