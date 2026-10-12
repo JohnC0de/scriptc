@@ -6,7 +6,7 @@
  * already close to it). The compact encoding is therefore produced as ordered
  * text parts and decoded from bytes one function at a time; neither direction
  * materializes the complete document as a single string. */
-import type { IrFunction, IrModule } from "./ir.js";
+import type { IrExpr, IrFunction, IrModule, IrStmt } from "./ir.js";
 
 // Version 15 expands the native Error prefix with filesystem metadata.
 // Older modules embed incompatible subclass offsets and must be rejected.
@@ -97,6 +97,16 @@ function checkedVersion(mod: IrModule): IrModule {
 
 export function deserializeModule(json: string): IrModule {
   return checkedVersion(JSON.parse(json, decodeNumber) as IrModule);
+}
+
+/** A node as it reads back from the compact encoding: a fresh object, as
+ * is every node inside it. */
+export function reparseExpr(node: IrExpr): IrExpr {
+  return JSON.parse(JSON.stringify(node, encodeNumber), decodeNumber) as IrExpr;
+}
+
+export function reparseStmt(node: IrStmt): IrStmt {
+  return JSON.parse(JSON.stringify(node, encodeNumber), decodeNumber) as IrStmt;
 }
 
 const QUOTE = 0x22;

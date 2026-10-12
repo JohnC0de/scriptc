@@ -13,7 +13,7 @@
  * the order-parity suite holding both lanes to identical diagnostics and
  * module order over the whole corpus. The phase-4 flip deleted the 5.9.3
  * pipeline; its recorded verdicts live on as the canary baselines
- * (test/ts7/baselines/order-parity.json), and the rationale prose the old
+ * (test/ts7/baselines/order-parity/), and the rationale prose the old
  * program.ts carried was folded in here where behavior demands it.
  *
  * Differences from the retired 5.9.3 lane, each deliberate and each

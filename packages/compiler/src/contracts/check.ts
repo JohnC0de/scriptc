@@ -38,6 +38,7 @@ import {
   type IntegerSlotFacts,
 } from "../ir/integer-ranges.js";
 import { findInitializerBindings, withInitializerBindings } from "../ir/initializer-bindings.js";
+import { unshareNodes } from "../ir/unshare.js";
 import { dynamicallyStoredFamilies, functionCallFacts, Int32Slots } from "../ir/int32-slots.js";
 import { computeMayThrow, type MayThrowReason } from "../backend/may-throw.js";
 import { SourceLocations } from "../backend/source-locations.js";
@@ -78,7 +79,8 @@ export function checkContracts(
   annotations: ContractAnnotations,
   sourceTexts: ReadonlyMap<string, string>,
 ): ContractCheckResult {
-  const checker = new ContractChecker(mod, annotations, sourceTexts);
+  // Range proofs are keyed by node identity: check the module emission sees.
+  const checker = new ContractChecker(unshareNodes(mod), annotations, sourceTexts);
   return checker.run();
 }
 

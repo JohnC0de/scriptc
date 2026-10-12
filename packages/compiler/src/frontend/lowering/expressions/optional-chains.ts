@@ -509,10 +509,13 @@ export function finishOptionalChain(
     return { kind: "optChain", id, receiver, body, type: DYN, loc };
   }
   let type = lowerer.irTypeOf(expr);
+  // The checker can call a receiver present that holds a nullish value at
+  // runtime (runtime-optional reads; a stale narrowing restored to its
+  // declared type). Either nullish arm short-circuits to undefined.
   const hiddenOptionalResult =
     (type.kind !== "union" || lowerer.armTag(type.unionId, UNDEFINED_T) < 0) &&
     receiver.type.kind === "union" &&
-    lowerer.armTag(receiver.type.unionId, UNDEFINED_T) >= 0 &&
+    (lowerer.unions.get(receiver.type.unionId)?.arms.some(isUnitType) ?? false) &&
     body.type.kind !== "generator" &&
     body.type.kind !== "jsval"
       ? lowerer.withUndefinedArmOf(body.type)

@@ -292,14 +292,11 @@ export function constructorThisAliases(fn: IrFunction, thisId: string): Set<stri
  * field stores and reads (the body length when it never is). Statements run
  * in order, so every store in an earlier statement completes while the
  * object is still private. Within and after the escaping statement nothing
- * is private any more. With `selfStores`, storing `this` into one of its
- * own fields is not an escape (it exposes nothing to other code, but it
- * does create a cycle). */
+ * is private any more. */
 export function constructorEscapePoint(
   fn: IrFunction,
   thisId: string,
   baseCtor: string | null,
-  options: { selfStores?: boolean } = {},
 ): number {
   let escaped = false;
   const aliases = constructorThisAliases(fn, thisId);
@@ -338,14 +335,7 @@ export function constructorEscapePoint(
     return everyExprChild(e, expr, stmt);
   };
   const stmt = (s: IrStmt): boolean => {
-    if (s.kind === "fieldSet" && isThisRef(s.obj)) {
-      if (options.selfStores === true) {
-        // `this` itself, possibly wrapped into the field's union type.
-        const self = s.value.kind === "unionWrap" ? s.value.value : s.value;
-        if (isThisRef(self)) return wrapper(s.obj) && wrapper(self);
-      }
-      return wrapper(s.obj) && expr(s.value);
-    }
+    if (s.kind === "fieldSet" && isThisRef(s.obj)) return wrapper(s.obj) && expr(s.value);
     if (s.kind === "exprStmt" && isThisRef(s.expr)) return wrapper(s.expr);
     // Declaring an alias is not an escape; its uses are checked like `this`.
     if (s.kind === "varDecl" && aliases.has(s.localId) && s.init !== null) return wrapper(s.init);
