@@ -4,7 +4,8 @@
  * which TypeScript erases, so Node.js never loads this package and behaves
  * exactly as without the annotations. scriptc recognizes the aliases where
  * they are written (parameter, return, field, variable and property
- * annotations) and checks each one as an extra contract: the program either
+ * annotations, `implements` and `extends` clauses, and type aliases) and
+ * checks each one as an extra contract: the program either
  * compiles with identical behavior, plus the optimization the contract
  * enables, or fails with a diagnostic that explains why the contract does
  * not hold. */
@@ -39,3 +40,17 @@ export type Immutable<T> = T extends (...args: never[]) => unknown
         : T extends object
           ? { readonly [K in keyof T]: Immutable<T[K]> }
           : T;
+
+/** A class or object type whose instances can never lie on a reference
+ * cycle. Write it as `class C implements Acyclic`, `interface I extends
+ * Acyclic` or `type T = Acyclic<{ ... }>`. scriptc proves that no chain of
+ * references can lead from such an object back to itself (for example,
+ * every reference field is assigned only in the constructor, and none holds
+ * a function), or reports the cycle that can form. Its objects then carry
+ * no cycle-collector header and are freed by reference counting alone. */
+export type Acyclic<T extends object = AcyclicObject> = T;
+
+/** What `implements Acyclic` and `extends Acyclic` name: an empty interface
+ * only this package declares, so the clause adds no members and refers to
+ * nothing else in the program. */
+export interface AcyclicObject {}
