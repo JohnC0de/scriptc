@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
-import { analyze, compile, compileC, deserializeModule, serializeModule } from "@scriptc/compiler";
+import { compile, compileC, deserializeModule, serializeModule } from "@scriptc/compiler";
 import { emitLlvmModule } from "../../packages/compiler/src/backend/llvm/emitter.js";
 import { scalarizeNumericRecords } from "../../packages/compiler/src/ir/scalar-records.js";
 import { everyStmtList } from "../../packages/compiler/src/ir/traverse.js";
 import { type IrModule } from "../../packages/compiler/src/ir/ir.js";
+import { analyzeInChild, compileInChild } from "./self-hosting-compiler-process.js";
 import { spawnResult } from "./spawn-result.js";
 import {
   moduleUsesCopying,
@@ -53,8 +54,8 @@ interface Emission {
   block: string;
 }
 
-test("the production layout and metadata stage lowers statically", () => {
-  const { coverage } = analyze(entry, { dynamic: false });
+test("the production layout and metadata stage lowers statically", async () => {
+  const coverage = await analyzeInChild(entry, { dynamic: false });
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.diagnostics).toEqual([]);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(1200);
@@ -72,7 +73,7 @@ for (const backend of ["llvm"] as const) {
     const executable = (name: string): string =>
       join(dir, name + (process.platform === "win32" ? ".exe" : ""));
     try {
-      const built = await compile(entry, {
+      const built = await compileInChild(entry, {
         outDir: dir,
         outPath: executable("stage"),
         backend,
