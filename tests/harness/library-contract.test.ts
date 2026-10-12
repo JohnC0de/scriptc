@@ -124,7 +124,7 @@ async function buildContract(
 }
 
 function nmDefined(archive: string, prefix: string): string[] {
-  const out = execFileSync("nm", ["-gU", archive], { encoding: "utf8" });
+  const out = execFileSync("nm", ["-g", "--defined-only", archive], { encoding: "utf8" });
   const set = new Set<string>();
   for (const line of out.split("\n")) {
     const sym = line.trim().split(/\s+/).pop();

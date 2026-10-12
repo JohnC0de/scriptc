@@ -92,7 +92,18 @@ test("committed string oracle matches Node", async () => {
     }),
     readFile(caseFile, "utf8"),
   ]);
-  expect(committed).toBe(stdout);
+  // The committed cases come from Node on arm64. Node on x64 answers the two
+  // allowlisted base-36 parseInt cases with exactly the values listed above;
+  // every other line, and any other value for those two, must still match.
+  const generated = stdout.split("\n");
+  const expected = committed.split("\n");
+  expect(generated).toHaveLength(expected.length);
+  const differing = generated.filter((line, index) => line !== expected[index]);
+  if (process.arch === "arm64") expect(differing).toEqual([]);
+  for (const line of differing) {
+    const [operation, input, radix, output] = line.split("\t");
+    expect(LINUX_PARSEINT_ULP.get(`${operation}(${input} ; ${radix})`), line).toBe(output);
+  }
 });
 
 test("string methods match Node on committed oracle cases", async () => {

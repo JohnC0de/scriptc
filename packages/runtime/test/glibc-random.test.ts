@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -8,7 +8,10 @@ const report =
     ? (process.report.getReport() as { header: { glibcVersionRuntime?: string } })
     : undefined;
 const version = report?.header.glibcVersionRuntime?.split(".").map(Number);
+// The probe targets glibc 2.34 exactly, which only zig cc can select.
+const hasZig = spawnSync("zig", ["version"], { stdio: "ignore" }).status === 0;
 const supported =
+  hasZig &&
   version !== undefined &&
   (version[0]! > 2 || (version[0] === 2 && version[1]! >= 34)) &&
   (process.arch === "x64" || process.arch === "arm64");

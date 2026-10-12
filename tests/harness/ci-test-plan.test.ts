@@ -1,7 +1,11 @@
+import { existsSync, readFileSync } from "node:fs";
+import { load } from "js-yaml";
 import { expect, test } from "vitest";
 import {
   ciTestPlan,
   corpusFiles,
+  darwinCorpusFiles,
+  darwinFiles,
   effectFiles,
   fileExclusions,
 } from "../../scripts/ci-test-plan.mjs";
@@ -106,10 +110,75 @@ test("CI reports failures after running every scheduled suite", async () => {
   expect(seen.sort()).toEqual([plan.corpus, ...plan.side].map((task) => task.name).sort());
 });
 
+test.for([1, 2, 3])("the darwin suite retains every darwin file with %i shards", (count) => {
+  for (const flavor of ["plain", "san"]) {
+    const plans = Array.from({ length: count }, (_, index) =>
+      ciTestPlan({ shard: `${index + 1}/${count}`, flavor, suite: "darwin" }),
+    );
+    for (const plan of plans) {
+      expect(plan.corpus.args).toEqual(["test", ...darwinCorpusFiles]);
+      expect(plan.corpus.env.SCRIPTC_SAN).toBe(flavor === "san" ? "1" : "");
+      expect(plan.side).toHaveLength(1);
+      expect(plan.side[0]!.args).toEqual([
+        "test",
+        "--passWithNoTests",
+        `--shard=${plan.corpus.env.SCRIPTC_TEST_SHARD}`,
+        ...darwinFiles,
+      ]);
+    }
+  }
+  // The full suite still runs every darwin file through its file shards.
+  for (const file of [...darwinCorpusFiles, ...darwinFiles]) {
+    expect(existsSync(new URL(`../../${file}`, import.meta.url)), file).toBe(true);
+    if (!darwinCorpusFiles.includes(file)) expect(fileExclusions).not.toContain(file);
+  }
+  expect(corpusFiles).toEqual(expect.arrayContaining(darwinCorpusFiles));
+});
+
+test("pull requests run the full suite on Linux and the darwin suite on macOS", () => {
+  type Job = {
+    "runs-on": string;
+    needs: string[];
+    strategy: { matrix: { flavor: string[]; shard: number[] | string } };
+    env: Record<string, string>;
+    steps: { run?: string; uses?: string; with?: { name?: string } }[];
+  };
+  const { jobs } = load(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  ) as { jobs: Record<string, Job> };
+  const linux = jobs["tests"]!;
+  const macos = jobs["tests_macos"]!;
+  expect(linux["runs-on"]).toBe("ubuntu-24.04");
+  expect(linux.needs).toContain("native_linux");
+  expect(linux.strategy.matrix.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  expect(linux.env["SCRIPTC_TEST_SHARD"]).toBe("${{ matrix.shard }}/10");
+  expect(linux.env["SCRIPTC_CI_SUITE"]).toBeUndefined();
+  expect(linux.steps.some((step) => step.uses === "./.github/actions/llvm-linux")).toBe(true);
+  expect(
+    linux.steps.find((step) => step.uses?.startsWith("actions/download-artifact"))!.with!.name,
+  ).toBe("native-linux-x64-gnu");
+  expect(macos["runs-on"]).toBe("macos-15");
+  expect(macos.needs).toContain("native_macos");
+  expect(macos.strategy.matrix.shard).toBe(
+    "${{ fromJSON(github.event_name == 'pull_request' && '[1, 2, 3]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]') }}",
+  );
+  expect(macos.env["SCRIPTC_TEST_SHARD"]).toBe(
+    "${{ matrix.shard }}/${{ github.event_name == 'pull_request' && '3' || '10' }}",
+  );
+  expect(macos.env["SCRIPTC_CI_SUITE"]).toBe(
+    "${{ github.event_name == 'pull_request' && 'darwin' || 'full' }}",
+  );
+  for (const job of [linux, macos]) {
+    expect(job.strategy.matrix.flavor).toEqual(["plain", "san"]);
+    expect(job.steps.at(-1)!.run).toBe("node scripts/ci-test.mjs");
+  }
+});
+
 test("CI rejects malformed scheduling inputs", () => {
   for (const shard of [undefined, "", "0/10", "11/10", "2/x"])
     expect(() => ciTestPlan({ shard, flavor: "plain" })).toThrow();
   for (const workers of [0, -1, 1.5, NaN, Infinity])
     expect(() => ciTestPlan({ shard: "1/10", flavor: "plain", workers })).toThrow();
   expect(() => ciTestPlan({ shard: "1/10", flavor: "unknown" })).toThrow();
+  expect(() => ciTestPlan({ shard: "1/10", flavor: "plain", suite: "unknown" })).toThrow();
 });

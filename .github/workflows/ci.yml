@@ -4,9 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly full macOS sweep, including on days without a push to main.
+  schedule:
+    - cron: "17 7 * * *"
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # The nightly sweep neither cancels nor is cancelled by main pushes.
+  group: ci-${{ github.event_name == 'schedule' && 'schedule' || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -98,12 +102,12 @@ jobs:
           retention-days: 1
 
   tests:
-    needs: [validation_scope, native_macos]
+    needs: [validation_scope, native_linux]
     if: ${{ needs.validation_scope.outputs.full == 'true' }}
-    name: test (${{ matrix.flavor }}, ${{ matrix.shard }}/10)
-    # arm64 macOS: same clang/libc the differential + number-formatting
-    # oracles were verified against.
-    runs-on: macos-15
+    name: test (Linux, ${{ matrix.flavor }}, ${{ matrix.shard }}/10)
+    # The full suite runs on Linux x64, whose hosted runners start without the
+    # macOS queue. tests_macos keeps the darwin clang/libc oracles.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +121,10 @@ jobs:
       SCRIPTC_TEST_WORKERS: "4"
       # san = ASan + RC audit over the same suite; anything but "1" is plain.
       SCRIPTC_SAN: ${{ matrix.flavor == 'san' && '1' || '' }}
+      # Match macOS, where Apple ASan has no LeakSanitizer: the RC audit owns
+      # leak detection, including intentional abandonment. Plain shards also
+      # build some sanitized probes, so this applies to both flavors.
+      ASAN_OPTIONS: detect_leaks=0
       # Within-file partition for the large case-driven harnesses
       # (differential, llvm-differential, npm, server, Test262, coverage, and
       # Vercel E2E): partition stable case names into slice i of 10
@@ -134,6 +142,49 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      - uses: ./.github/actions/llvm-linux
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x64-gnu
+          path: ${{ runner.temp }}
+      - run: tar -xzf "$RUNNER_TEMP/native-linux-x64-gnu.tar.gz"
+      - run: pnpm build
+      # Start the corpus immediately beside a serial side queue. One shared
+      # worker budget covers both processes; file and case shard axes stay
+      # separate so every fixture still runs exactly once in each lane.
+      - name: Tests (corpus and integration suites)
+        run: node scripts/ci-test.mjs
+
+  tests_macos:
+    needs: [validation_scope, native_macos]
+    if: ${{ needs.validation_scope.outputs.full == 'true' }}
+    name: test (macOS, ${{ matrix.flavor }}, ${{ github.event_name == 'pull_request' && 'darwin ' || '' }}${{ matrix.shard }}/${{ github.event_name == 'pull_request' && '3' || '10' }})
+    # arm64 macOS: same clang/libc the differential + number-formatting
+    # oracles were verified against. Pull requests run the darwin suite
+    # (scripts/ci-test-plan.mjs) in three slices; pushes to main and the
+    # nightly schedule run the complete suite in ten.
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [plain, san]
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[1, 2, 3]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]') }}
+    env:
+      # See the Linux tests job for the worker cap and case partitioning.
+      SCRIPTC_TEST_WORKERS: "4"
+      SCRIPTC_SAN: ${{ matrix.flavor == 'san' && '1' || '' }}
+      SCRIPTC_TEST_SHARD: ${{ matrix.shard }}/${{ github.event_name == 'pull_request' && '3' || '10' }}
+      SCRIPTC_CI_SUITE: ${{ github.event_name == 'pull_request' && 'darwin' || 'full' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
@@ -141,10 +192,7 @@ jobs:
           path: ${{ runner.temp }}
       - run: tar -xzf "$RUNNER_TEMP/native-darwin-arm64.tar.gz"
       - run: pnpm build
-      # Start the corpus immediately beside a serial side queue. One shared
-      # worker budget covers both processes; file and case shard axes stay
-      # separate so every fixture still runs exactly once in each lane.
-      - name: Tests (corpus and integration suites)
+      - name: Tests (${{ github.event_name == 'pull_request' && 'darwin suite' || 'corpus and integration suites' }})
         run: node scripts/ci-test.mjs
 
   native_linux:
@@ -753,7 +801,7 @@ jobs:
   # Require this check on the stack base. Upper layers must not pass before
   # full validation, so untested groups cannot merge. Merge bottom-up.
   test:
-    needs: [validation_scope, code_quality, native_macos, tests, native_linux, effects, bootstrap_seed, bootstrap, linux_host_clang, ts7_parity, llvm_artifacts_linux_x64, llvm_artifacts_macos_arm64, llvm_artifacts_macos_x64, windows_cli, llvm_artifacts_windows_x64, mobile_runtime_packs]
+    needs: [validation_scope, code_quality, native_macos, tests, tests_macos, native_linux, effects, bootstrap_seed, bootstrap, linux_host_clang, ts7_parity, llvm_artifacts_linux_x64, llvm_artifacts_macos_arm64, llvm_artifacts_macos_x64, windows_cli, llvm_artifacts_windows_x64, mobile_runtime_packs]
     # Run even after failed or cancelled lanes: skipped required jobs allow merging.
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -767,6 +815,7 @@ jobs:
             true)
               test "${{ needs.native_macos.result }}" = success
               test "${{ needs.tests.result }}" = success
+              test "${{ needs.tests_macos.result }}" = success
               test "${{ needs.native_linux.result }}" = success
               test "${{ needs.effects.result }}" = success
               test "${{ needs.bootstrap_seed.result }}" = success

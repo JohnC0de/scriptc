@@ -190,7 +190,9 @@ function nmSymbols(archive: string): { defined: Set<string>; undef: Set<string> 
     }
     return set;
   };
-  const defined = parse(execFileSync("nm", ["-gU", archive], { encoding: "utf8" }));
+  const defined = parse(
+    execFileSync("nm", ["-g", "--defined-only", archive], { encoding: "utf8" }),
+  );
   const undef = parse(execFileSync("nm", ["-u", archive], { encoding: "utf8" }));
   return { defined, undef };
 }

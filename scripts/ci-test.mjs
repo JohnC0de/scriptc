@@ -33,6 +33,7 @@ async function main() {
     shard: process.env.SCRIPTC_TEST_SHARD,
     flavor: process.env.SCRIPTC_SAN === "1" ? "san" : "plain",
     workers: Number(process.env.SCRIPTC_TEST_WORKERS ?? "4"),
+    suite: process.env.SCRIPTC_CI_SUITE || "full",
   });
   await runCiTestPlan(
     plan,

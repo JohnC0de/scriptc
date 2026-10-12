@@ -28,7 +28,29 @@ export const fileExclusions = [
   "tests/harness/self-hosting-native-driver.test.ts",
 ];
 
-export function ciTestPlan({ shard, flavor, workers = 4 }) {
+// Pull requests run the full suite on Linux. Their macOS lane keeps the
+// darwin clang/libc/kqueue oracles: the Node differential corpus, plus every
+// file whose assertions run only on darwin or take darwin-specific branches.
+// Pushes to main and the nightly schedule still run the full suite on macOS.
+export const darwinCorpusFiles = ["tests/harness/differential.test.ts"];
+export const darwinFiles = [
+  "packages/cli/test/bootstrap.test.ts",
+  "packages/cli/test/native-link-info.test.ts",
+  "packages/cli/test/native-output.test.ts",
+  "packages/cli/test/runtime-pack.test.ts",
+  "packages/compiler/test/debug-variables.test.ts",
+  "packages/compiler/test/native-codegen-integration.test.ts",
+  "packages/compiler/test/source-debugging.test.ts",
+  "packages/runtime-darwin-arm64/test/archive.test.ts",
+  "tests/harness/ffi-callback-pool.test.ts",
+  "tests/harness/ffi-catalog.test.ts",
+  "tests/harness/ffi-frameworks.test.ts",
+  "tests/harness/native-object-example.test.ts",
+  "tests/harness/runtime-tree-shaking.test.ts",
+  "tests/harness/terminal-geometry.test.ts",
+];
+
+export function ciTestPlan({ shard, flavor, workers = 4, suite = "full" }) {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(shard);
   if (
     !match ||
@@ -39,10 +61,27 @@ export function ciTestPlan({ shard, flavor, workers = 4 }) {
     throw new Error("invalid CI shard");
   if (flavor !== "plain" && flavor !== "san") throw new Error("invalid CI flavor");
   if (!Number.isInteger(workers) || workers < 1) throw new Error("invalid CI worker budget");
+  if (suite !== "full" && suite !== "darwin") throw new Error("invalid CI suite");
   const index = Number(match[1]),
     count = Number(match[2]);
   const sideWorkers = workers === 1 ? 0 : 1;
   const env = { SCRIPTC_TEST_SHARD: shard, SCRIPTC_SAN: flavor === "san" ? "1" : "" };
+  if (suite === "darwin")
+    return {
+      sideWorkers,
+      corpus: {
+        name: "case-sharded differential corpus",
+        args: ["test", ...darwinCorpusFiles],
+        env: { ...env, SCRIPTC_TEST_WORKERS: String(workers - sideWorkers) },
+      },
+      side: [
+        {
+          name: "darwin contracts",
+          args: ["test", "--passWithNoTests", "--shard=" + shard, ...darwinFiles],
+          env: { ...env, SCRIPTC_TEST_WORKERS: "1" },
+        },
+      ],
+    };
   const side = [
     {
       name: "file-sharded tests",
