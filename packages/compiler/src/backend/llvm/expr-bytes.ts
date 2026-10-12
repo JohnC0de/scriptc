@@ -361,47 +361,46 @@ export function emitToUint32(
   B.br(done);
 
   B.startBlock(slowLabel);
-  const ordered = B.tmp();
-  const belowInf = B.tmp();
-  const aboveNegInf = B.tmp();
-  const finiteRange = B.tmp();
-  const finite = B.tmp();
-  B.line(`${ordered} = fcmp ord double ${value}, ${value}`);
-  B.line(`${belowInf} = fcmp olt double ${value}, ${F64_INF}`);
-  B.line(`${aboveNegInf} = fcmp ogt double ${value}, ${f64Lit(-Infinity)}`);
-  B.line(`${finiteRange} = and i1 ${belowInf}, ${aboveNegInf}`);
-  B.line(`${finite} = and i1 ${ordered}, ${finiteRange}`);
-  const finiteLabel = B.newLabel("uint32.coerce.finite");
-  const nonfiniteLabel = B.newLabel("uint32.coerce.nonfinite");
-  const slowDone = B.newLabel("uint32.coerce.slow.done");
-  B.condBr(finite, finiteLabel, nonfiniteLabel);
-
-  B.startBlock(finiteLabel);
-  // Only magnitudes above 2^53 reach this block, and every such double is
-  // already an integer: no truncation is needed before the reduction.
-  const residue = B.tmp();
+  // Only NaN, the infinities and magnitudes above 2^53 reach this block.
+  // Such a finite double is the integer mantissa * 2^shift with shift >= 1,
+  // so its low 32 bits are the shifted mantissa's (none once shift >= 64),
+  // negated for a negative value. NaN and the infinities have the maximum
+  // exponent, a shift of 972, and convert to 0 like ToUint32. Integer
+  // arithmetic only: the former `frem` became an `fmod` call that LLVM
+  // could hoist above the range test, onto the fast path.
+  const bits = B.tmp();
+  const exponentBits = B.tmp();
+  const exponent = B.tmp();
+  const fraction = B.tmp();
+  const mantissa = B.tmp();
+  const shift = B.tmp();
+  const inWord = B.tmp();
+  const safeShift = B.tmp();
+  const shifted = B.tmp();
+  const magnitude = B.tmp();
+  const low = B.tmp();
   const negative = B.tmp();
-  const wrapped = B.tmp();
-  const normalized = B.tmp();
-  const finiteU32 = B.tmp();
-  B.line(`${residue} = frem double ${value}, ${f64Lit(4294967296)}`);
-  B.line(`${negative} = fcmp olt double ${residue}, ${f64Lit(0)}`);
-  B.line(`${wrapped} = fadd double ${residue}, ${f64Lit(4294967296)}`);
-  B.line(`${normalized} = select i1 ${negative}, double ${wrapped}, double ${residue}`);
-  B.line(`${finiteU32} = fptoui double ${normalized} to i32`);
-  B.br(slowDone);
-
-  B.startBlock(nonfiniteLabel);
-  B.br(slowDone);
-
-  B.startBlock(slowDone);
+  const negated = B.tmp();
   const slowU32 = B.tmp();
-  B.line(`${slowU32} = phi i32 [ ${finiteU32}, %${finiteLabel} ], [ 0, %${nonfiniteLabel} ]`);
+  B.line(`${bits} = bitcast double ${value} to i64`);
+  B.line(`${exponentBits} = lshr i64 ${bits}, 52`);
+  B.line(`${exponent} = and i64 ${exponentBits}, 2047`);
+  B.line(`${fraction} = and i64 ${bits}, 4503599627370495`);
+  B.line(`${mantissa} = or i64 ${fraction}, 4503599627370496`);
+  B.line(`${shift} = sub i64 ${exponent}, 1075`);
+  B.line(`${inWord} = icmp ult i64 ${shift}, 64`);
+  B.line(`${safeShift} = select i1 ${inWord}, i64 ${shift}, i64 0`);
+  B.line(`${shifted} = shl i64 ${mantissa}, ${safeShift}`);
+  B.line(`${magnitude} = select i1 ${inWord}, i64 ${shifted}, i64 0`);
+  B.line(`${low} = trunc i64 ${magnitude} to i32`);
+  B.line(`${negative} = icmp slt i64 ${bits}, 0`);
+  B.line(`${negated} = sub i32 0, ${low}`);
+  B.line(`${slowU32} = select i1 ${negative}, i32 ${negated}, i32 ${low}`);
   B.br(done);
 
   B.startBlock(done);
   const out = B.tmp();
-  B.line(`${out} = phi i32 [ ${fastU32}, %${fastLabel} ], [ ${slowU32}, %${slowDone} ]`);
+  B.line(`${out} = phi i32 [ ${fastU32}, %${fastLabel} ], [ ${slowU32}, %${slowLabel} ]`);
   return out;
 }
 
