@@ -9,7 +9,7 @@ import { type CcDriver, targetPlatform, resolveCc } from "./driver.js";
 import { clearCcCaches } from "./runtime-objects.js";
 import { compileCInternal } from "./executable.js";
 
-export type NativeCacheWarmProfile = "runtime" | "tls" | "dynamic";
+export type NativeCacheWarmProfile = "runtime" | "tls";
 
 export interface WarmNativeCachesOptions {
   /** Native object posture to seed. Defaults to the shipped release/-O2 lane. */
@@ -29,7 +29,7 @@ export function supportedNativeCacheWarmProfiles(
   driver: CcDriver,
 ): readonly NativeCacheWarmProfile[] {
   if (isMobileTarget(driver.target) || targetPlatform(driver) === "wasi") return [];
-  return ["runtime", "tls", "dynamic"];
+  return ["runtime", "tls"];
 }
 
 /** Populate expensive native prerequisites against the current compiler,
@@ -48,7 +48,7 @@ export async function warmNativeCaches(
     );
   }
   await ensurePrivateCacheRoot(cacheRoot, process.env["SCRIPTC_CACHE_DIR"] === undefined);
-  const known = new Set<NativeCacheWarmProfile>(["runtime", "tls", "dynamic"]);
+  const known = new Set<NativeCacheWarmProfile>(["runtime", "tls"]);
   for (const profile of options.profiles ?? []) {
     if (!known.has(profile)) throw new Error(`unknown native cache warm profile '${profile}'`);
   }
@@ -91,7 +91,6 @@ export async function warmNativeCaches(
             optimization: options.optimization ?? "release",
             sanitize: options.sanitize ?? false,
             ...(profile === "tls" ? { fetch: true } : {}),
-            ...(profile === "dynamic" ? { dynamic: true } : {}),
           },
           true,
           protectedPaths,

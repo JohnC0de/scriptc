@@ -183,10 +183,6 @@ function cryptoKdfInput(lowerer: Lowerer, node: ts.Expression): IrExpr {
   );
 }
 
-/** The node:crypto utility and introspection statics. Hash/Hmac are real
- * native handles; one-shot hashing, constant-time equality, random-fill/
- * integer, and PBKDF2 share the same runtime primitives as the island.
- * The name lists remain build-time constants. */
 export function lowerCryptoModuleCall(
   lowerer: Lowerer,
   expr: ts.CallExpression,

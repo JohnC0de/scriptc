@@ -28,7 +28,6 @@ describe.skipIf(process.platform !== "darwin").each(["llvm"] as const)(
       );
       const result = await compile(entry, {
         backend,
-        dynamic: false,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
         outDir,
         outPath: join(outDir, "program"),

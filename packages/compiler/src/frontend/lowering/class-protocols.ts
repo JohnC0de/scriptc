@@ -64,7 +64,7 @@ export class ClassProtocols {
       ) {
         // Receiver-dependent methods and accessors need a live object even
         // without a class implementation. Receiver-free methods keep their
-        // native callable fields, including async callbacks crossing islands.
+        // native callable fields, including async callbacks.
         add(this.checker.getTypeAtLocation(node));
         const contextual = this.checker.getContextualType(node);
         if (contextual) add(contextual);

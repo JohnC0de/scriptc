@@ -75,7 +75,7 @@ test.each([
   try {
     const entry = join(dir, "main.ts");
     writeFileSync(entry, `export {};\n${source}`);
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
     expect(
       coverage.diagnostics.some((d) => d.code === "SC1090" && d.message.includes(message)),

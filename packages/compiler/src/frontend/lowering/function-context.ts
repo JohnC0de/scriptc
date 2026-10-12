@@ -157,7 +157,7 @@ export function captureContextBinding(
   for (let depth = stack.length - 2; depth >= 0; depth--) {
     const origin = bindingInContext(stack[depth]!, symbol);
     if (origin === null) continue;
-    // dyn/jsval retain their existing untraced box contract. Typed
+
     // references use the backends' box tracing for capture cycles.
     origin.boxed = true;
     let parentEntry = origin;

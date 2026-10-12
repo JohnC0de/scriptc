@@ -1,7 +1,0 @@
-scriptc coverage tests/coverage-fixtures/dynamic-mix.ts
-
-  statements analyzed   9
-  compile statically    6  (66%)
-  compile dynamically   3  (33%) (island sites — the embedded engine runs them)
-
-  builds with --dynamic — no remaining blockers (the island sites above run in the embedded engine).

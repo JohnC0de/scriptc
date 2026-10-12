@@ -406,7 +406,7 @@ export class NarrowingStability {
     const facts: ProgramFacts = {
       mutable: new Set(),
       accessors: new Set(),
-      wildcard: this.lowerer.dynamic,
+      wildcard: false,
       conversion: false,
       iteration: false,
     };

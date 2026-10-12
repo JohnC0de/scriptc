@@ -1750,9 +1750,9 @@ static ScrDyn *url_property_read(const ScrDyn *object, const char *name) {
     scr_dyn_release(view);
     return value;
   }
-  if (object->kind == SCR_DYN_JSVAL || object->kind == SCR_DYN_HANDLE) {
+  if (object->kind == SCR_DYN_HANDLE) {
     ScrStr *key = scr_str_new(name, strlen(name));
-    ScrDyn *value = object->kind == SCR_DYN_JSVAL ? scr_dyn_isl_key_get(object, key) : scr_dyn_handle_key_get(object, key);
+    ScrDyn *value = scr_dyn_handle_key_get(object, key);
     scr_str_release(key);
     return value;
   }

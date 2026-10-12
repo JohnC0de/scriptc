@@ -122,7 +122,6 @@ async function tryFastPath(): Promise<number | null> {
     outPath,
     emitIr: values["emit-ir"],
     sanitize: values.sanitize,
-    dynamic: values.dynamic,
     backend: "llvm",
     ...(optimization === "dev" || optimization === "speed" ? { optimization } : {}),
     ...(values.strip ? { strip: true as const } : {}),
@@ -203,9 +202,7 @@ async function coverageFastPath(
   } catch {
     return null;
   }
-  const hit = await startup
-    .readCoverageVerdict(resolve(inputArg), { dynamic: values.dynamic })
-    .catch(() => null);
+  const hit = await startup.readCoverageVerdict(resolve(inputArg), {}).catch(() => null);
   if (hit === null) return null;
   const { coverage, sourceTexts } = hit;
   if (print === "diagnostics") {

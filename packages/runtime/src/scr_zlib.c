@@ -86,12 +86,6 @@ ScrBytes *scr_zlib_inflate(const ScrBytes *data) {
   return out;
 }
 
-/* ── format-mode variants (static raw/gzip/unzip calls use these directly;
- * scr_zlib_island.c also bridges them into the embedded engine's node:zlib
- * shim) ───────────────────────────────────────────────────────────────
- * mode: 0 zlib (windowBits 15), 1 raw (-15), 2 gzip (15+16); inflate
- * additionally takes 3 = auto-detect zlib/gzip (15+32, Node's unzip). */
-
 static int scr_zlib_window_bits(int mode, bool inflating) {
   switch (mode) {
   case 1: return -15;
@@ -342,12 +336,6 @@ void scr_zlib_codec_async(const ScrBytes *data, double mode, bool compressing,
 }
 #endif
 
-/* One-shot raw-DEFLATE inflate into a caller-sized buffer: the island's
- * compressed embedded module text (the emitter stores big npm sources
- * deflated and their exact inflated length in the table row — the emitted
- * main installs this through scr_island_set_inflate). True only when the
- * stream ends exactly at dst_len; any mismatch is a build/runtime bug the
- * caller surfaces, never a silent truncation. */
 bool scr_zlib_inflate_exact(const unsigned char *src, size_t src_len,
                             unsigned char *dst, size_t dst_len) {
   z_stream zs;

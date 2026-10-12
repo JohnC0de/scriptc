@@ -16,7 +16,7 @@ test("Set iterator seeds refuse different declared reference layouts", () => {
       console.log(new Set<{ id: number }>(records.values()).size);
     `,
     );
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
     expect(coverage.diagnostics).toEqual(
       expect.arrayContaining([
@@ -62,7 +62,6 @@ test("Set iterator seeds cannot hide identity copies behind annotations", async 
     `,
     );
     const result = await compile(entry, {
-      dynamic: false,
       optimization: "dev",
       sanitize: process.env["SCRIPTC_SAN"] === "1",
       outDir: dir,

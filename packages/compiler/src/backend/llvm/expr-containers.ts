@@ -630,14 +630,14 @@ export function emitArrIntrinsic(
     case "pop":
     case "shift": {
       host.emitPublishedArrayGuard(r.name, e.receiver.type, method === "pop" ? 2 : 6);
-      const dynamic = elem.kind === "dyn" && e.type.kind === "dyn";
-      if (!dynamic && e.type.kind !== "union")
+      const checkedValue = elem.kind === "dyn" && e.type.kind === "dyn";
+      if (!checkedValue && e.type.kind !== "union")
         throw new InternalCompilerError("llvm emitter bug: array removal result is not a union");
       const def = e.type.kind === "union" ? host.unionsById.get(e.type.unionId) : undefined;
       const tag = def ? def.arms.findIndex((arm) => typeEquals(arm, elem)) : -1;
       const undefTag = undefinedArmTag(e.type, host.unionsById);
       const sameUnion = elem.kind === "union" && typeEquals(elem, e.type);
-      if (!dynamic && ((!sameUnion && tag < 0) || undefTag < 0))
+      if (!checkedValue && ((!sameUnion && tag < 0) || undefTag < 0))
         throw new InternalCompilerError("llvm emitter bug: array removal union lacks its arms");
       host.declare(`declare zeroext i8 @scr_arr_${method}_state(ptr, ptr)`);
       const rawSlot = B.slot();
@@ -660,11 +660,11 @@ export function emitArrIntrinsic(
       else if (elem.kind === "bool") B.line(`${value} = icmp ne i64 ${raw}, 0`);
       else B.line(`${value} = inttoptr i64 ${raw} to ptr`);
       B.line(
-        `store ptr ${dynamic || sameUnion || e.type.kind !== "union" ? value : host.unionNewOwned(e.type.unionId, tag, { name: value, type: elem })}, ptr ${resultSlot}`,
+        `store ptr ${checkedValue || sameUnion || e.type.kind !== "union" ? value : host.unionNewOwned(e.type.unionId, tag, { name: value, type: elem })}, ptr ${resultSlot}`,
       );
       B.br(lj);
       B.startBlock(la);
-      if (dynamic) {
+      if (checkedValue) {
         host.declare(`declare ptr @scr_dyn_undefined()`);
         const absent = B.tmp();
         B.line(`${absent} = call ptr @scr_dyn_undefined()`);

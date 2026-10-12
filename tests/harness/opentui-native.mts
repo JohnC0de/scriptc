@@ -55,7 +55,6 @@ writeFileSync(
 for (const backend of ["llvm"] as const) {
   const result = await compile(join(fixtures, "native.ts"), {
     backend,
-    dynamic: false,
     outDir: join(out, backend),
     outPath: join(out, `opentui-${backend}`),
     ffiProfilePath: profile,

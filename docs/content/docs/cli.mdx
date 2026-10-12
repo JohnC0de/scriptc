@@ -12,10 +12,9 @@ Usage:
   scriptc build <file.ts|.js> [options]     compile to an executable or source artifact
   scriptc run <file.ts|.js> [options]       compile and run
   scriptc coverage <file.ts|.js>            how much compiles statically, and why not
-  scriptc coverage <file.ts|.js> --dynamic  what a --dynamic build compiles, and what still blocks it
   scriptc coverage <file.ts|.js> --external-types <specifier=file.d.ts>
                                             type-resolve an embedder-provided module for analysis
-  scriptc cache warm [runtime|tls|dynamic…] verify and load precompiled runtime families
+  scriptc cache warm [runtime|tls…] verify and load precompiled runtime families
                                             for the current compiler/SDK/target
 ```
 
@@ -54,7 +53,7 @@ fib.s
 
 Different output kinds accumulate in `.scriptc/`; rebuilding a kind updates its file.
 
-The IR and LLVM source outputs require only Node. On supported macOS, Linux, and Windows hosts, assembly and object outputs use the matching native helper installed with scriptc and do not invoke an external compiler, archiver, linker, or SDK. The object is a relocatable program object with undefined <code>scr_*</code> runtime symbols and a required <code>scr_runtime_abi_v13</code> marker, not a standalone library. External consumption is experimental and requires the exact runtime version reported by <code>--print=native-link-info</code>. That option still writes the object, performs no link, and prints a versioned JSON recipe with the target, <code>main</code> entry, installed precompiled runtime pack, FFI inputs, and system libraries. It never reports private scriptc cache paths. See <a href="/native-objects">Native Program Objects</a> for complete C-driver and direct-linker examples. <code>--emit=exe</code> is the default. LLVM builds emit the program object through the helper and link precompiled runtime objects; runtime development with AddressSanitizer compiles an instrumented C runtime.
+The IR and LLVM source outputs require only Node. On supported macOS, Linux, and Windows hosts, assembly and object outputs use the matching native helper installed with scriptc and do not invoke an external compiler, archiver, linker, or SDK. The object is a relocatable program object with undefined <code>scr_*</code> runtime symbols and a required <code>scr_runtime_abi_v14</code> marker, not a standalone library. External consumption is experimental and requires the exact runtime version reported by <code>--print=native-link-info</code>. That option still writes the object, performs no link, and prints a versioned JSON recipe with the target, <code>main</code> entry, installed precompiled runtime pack, FFI inputs, and system libraries. It never reports private scriptc cache paths. See <a href="/native-objects">Native Program Objects</a> for complete C-driver and direct-linker examples. <code>--emit=exe</code> is the default. LLVM builds emit the program object through the helper and link precompiled runtime objects; runtime development with AddressSanitizer compiles an instrumented C runtime.
 
 ## scriptc run
 
@@ -69,11 +68,11 @@ Note: `run` does not forward extra command-line arguments to the program. To pas
 
 ## scriptc coverage
 
-Analyzes the program without producing a binary and reports, statement by statement, what compiles statically, what needs the embedded dynamic engine, and what blocks the rest. With `--dynamic` it answers a different question: what would a `--dynamic` build compile, and what still blocks it. Both forms are covered in depth in [Coverage Reports](/docs/coverage).
+Analyzes the program without producing a binary and reports, statement by statement, what compiles to native code and what blocks the rest. Reports are covered in depth in [Coverage Reports](/docs/coverage).
 
 ## scriptc cache warm
 
-Verifies and reads the installed precompiled runtime objects and vendor archives. Pass one or more of `runtime`, `tls`, and `dynamic` to select those families. Ordinary builds need no runtime compilation or installation-time warming. With `--sanitize`, this command builds instrumented runtime objects using the development C toolchain.
+Verifies and reads the installed precompiled runtime objects and vendor archives. Pass one or more of `runtime` and `tls` to select those families. Ordinary builds need no runtime compilation or installation-time warming. With `--sanitize`, this command builds instrumented runtime objects using the development C toolchain.
 
 ## Options
 
@@ -89,9 +88,6 @@ Verifies and reads the installed precompiled runtime objects and vendor archives
 
   <dt><code>--fail-on &lt;blockers|divergences&gt;</code></dt>
   <dd>Coverage only. Exit with status 1 when the entry has blockers that would fail a build, or with <code>divergences</code>, also when it has Node divergence warnings. See <a href="/docs/coverage#gating-builds-and-ci">Gating builds and CI</a>.</dd>
-
-  <dt><code>--dynamic</code></dt>
-  <dd>Embed the JavaScript engine to run npm dependencies and supported <code>any</code>-typed code. Static compilation is the default; without this flag, dynamic-tier sites produce compilation errors. See <a href="/dependencies">npm Dependencies</a>.</dd>
 
   <dt><code>--ffi &lt;file&gt;</code></dt>
   <dd>Bind signature-only TypeScript declarations to native C ABI symbols and link the manifest's archive, object, and system-library inputs. See <a href="/ffi">Native FFI</a>.</dd>
@@ -112,10 +108,10 @@ Verifies and reads the installed precompiled runtime objects and vendor archives
   <dd>On Linux, when the program calls <code>process.exit()</code>, hand the release of its memory to a helper process so the parent sees the exit sooner. The kernel otherwise frees the whole address space before the exit is reported, which takes tens of milliseconds per gigabyte. Opt in only where the trade-offs are acceptable: for up to about 100 ms after the exit, the helper keeps the executable mapped (overwriting the binary in place fails with "text file busy"), its memory stays charged to the cgroup, and the teardown CPU time no longer appears in the parent's resource usage. Valid only for executable builds; it has no effect on other platforms.</dd>
 
   <dt><code>--npm-static &lt;pkg[,pkg…]|auto&gt;</code></dt>
-  <dd>EXPERIMENTAL. Compile the named npm packages' shipped JS statically as program modules instead of embedding them for the engine (repeatable; <code>auto</code> opts in every eligible direct import). A package the preflight refuses falls back to the island with a coverage-report note. See <a href="/dependencies">npm Dependencies</a> for maturity notes.</dd>
+  <dd>Explicitly select npm packages for native compilation (repeatable). Naming a package overrides the automatic declaration-surface eligibility check; <code>auto</code> uses the default automatic selection. Refused packages produce diagnostics. See <a href="/dependencies">npm Dependencies</a> for maturity notes.</dd>
 
   <dt><code>--provenance-sources</code></dt>
-  <dd>EXPERIMENTAL. Compile npm dependencies from their provenance-attested source, fetched at the attested commit, as static program modules; packages without a usable attestation keep the engine path (a note, never a failure).</dd>
+  <dd>EXPERIMENTAL. Compile npm dependencies from their provenance-attested source, fetched at the attested commit, as static program modules; packages without a usable attestation keep the installed-source compilation path.</dd>
 
   <dt><code>--external-types &lt;specifier=file.d.ts&gt;</code></dt>
   <dd>Coverage only. Map an exact bare module specifier to a local declaration file supplied by an embedder. Repeat the option for multiple modules. The declaration supplies checker types so application coverage can continue; runtime imports and values remain explicit <code>SC1010</code> blockers. Relative paths resolve from the current working directory. Accepted files end in <code>.d.ts</code>, <code>.d.mts</code>, or <code>.d.cts</code>.</dd>

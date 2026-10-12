@@ -78,14 +78,6 @@ function expectedExitCode(file: string): number {
   return 0;
 }
 
-/** `// @dynamic` in the entry file's directive head: compile with the
- * island engine embedded (--dynamic). The Node side needs no flag — the
- * island shim (island-shim.mjs) makes __island_eval a global indirect
- * eval, so Node stays the oracle for island VALUE results. */
-function wantsDynamic(file: string): boolean {
-  return directiveHead(file).some((l) => /^\/\/ @dynamic\s*$/.test(l));
-}
-
 /** `// @optimization: speed` in the entry file's directive head (or the
  * SCRIPTC_TEST_OPTIMIZATION=speed lane): compile with --optimization=speed,
  * for programs that pin behavior of the size-for-speed code paths. */
@@ -167,9 +159,7 @@ function nodeOracleArgs(file: string): string[] {
   const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
   // --import makes Node load even a CJS entry through its ESM loader,
   // changing an entry throw's uncaughtException origin to unhandledRejection.
-  const shims = directiveHead(file).includes("// @no-node-shims")
-    ? []
-    : ["--import", comptimeShim, "--import", islandShim];
+  const shims = directiveHead(file).includes("// @no-node-shims") ? [] : ["--import", comptimeShim];
   return [...transform, ...nodep, ...shims, nodeOracleFile(file)];
 }
 
@@ -227,10 +217,6 @@ function comparableStderr(stderr: Buffer): Buffer {
 // globally so Node stays the oracle for comptime programs (the compile-time
 // result must equal what Node computes at runtime); inert for the rest.
 const comptimeShim = pathToFileURL(join(import.meta.dirname, "comptime-shim.mjs")).href;
-// `__island_eval(code)` in plain JS semantics is a global indirect eval +
-// String() — the island shim defines it so Node stays the oracle for island
-// programs too; inert for the rest.
-const islandShim = pathToFileURL(join(import.meta.dirname, "island-shim.mjs")).href;
 
 /** Entry file plus siblings for directory tests — every byte a program run
  * depends on, shared by the oracle cache key and the compile cache key.
@@ -276,7 +262,6 @@ function oracleKeyBase(): Promise<string> {
       .update("\0")
       .update(readFileSync(fileURLToPath(comptimeShim)))
       .update("\0")
-      .update(readFileSync(fileURLToPath(islandShim)))
       .update("\0")
       .update(process.env["SCRIPTC_TEST_ENV"] ?? "")
       .update("\0")
@@ -370,13 +355,11 @@ async function runNode(file: string): Promise<RunResult> {
 async function compileAndRun(file: string): Promise<RunResult> {
   // Directory tests hash every sibling file so edits to imports bust the cache.
   const inputs = programInputs(file);
-  const dynamic = wantsDynamic(file);
   const speed = wantsSpeed(file);
   const hash = createHash("sha256");
   for (const f of inputs) hash.update(f).update(readFileSync(f));
   const key = hash
     .update(sanitize ? "san" : "plain")
-    .update(dynamic ? "dyn" : "")
     .update(speed ? "speed" : "")
     .digest("hex")
     .slice(0, 16);
@@ -386,7 +369,6 @@ async function compileAndRun(file: string): Promise<RunResult> {
     outPath: join(outDir, process.platform === "win32" ? "program.exe" : "program"),
     outDir,
     sanitize,
-    dynamic,
     backend: "llvm",
     ...(speed ? { optimization: "speed" as const } : {}),
   });

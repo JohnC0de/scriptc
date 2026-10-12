@@ -46,7 +46,7 @@ $ ./hello scriptc
 hello, scriptc
 ```
 
-This program compiles statically, so the executable does not include a JavaScript engine. The shell examples use POSIX syntax; on Windows, build `hello.exe` and invoke it with `.\hello.exe`.
+The executable does not include a JavaScript engine. The shell examples use POSIX syntax; on Windows, build `hello.exe` and invoke it with `.\hello.exe`.
 
 ## Check compilation support
 
@@ -62,10 +62,10 @@ $ scriptc coverage hello.ts
   statements analyzed   2
   compile statically    2  (100%)
 
-  fully static — this program has no dynamic remainder.
+  fully static — all analyzed statements compile to native code.
 ```
 
-For programs that need dynamic execution or contain unsupported operations, the report lists the affected sites and diagnostic codes. See [Coverage Reports](/docs/coverage).
+For programs that contain unsupported operations, the report lists the affected sites and diagnostic codes. See [Coverage Reports](/docs/coverage).
 
 ## Use an npm dependency
 
@@ -77,16 +77,16 @@ import pc from "picocolors";
 console.log(pc.green("hello"));
 ```
 
-Install the package and enable the embedded engine with `--dynamic`:
+Install the package, then compile its JavaScript along with your application:
 
 ```console
 $ npm install picocolors
-$ scriptc build cli.ts --dynamic -o demo >/dev/null
+$ scriptc build cli.ts -o demo >/dev/null
 $ ./demo
 hello
 ```
 
-The package's JavaScript is embedded at build time. The executable does not read `node_modules` at runtime. See [npm Dependencies](/docs/dependencies) for package resolution, type declarations, and runtime behavior.
+The package's JavaScript compiles to native code at build time. The executable does not read `node_modules` at runtime. See [npm Dependencies](/docs/dependencies) for package resolution, type declarations, and runtime behavior.
 
 ## Next steps
 

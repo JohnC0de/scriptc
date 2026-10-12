@@ -55,12 +55,11 @@ interface Emission {
 }
 
 test("the production layout and metadata stage lowers statically", async () => {
-  const coverage = await analyzeInChild(entry, { dynamic: false });
+  const coverage = await analyzeInChild(entry, {});
   expect(coverage.preflightFailed).toBe(false);
   expect(coverage.diagnostics).toEqual([]);
   expect(coverage.stats.statementsTotal).toBeGreaterThan(1200);
   expect(coverage.stats.statementsFailed).toBe(0);
-  expect(coverage.stats.statementsIsland).toBe(0);
   expect(coverage.stats.functionsSkipped).toBe(0);
 });
 
@@ -77,7 +76,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: executable("stage"),
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize,
       });
@@ -215,7 +213,6 @@ for (const backend of ["llvm"] as const) {
           outDir: dir,
           outPath: irPath,
           outputKind: "ir",
-          dynamic: false,
         });
         if (!frontend.ok)
           throw new Error(frontend.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));

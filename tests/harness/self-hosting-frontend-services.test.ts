@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { ts7Executable } from "../../packages/compiler/src/frontend/ts7/rpc-api.js";
 
-import { npmFetchCases } from "../../packages/compiler/test/npm-fetch-cases.js";
 import { analyzeInChild, compileInChild } from "./self-hosting-compiler-process.js";
 import { spawnResult } from "./spawn-result.js";
 
@@ -27,23 +26,7 @@ function input(directory: string) {
     'exports.request = globalThis.fetch; exports.leaf = require("./leaf.js"); exports.later = () => require("./missing.js");',
   );
   writeFileSync(join(packageDirectory, "leaf.js"), "exports.local = 1;");
-  const typedDirectory = join(directory, "node_modules/service-typescript");
-  mkdirSync(typedDirectory, { recursive: true });
-  writeFileSync(
-    join(typedDirectory, "package.json"),
-    JSON.stringify({ name: "service-typescript", type: "module", main: "index.ts" }),
-  );
-  writeFileSync(
-    join(typedDirectory, "index.ts"),
-    'import type { Missing } from "missing-types"; import { value } from "./value.mts"; export function get(): number { return value; }',
-  );
-  writeFileSync(join(typedDirectory, "value.mts"), "export const value: number = 42;");
   return {
-    modules: npmFetchCases.map((item, index) => ({
-      key: `${index}.js`,
-      source: item.source,
-      format: "cjs",
-    })),
     directory,
     declarations:
       "export class Box { value(): string; value(next: string): this; peer: Box | null; }",
@@ -94,15 +77,13 @@ for (const backend of ["llvm"] as const) {
           libraries: [object],
         }),
       );
-      const coverage = await analyzeInChild(entry, { dynamic: false, ffiProfilePath: profile });
+      const coverage = await analyzeInChild(entry, { ffiProfilePath: profile });
       expect(coverage.preflightFailed, JSON.stringify(coverage.diagnostics)).toBe(false);
       expect(coverage.diagnostics).toEqual([]);
       expect(coverage.stats.statementsFailed).toBe(0);
-      expect(coverage.stats.statementsIsland).toBe(0);
       expect(coverage.stats.functionsSkipped).toBe(0);
       const built = await compileInChild(entry, {
         backend,
-        dynamic: false,
         optimization: "dev",
         sanitize,
         ffiProfilePath: profile,
@@ -135,39 +116,12 @@ for (const backend of ["llvm"] as const) {
       expect(run.stderr.toString()).toBe(node.stderr.toString());
       const result = JSON.parse(readFileSync(report, "utf8"));
       expect(result).toEqual(JSON.parse(readFileSync(expected, "utf8")));
-      expect(result.fetch).toEqual(
-        npmFetchCases.flatMap((item, index) => (item.usesFetch ? [`${index}.js`] : [])),
-      );
-      expect(result.collision).toBe(true);
       expect(result.closed).toBe(true);
       expect(result.nullable).not.toBeNull();
       expect(result.overloads).not.toBeNull();
       expect(result.widened).not.toBeNull();
       expect(typeof result.rewritten).toBe("string");
-      expect(result.graph.modules).toHaveLength(4);
-      expect(
-        result.graph.modules.filter((module: { usesFetch: boolean }) => module.usesFetch),
-      ).toHaveLength(1);
-      expect(result.graph.modules[0].facade).toContain("request");
-      expect(
-        result.graph.modules.filter((module: { key: string }) => /\.(?:ts|mts)$/.test(module.key)),
-      ).toEqual([
-        {
-          key: join(directory, "node_modules/service-typescript/index.ts").replaceAll("\\", "/"),
-          format: "esm",
-          usesFetch: false,
-          facade: "",
-        },
-        {
-          key: join(directory, "node_modules/service-typescript/value.mts").replaceAll("\\", "/"),
-          format: "esm",
-          usesFetch: false,
-          facade: "",
-        },
-      ]);
-      expect(result.graph.lazyTraps).toEqual([
-        { specifier: "./missing.js", via: ["require"], packages: ["service-fetch"] },
-      ]);
+      expect(result.resolved).toBe(join(directory, "node_modules/service-fetch/index.js"));
       expect(result.versions).toEqual(["export const original = 1;", "export const changed = 2;"]);
     } finally {
       rmSync(directory, { recursive: true, force: true });

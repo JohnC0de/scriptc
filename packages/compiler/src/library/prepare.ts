@@ -451,12 +451,8 @@ export function prepareLibrary(
   timing: (phase: string, detail?: Record<string, unknown>) => void = () => {},
 ): PreparedLibrary | CompileFailure {
   const entryPath = profile.entry;
-  // Bare npm specifiers in a library graph take the STATIC-OR-REFUSE
-  // posture: "lib" runs the same auto-detection and eligibility bar as
-  // the executable lane's --npm-static (own .d.ts, unminified shipped JS,
-  // no build-transform markers), automatically — the library path has no
-  // island/dynamic tier to offer. Explicit profile npm_static entries may
-  // also attempt source inference; any failed attempt remains a refusal.
+  // Library and executable graphs share automatic package eligibility.
+  // Explicit profile selections attempt source inference; failures remain refusals.
   const fe = createFrontend(entryPath, "lib", undefined, profile.npmStatic);
   timing("frontend-load", {
     entry_bytes: fe.entryText().length,
@@ -475,26 +471,14 @@ export function prepareLibrary(
       diagnostics: decorateLibraryRefusals(diagnostics, profile),
       sourceTexts: fe.sourceTexts(),
     });
-    // The npm verdicts FIRST: whatever the shared frontend would have
-    // served from the island — an eligibility miss, an untyped install, a
-    // preflight offender inside a package's files, a dropped inferred
-    // surface — refuses here with the package and the specific bar it
-    // missed. Checked before the general preflight, whose diagnostics for
-    // these same imports speak executable-lane teachings (SC1010/SC0001 at
-    // the unresolvable edge); the library answer is this one.
-    const npmRefused = fe.npmStatic.filter((s) => s.status === "fallback");
+    // Report the package-specific refusal before general preflight errors.
+    const npmRefused = fe.npmStatic.filter((s) => s.status === "refused");
     if (npmRefused.length > 0) {
       return fail(
         npmRefused.map((s) =>
           libNpmIneligibleDiag(
             s.package,
-            // The one shared offender reason that narrates the executable
-            // lane's fallback loses that clause here — no island exists on
-            // this path to serve anything.
-            (s.detail ?? "its static compilation was refused").replace(
-              "; the island serves the package",
-              "",
-            ),
+            s.detail ?? "its static compilation was refused",
             fe.npmImportSites.get(s.package) ?? { file: entryPath, start: 0, end: 0 },
           ),
         ),
@@ -553,7 +537,6 @@ export function prepareLibrary(
     }
     try {
       lowered = fe.lower({
-        dynamic: false,
         targetPlatform: buildPlatform,
         ...(cbImports.length > 0 ? { ffiImports: cbImports } : {}),
         ...(cbImports.length > 0 ? { libraryCallbacks: true } : {}),

@@ -20,7 +20,6 @@ import { nativeCodegenTarget, type NativeTargetSpec } from "./backend/targets.js
 export function precompiledRuntimePackTarget(
   env: NodeJS.ProcessEnv = process.env,
 ): NativeTargetSpec | null {
-  if (env["SCRIPTC_FETCH_CURL"] === "1") return null;
   return nativeCodegenTarget(env);
 }
 export { readCoverageVerdict } from "./coverage/verdict-startup.js";

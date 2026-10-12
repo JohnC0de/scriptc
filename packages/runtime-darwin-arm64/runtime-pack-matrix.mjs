@@ -62,7 +62,6 @@ const optional = [
   ["scr_dc.c", "dc"],
   ["scr_async_dyn.c", any("dynAsync", "dynInvoke", "dc", "fileHandle", "nativeFetch")],
   ["scr_zlib.c", "zlib"],
-  ["scr_zlib_island.c", all("zlib", "dynamic")],
   ["scr_events.c", "events"],
   ["scr_readline.c", "events"],
   ["scr_events_emitter.c", "emitter"],
@@ -88,37 +87,15 @@ const optional = [
   ["scr_tls_ca.c", "tlsCaEffective"],
   ["scr_tls.c", "tlsEffective"],
   ["scr_fetch.c", "nativeFetch"],
-  ["scr_island.c", "dynamic"],
-  ["scr_web.c", "dynamic"],
-  ["scr_inspect_island.c", all("dynamic", "inspect")],
-  ["scr_net_island.c", "netIslandEffective"],
 ];
 
 function variantsFor(source) {
-  const dynamicOnly = new Set([
-    "scr_zlib_island.c",
-    "scr_island.c",
-    "scr_web.c",
-    "scr_inspect_island.c",
-    "scr_net_island.c",
-  ]);
-  if (dynamicOnly.has(source)) {
-    return [{ id: "dynamic", when: { dynamic: true }, defines: ["SCR_DYNAMIC"] }];
-  }
   const variants = [{ id: "default", when: {}, defines: [] }];
   if (source === "scr_bytes.c") {
     variants.push({
       id: "text-decoder-legacy",
       when: { textDecoderLegacy: true },
       defines: ["SCR_TEXT_DECODER_LEGACY"],
-    });
-  }
-  variants.push({ id: "dynamic", when: { dynamic: true }, defines: ["SCR_DYNAMIC"] });
-  if (source === "scr_bytes.c") {
-    variants.push({
-      id: "dynamic-text-decoder-legacy",
-      when: { dynamic: true, textDecoderLegacy: true },
-      defines: ["SCR_DYNAMIC", "SCR_TEXT_DECODER_LEGACY"],
     });
   }
   return variants;
@@ -141,14 +118,11 @@ export const RUNTIME_PACK_MATRIX = withLibraryRuntimeFlavors(
       ...optional.map(([source, predicate]) => ({ source, predicate })),
     ].map((unit) => ({ ...unit, variants: variantsFor(unit.source) })),
     archives: [
-      { id: "quickjs", predicate: "dynamic" },
-      { id: "libregexp", predicate: { all: ["regex"], not: ["dynamic"] } },
+      { id: "quickjs", predicate: false },
+      { id: "libregexp", predicate: "regex" },
       { id: "zlib", predicate: "zlibEffective" },
       { id: "mbedtls", predicate: "tlsEffective" },
     ],
-    system_libraries: [
-      { name: "System", predicate: true },
-      { name: "m", predicate: "dynamic" },
-    ],
+    system_libraries: [{ name: "System", predicate: true }],
   }),
 );

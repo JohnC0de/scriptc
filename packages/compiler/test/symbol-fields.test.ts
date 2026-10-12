@@ -53,7 +53,6 @@ test.each([
       ),
       JSON.stringify(coverage, null, 2),
     ).toBe(true);
-    expect(coverage.stats.statementsIsland).toBe(0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -73,7 +72,6 @@ test.each([
     const { coverage } = analyze(entry);
     expect(coverage.preflightFailed).toBe(false);
     expect([...coverage.diagnostics, ...(coverage.runtimeFences ?? [])]).toEqual([]);
-    expect(coverage.stats.statementsIsland).toBe(0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -107,7 +105,6 @@ test.each([
       ),
       JSON.stringify(coverage, null, 2),
     ).toBe(true);
-    expect(coverage.stats.statementsIsland).toBe(0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -130,7 +127,6 @@ test.each([
     const { coverage } = analyze(entry);
     expect(coverage.preflightFailed).toBe(false);
     expect([...coverage.diagnostics, ...(coverage.runtimeFences ?? [])]).toEqual([]);
-    expect(coverage.stats.statementsIsland).toBe(0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

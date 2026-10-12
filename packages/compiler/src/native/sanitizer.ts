@@ -6,7 +6,7 @@ import { NativeCodegenError } from "../backend/native-codegen-core.js";
 import { requireNativeArtifact, runNativeTool } from "../backend/native-tools.js";
 import type { NativeRuntimePack, NativeRuntimeSelection } from "../backend/runtime-pack-native.js";
 import { runtimePackFlavorKey, type RuntimePackMode } from "../backend/runtime-pack-core.js";
-import { QJS_ENGINE_SOURCES, LRE_SOURCES, ZLIB_SOURCES } from "../backend/vendor-inputs.js";
+import { LRE_SOURCES, ZLIB_SOURCES } from "../backend/vendor-inputs.js";
 import { contentDigest, type NativeCache } from "./cache.js";
 import type { NativeToolchain } from "./toolchain.js";
 
@@ -159,20 +159,7 @@ export function buildSanitizedRuntime(
     let sources: readonly string[];
     let directory: string;
     let args: string[];
-    if (name === "quickjs") {
-      sources = QJS_ENGINE_SOURCES;
-      directory = quickjs;
-      args = [
-        "-std=gnu11",
-        "-fvisibility=hidden",
-        "-funsigned-char",
-        "-DQUICKJS_NG_BUILD",
-        "-D_GNU_SOURCE",
-        "-DNDEBUG",
-        "-I",
-        quickjs,
-      ];
-    } else if (name === "libregexp") {
+    if (name === "libregexp") {
       sources = LRE_SOURCES;
       directory = quickjs;
       args = ["-std=c11", "-I", quickjs];

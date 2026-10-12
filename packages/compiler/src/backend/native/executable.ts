@@ -81,21 +81,16 @@ import {
 import {
   currentVendorCacheBuildIdentity,
   vendorBuildCacheRoot,
-  engineArchivePath,
   tlsArchivePath,
   lreObjectPaths,
   zlibObjectPaths,
-  curlStubDirPath,
-  ensureEngineArchive,
   stageVendorInputs,
   ensureTlsArchive,
   ensureLreObjects,
   ensureZlibObjects,
-  ensureCurlStub,
   vendorEngineDir,
   vendorZlibDir,
   vendorTlsDir,
-  vendorCurlDir,
 } from "./vendor.js";
 import { execFileAsync, subprocessFailureDetail, CcCompileError } from "./process.js";
 import { implicitLinkerFingerprint } from "./linker-fingerprint.js";
@@ -103,21 +98,6 @@ import { CacheInputsChangedError } from "./session.js";
 import { ensureRuntimeObjects, stageRuntimeObjects, clearCcCaches } from "./runtime-objects.js";
 import { localizeLibraryObjects } from "./object-merge.js";
 
-/** Compiles one C program together with the runtime sources.
- * With caching disabled, the runtime (a dozen small files) is recompiled on
- * every build — no cached-archive staleness bugs. Sanitized dev builds compile
- * the program separately so its O0 setting does not slow the O1 runtime.
- * Other builds use one clang invocation. --dynamic additionally compiles
- * scr_island.c under SCR_DYNAMIC and links the cached engine archive (built
- * lazily, see above); regex-using programs additionally compile scr_regex.c
- * and link libregexp (the cached objects, or the archive's own copy under
- * --dynamic). Executable links use the target's section-elimination recipe
- * independently of those feature gates.
- *
- * With a caller-supplied dependency identity and an enabled cache root,
- * unchanged programs skip payload code generation/linking via the binary
- * cache after lightweight metadata probes, and misses link the program's own
- * TU against cached per-flavor runtime objects. */
 export async function compileCInternal(
   opts: CcOptions,
   cacheWarmOnly: boolean,
@@ -126,29 +106,14 @@ export async function compileCInternal(
   const rtDir = runtimeSrcDir();
   const sanitize = opts.sanitize ?? false;
   const optimization = opts.optimization ?? "release";
-  const dynamic = opts.dynamic ?? false;
-  if (opts.workers && (dynamic || targetPlatform(resolveCc()) === "wasi"))
+  if (opts.workers && targetPlatform(resolveCc()) === "wasi")
     throw new Error("worker threads require a native static executable");
   const regex = opts.regex ?? false;
-  // fetch's implementation switch: the default is the NATIVE bridge
-  // (scr_fetch.c over scr_net + scr_tls + scr_http's client parser +
-  // zlib — no libcurl anywhere), which implies the socket units into the
-  // link. SCRIPTC_FETCH_CURL=1 keeps the retired curl reference
-  // (scr_fetch_curl.c + system libcurl / the linux soname stub)
-  // compilable for one release as the flip's reference.
-  const fetchOn = opts.fetch ?? false;
-  // The retired curl bridge has only a SCR_DYNAMIC implementation.
-  // Static fetch always keeps the native runtime even when a developer
-  // has the comparison switch exported in their shell.
-  const curlFetch = dynamic && fetchOn && process.env["SCRIPTC_FETCH_CURL"] === "1";
-  const nativeFetch = fetchOn && !curlFetch;
-  // The island's node:http/https client bridge: embedded graphs that
-  // import those builtins get working clients over the same socket units
-  // (native-fetch builds always carry it — scr_fetch_install registers it).
-  const netIsland = dynamic && ((opts.netIsland ?? false) || nativeFetch);
-  const net = (opts.net ?? false) || nativeFetch || netIsland;
-  const http = (opts.http ?? false) || nativeFetch || netIsland;
-  const tls = (opts.tls ?? false) || nativeFetch || netIsland;
+  // Fetch shares the native network, TLS, HTTP, and zlib runtime.
+  const nativeFetch = opts.fetch ?? false;
+  const net = (opts.net ?? false) || nativeFetch;
+  const http = (opts.http ?? false) || nativeFetch;
+  const tls = (opts.tls ?? false) || nativeFetch;
   const tlsCa = (opts.tlsCa ?? false) || tls;
   const driver = resolveCc();
   const darwinDebugSymbols = needsDarwinDebugSymbols(
@@ -195,42 +160,6 @@ export async function compileCInternal(
   // POSIX drivers need the thread compile/link mode; win32 uses CreateThread.
   const threadArgs =
     targetPlatform(driver) === "win32" || targetPlatform(driver) === "wasi" ? [] : ["-pthread"];
-  if (driver.target !== null) {
-    // See the resolveCc block: these inputs are built on and for the HOST
-    // (vendored archives, system libs). Regex, zlib, and the engine archive
-    // are NOT here: their vendored sources are plain C that ensureLreObjects
-    // / ensureZlibObjects / buildEngineArchiveDirect compile per target with
-    // the driver itself — win32 included (the Windows lane runs the
-    // @dynamic corpus and the zlib program against the box's Node). The
-    // NATIVE fetch rides the socket units and cross-compiles with them —
-    // no gate; only the retired curl REFERENCE (SCRIPTC_FETCH_CURL=1)
-    // keeps a linux-only arm (the vendored curl headers + the generated
-    // soname stub, ensureCurlStub — win32 has no system libcurl contract
-    // to bind at load time). The event-loop units, tls, and dgram cross-compile to Linux
-    // AND Windows (scr_platform.h poller + per-target mbedTLS; the
-    // loop's win32 arm is WSAPoll, scr_loop_wsapoll.c, and the socket
-    // units' win32 arms respell winsock behind POSIX-errno wrappers —
-    // scr_net.c/scr_dgram.c/scr_tls.c). The events unit cross-compiles
-    // everywhere: its win32 arm is CRT signal() +
-    // PeekNamedPipe/WaitForSingleObject probes (scr_events.c), served by
-    // the loop's capped win32 idle sleep (scr_async.c).
-    const unsupported = (
-      [
-        // The NATIVE fetch cross-compiles wherever the socket units do
-        // (linux and win32 both); only the retired curl reference keeps
-        // its linux-only soname-stub arm.
-        ["fetch (SCRIPTC_FETCH_CURL)", curlFetch && targetPlatform(driver) !== "linux"],
-      ] as const
-    )
-      .filter(([, on]) => on)
-      .map(([name]) => name);
-    if (unsupported.length > 0) {
-      throw new Error(
-        `SCRIPTC_TARGET=${driver.target}: ${unsupported.join(", ")} not supported under a cross target yet ` +
-          `(host-built vendor archives / system libs — see docs/linux-port.md).`,
-      );
-    }
-  }
   const cachePolicy = toolchainEnvironmentCachePolicy();
   const configuredCacheRoot = cacheRootDir();
   const toolchainEnv = toolchainEnvironmentFingerprint();
@@ -422,20 +351,15 @@ export async function compileCInternal(
       ? null
       : join(tmpdir(), `scriptc-vendor-${process.pid}-${Math.random().toString(36).slice(2)}`);
   const vendorCacheRoot = transientVendorRoot ?? vendorBuildCacheRoot(persistentCache?.root);
-  // Every vendor output path is deterministic from pins, flags, driver, and
-  // target. Build the command/key from those paths now, but do not materialize
-  // them until a complete-binary lookup has missed.
-  let engineArchive = dynamic
-    ? engineArchivePath(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
-    : null;
   let tlsArchive = tls
     ? tlsArchivePath(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
     : null;
-  // --dynamic + regex shares the archive's libregexp (its host hooks and
+
   // ours would collide; see scr_regex.c) — the standalone objects are for
   // static builds only.
-  let lreObjects =
-    regex && !dynamic ? lreObjectPaths(sanitize, driver, vendorBuildIdentity, vendorCacheRoot) : [];
+  let lreObjects = regex
+    ? lreObjectPaths(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
+    : [];
   // Vendored zlib is the Zig story — default host-clang builds keep the exact
   // historical `-lz` system link (see CcOptions.zlib). The native fetch's
   // gzip decoder rides the same objects/link.
@@ -443,36 +367,13 @@ export async function compileCInternal(
     ((opts.zlib ?? false) || nativeFetch) && isZigDriver(driver)
       ? zlibObjectPaths(sanitize, driver, vendorBuildIdentity, vendorCacheRoot)
       : [];
-  // The libcurl import stub is likewise CROSS-only — host builds keep the
-  // exact historical system `-lcurl` link (see CcOptions.fetch). Curl
-  // reference builds only.
-  let curlStubDir =
-    curlFetch && driver.target !== null
-      ? curlStubDirPath(driver, vendorBuildIdentity, vendorCacheRoot)
-      : null;
   const materializeVendorPrerequisites = async (
     stageRoot?: string,
     materializeCacheRoot: string = vendorCacheRoot,
   ): Promise<void> => {
     // Preserve source order to avoid multiplying first-build resource
     // pressure when several large vendor sets are cold simultaneously.
-    if (dynamic) {
-      const cachedArchive = engineArchivePath(
-        sanitize,
-        driver,
-        vendorBuildIdentity,
-        materializeCacheRoot,
-      );
-      protectCachedArtifact(cacheWarmPaths, cachedArchive);
-      const materialize = async (): Promise<string[]> => [
-        await ensureEngineArchive(sanitize, driver, vendorBuildIdentity, materializeCacheRoot),
-      ];
-      const paths =
-        stageRoot === undefined
-          ? await materialize()
-          : await stageVendorInputs(materialize, join(stageRoot, "engine"));
-      engineArchive = paths[0]!;
-    }
+
     if (tls) {
       const cachedArchive = tlsArchivePath(
         sanitize,
@@ -490,7 +391,7 @@ export async function compileCInternal(
           : await stageVendorInputs(materialize, join(stageRoot, "tls"));
       tlsArchive = paths[0]!;
     }
-    if (regex && !dynamic) {
+    if (regex) {
       for (const object of lreObjectPaths(
         sanitize,
         driver,
@@ -519,20 +420,6 @@ export async function compileCInternal(
         stageRoot === undefined
           ? await materialize()
           : await stageVendorInputs(materialize, join(stageRoot, "zlib"));
-    }
-    if (curlStubDir !== null) {
-      protectCachedArtifact(
-        cacheWarmPaths,
-        join(curlStubDirPath(driver, vendorBuildIdentity, materializeCacheRoot), "libcurl.so"),
-      );
-      const materialize = async (): Promise<string[]> => [
-        join(await ensureCurlStub(driver, vendorBuildIdentity, materializeCacheRoot), "libcurl.so"),
-      ];
-      const paths =
-        stageRoot === undefined
-          ? await materialize()
-          : await stageVendorInputs(materialize, join(stageRoot, "curl"));
-      curlStubDir = dirname(paths[0]!);
     }
   };
   // rt() maps each runtime source's path on the command line: identity for
@@ -614,10 +501,9 @@ export async function compileCInternal(
           ? ["-I", vendorZlibDir(), ...zlibObjects]
           : []
         : []),
-    // The zlib ↔ island bridge: only when BOTH halves are in the build
-    // (the scr_inspect_island.c pattern) — the emitted main calls its
+
+    // through the native installation hooks — the emitted main calls its
     // installer exactly then.
-    ...(opts.zlib && opts.dynamic ? [rt(join(rtDir, "scr_zlib_island.c"))] : []),
     ...(opts.events ? [rt(join(rtDir, "scr_events.c")), rt(join(rtDir, "scr_readline.c"))] : []),
     ...(opts.emitter || opts.workers ? [rt(join(rtDir, "scr_events_emitter.c"))] : []),
     // The checked-dynamic HANDLE support unit (listener gate + runtime
@@ -673,57 +559,8 @@ export async function compileCInternal(
     // This is independent of the mbedTLS archive: getCACertificates-only
     // programs need crypt32 too, while TLS programs imply the CA unit.
     ...(tlsCa && targetPlatform(driver) === "win32" ? ["-lcrypt32"] : []),
-    // Static fetch is the engine-free half of scr_fetch.c. Dynamic builds
-    // compile the same source beside scr_island.c below, where its
-    // SCR_DYNAMIC half installs the full web surface.
-    ...(nativeFetch && !dynamic ? [rt(join(rtDir, "scr_fetch.c"))] : []),
-    ...(engineArchive
-      ? [
-          "-DSCR_DYNAMIC",
-          "-I",
-          vendorEngineDir(),
-          rt(join(rtDir, "scr_island.c")),
-          rt(join(rtDir, "scr_web.c")),
-          // The one unit referencing BOTH the island and the inspect
-          // engine (insp.jsval): linked exactly when both halves are.
-          ...(opts.inspect ? [rt(join(rtDir, "scr_inspect_island.c"))] : []),
-          // fetch: the NATIVE bridge by default (its socket/tls/zlib
-          // dependencies joined the link above); the curl REFERENCE
-          // (SCRIPTC_FETCH_CURL=1) keeps the historical system -lcurl /
-          // linux soname-stub arms for one release.
-          ...(nativeFetch ? [rt(join(rtDir, "scr_fetch.c"))] : []),
-          // The island's node:http/https CLIENT bridge (scr_net_island.c):
-          // the one TU referencing both the socket units and the engine —
-          // compiled beside the native fetch (scr_fetch_install registers
-          // it) and whenever the embedded graph imports node:http/https
-          // (the emitted main calls scr_net_island_install exactly then).
-          ...(netIsland ? [rt(join(rtDir, "scr_net_island.c"))] : []),
-          ...(curlFetch
-            ? curlStubDir !== null
-              ? [
-                  "-I",
-                  join(vendorCurlDir(), "include"),
-                  rt(join(rtDir, "scr_fetch_curl.c")),
-                  `-L${curlStubDir}`,
-                  "-lcurl",
-                ]
-              : [rt(join(rtDir, "scr_fetch_curl.c")), "-lcurl"]
-            : []),
-          engineArchive,
-          // Linux's libm is appended after every input below for GNU ld's
-          // left-to-right archive resolution. Other dynamic targets keep
-          // the historical engine-adjacent spelling.
-          ...(driver.linkArgs.includes("-lm") ? [] : ["-lm"]),
-          // The PE stack reserve, pinned to the 8MB POSIX main-stack
-          // geometry ISL_MAIN_STACK_BUDGET is sized against (4MB engine
-          // budget + 4MB excursion margin) — quickjs-ng's own CMake makes
-          // the same 8MB choice on Windows. Not left to the driver:
-          // classic mingw ld defaults to 2MB (which the budget would blow
-          // straight past); zig's lld happens to default to 16MB today,
-          // but that is nobody's contract.
-          ...(targetPlatform(driver) === "win32" ? ["-Wl,--stack,8388608"] : []),
-        ]
-      : []),
+    // Fetch uses the native network, TLS, and HTTP runtime.
+    ...(nativeFetch ? [rt(join(rtDir, "scr_fetch.c"))] : []),
     // A .ll program TU (the LLVM backend) deliberately carries no target
     // triple (byte-stable output; clang supplies the host/SCRIPTC_TARGET
     // triple exactly as it does for .c) — silence the -Woverride-module
@@ -772,11 +609,9 @@ export async function compileCInternal(
     "-Wno-deprecated-declarations",
     "-I",
     rtDir,
-    ...(regex || dynamic ? ["-I", vendorEngineDir()] : []),
+    ...(regex ? ["-I", vendorEngineDir()] : []),
     ...(zlibObjects.length > 0 ? ["-I", vendorZlibDir()] : []),
-    ...(curlStubDir !== null ? ["-I", join(vendorCurlDir(), "include")] : []),
     ...(tlsArchive !== null ? ["-I", join(vendorTlsDir(), "include")] : []),
-    ...(dynamic ? ["-DSCR_DYNAMIC"] : []),
   ];
   // Keep sanitizer runtime objects optimized in both postures. Large dev
   // programs still compile at O0, avoiding an expensive LLVM optimization
@@ -987,24 +822,18 @@ export async function compileCInternal(
     ...(targetPlatform(driver) === "win32" ? ["-ladvapi32", "-liphlpapi", "-lws2_32"] : []),
     ...(tls && targetPlatform(driver) === "win32" ? ["-lbcrypt"] : []),
     ...(tlsCa && targetPlatform(driver) === "win32" ? ["-lcrypt32"] : []),
-    ...(curlFetch && driver.target === null ? ["-lcurl"] : []),
-    ...(dynamic && !driver.linkArgs.includes("-lm") ? ["-lm"] : []),
     ...(((opts.zlib ?? false) || nativeFetch) && !isZigDriver(driver) ? ["-lz"] : []),
     ...driver.linkArgs,
     ...executableLinkFlags,
   ];
   // Both the wrapper dry run and dependency trace need the real build's
   // compile/link flag shape: wrappers commonly inject flags or native inputs
-  // conditionally on optimization, sanitizer, dynamic, or platform switches.
+  // conditionally on optimization, sanitizer, or platform switches.
   const effectiveLinkInvocationArgs = [
     ...(separateSanitizedProgram ? cflags : programCompilerArgs),
     ...(targetPlatform(driver) === "win32" ? ["-ladvapi32", "-liphlpapi", "-lws2_32"] : []),
     ...(tls && targetPlatform(driver) === "win32" ? ["-lbcrypt"] : []),
     ...(tlsCa && targetPlatform(driver) === "win32" ? ["-lcrypt32"] : []),
-    ...(curlStubDir !== null ? [`-L${curlStubDir}`] : []),
-    ...(curlFetch && driver.target === null ? ["-lcurl"] : []),
-    ...(dynamic && !driver.linkArgs.includes("-lm") ? ["-lm"] : []),
-    ...(dynamic && targetPlatform(driver) === "win32" ? ["-Wl,--stack,8388608"] : []),
     ...(((opts.zlib ?? false) || nativeFetch) && !isZigDriver(driver) ? ["-lz"] : []),
     ...driver.linkArgs,
     ...executableLinkFlags,
@@ -1012,10 +841,7 @@ export async function compileCInternal(
   // A complete hit is checked before cross-target curl's generated import stub
   // is materialized. Its -L spelling still joins the dry-run identity, while
   // the real trace omits only that not-yet-existing scriptc-owned directory.
-  const linkTraceInvocationArgs =
-    curlStubDir === null
-      ? effectiveLinkInvocationArgs
-      : effectiveLinkInvocationArgs.filter((arg) => arg !== `-L${curlStubDir}`);
+  const linkTraceInvocationArgs = effectiveLinkInvocationArgs;
   let implicitLinker: string | null = null;
   let preBuildDependencies: NativeArtifactDependency[] | null = null;
   let localArtifactDependencyPaths: string[] | null = null;

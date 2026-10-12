@@ -22,14 +22,13 @@ const args = [
 ];
 
 for (const backend of ["llvm"] as const) {
-  test(`island process.argv preserves Unicode, quoting, empty values and identity (${backend})`, async () => {
+  test(`native process.argv preserves Unicode, quoting, empty values and identity (${backend})`, async () => {
     const dir = mkdtempSync(
-      join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-argv-island-"),
+      join(process.platform === "win32" ? tmpdir() : "/tmp", "scriptc-argv-native-"),
     );
     try {
       const built = await compile(entry, {
         backend,
-        dynamic: true,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
         optimization: "dev",
         outDir: dir,

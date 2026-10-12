@@ -17,10 +17,6 @@ export interface CompileBaseOptions {
    * The CLI's deprecated --emit-ir flag supplies this option. */
   emitIr?: boolean;
   sanitize?: boolean;
-  /** Embed the dynamic-island engine (--dynamic). Off = the static default:
-   * island constructs are diagnostics and nothing about codegen or linking
-   * changes. */
-  dynamic?: boolean;
   /** LLVM is the production code generator. */
   backend?: "llvm";
   /** Native optimization posture. Release is the shipped -O2 default; dev
@@ -39,15 +35,8 @@ export interface CompileBaseOptions {
    * executable mapped and the memory charged for up to ~100 ms after exit.
    * Executables only; no effect on other platforms. */
   detachedExit?: boolean;
-  /** --npm-static: package names whose shipped, unminified JS compiles
-   * STATICALLY as program modules (inference types the bodies; statements
-   * the lowering cannot prove become runtime fences). "auto" opts in every
-   * directly-imported package passing the eligibility heuristics (own
-   * .d.ts, unminified JS, no build-transform markers). A package whose
-   * preflight refuses marks itself an offender and falls back to the
-   * island (--dynamic) or the requires-dynamic diagnostic (static builds)
-   * — never a silent misbuild. Off by default: nothing changes without
-   * the flag. */
+
+  /** Eligible packages compile automatically. Explicit names override automatic selection heuristics. */
   npmStatic?: readonly string[] | "auto";
   /** Outbound native FFI manifest. Its signature-only TypeScript bindings
    * lower to direct C ABI calls. Source outputs retain those declarations;
@@ -161,12 +150,9 @@ export type CompileLibraryResult =
   | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
 
 export interface AnalyzeOptions {
-  /** Analyze as a --dynamic build (island constructs lower instead of
-   * producing requires-dynamic diagnostics). */
-  dynamic?: boolean;
   /** --npm-static (see CompileOptions.npmStatic): the analysis compiles
    * opted-in packages' JS as program modules and the coverage report
-   * carries each package's static/fallback status. */
+   * carries each package's native/refused status. */
   npmStatic?: readonly string[] | "auto";
   /** Analyze with the outbound native bindings from this FFI manifest. */
   ffiProfilePath?: string;

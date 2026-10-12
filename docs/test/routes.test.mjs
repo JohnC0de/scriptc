@@ -63,13 +63,13 @@ test("Markdown twins preserve examples and declare the HTML canonical URL", asyn
 });
 
 test("literal HTML tables and definition lists remain readable", async () => {
-  const intro = await (await get("/docs")).text();
-  assert.match(intro, /<table[ >]/);
+  const coverage = await (await get("/docs/coverage")).text();
+  assert.match(coverage, /<table[ >]/);
   const cli = await (await get("/docs/cli")).text();
   assert.match(cli, /<dl[ >]/);
   assert.match(cli, /<dt[ >]/);
   const markdown = await (await get("/docs/cli.md")).text();
-  assert.ok(markdown.includes("--dynamic"));
+  assert.ok(!markdown.includes("--dynamic"));
   assert.ok(markdown.includes("--external-types"));
 });
 

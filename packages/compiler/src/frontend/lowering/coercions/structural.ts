@@ -51,7 +51,7 @@ export function widthCoerce(lowerer: Lowerer, expr: IrExpr, expected: IrType): I
   if (expected.kind === "record" && expr.type.kind === "classval" && expr.kind === "classRef") {
     return lowerer.classStaticsProjection(expr.type.className, expected.shapeId, expr.loc);
   }
-  if (expected.kind === "array" && expr.type.kind === "array" && expected.elem.kind !== "jsval") {
+  if (expected.kind === "array" && expr.type.kind === "array") {
     const helper = lowerer.arrayWidthHelper(expr.type, expected, expr.loc);
     if (helper)
       return { kind: "call", callee: helper, args: [expr], type: expected, loc: expr.loc };
@@ -67,23 +67,13 @@ export function widthCoerce(lowerer: Lowerer, expr: IrExpr, expected: IrType): I
   // the arity for free; the monomorphic tuple REBUILDS as a fresh array,
   // each position's value lifted into the element type (the same copy
   // stance as every width coercion — later mutations don't alias).
-  if (expected.kind === "array" && expr.type.kind === "record" && expected.elem.kind !== "jsval") {
+  if (expected.kind === "array" && expr.type.kind === "record") {
     const helper = lowerer.tupleArrayWidthHelper(expr.type.shapeId, expected, expr.loc);
     if (!helper) return null;
     return { kind: "call", callee: helper, args: [expr], type: expected, loc: expr.loc };
   }
-  // An `any[]` slot: any liftable element becomes one island handle per
+
   // element (the messages-array pattern — records holding `any` content).
-  if (
-    expected.kind === "array" &&
-    expected.elem.kind === "jsval" &&
-    expr.type.kind === "array" &&
-    expr.type.elem.kind !== "jsval"
-  ) {
-    const helper = lowerer.arrayToJsvalArrayHelper(expr.type.elem, expr.loc);
-    if (!helper) return null;
-    return { kind: "call", callee: helper, args: [expr], type: expected, loc: expr.loc };
-  }
   return null;
 }
 

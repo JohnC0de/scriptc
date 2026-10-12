@@ -24,7 +24,7 @@ test.each([
   try {
     const entry = join(dir, "main.js");
     writeFileSync(entry, source);
-    const { coverage } = analyze(entry, { dynamic: false });
+    const { coverage } = analyze(entry, {});
     expect(coverage.preflightFailed).toBe(false);
     expect(
       [...coverage.diagnostics, ...(coverage.runtimeFences ?? [])].some(
@@ -93,7 +93,6 @@ for (const backend of ["llvm"] as const) {
         outDir: dir,
         outPath: join(dir, process.platform === "win32" ? "program.exe" : "program"),
         backend,
-        dynamic: false,
         sanitize: process.env["SCRIPTC_SAN"] === "1",
       });
       if (!built.ok)

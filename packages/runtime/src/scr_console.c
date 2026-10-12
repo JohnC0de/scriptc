@@ -43,12 +43,10 @@ extern long scr_map_live_count(void);     /* scr_map.c */
 extern long scr_box_live_count(void);     /* scr_closure.c */
 extern long scr_closure_live_count(void); /* scr_closure.c */
 extern long scr_obj_live_count(void);     /* scr_object.c */
+extern long scr_obj_lifetime_count(void); /* scr_object.c */
 extern long scr_union_live_count(void);   /* scr_union.c */
 extern long scr_dyn_live_count(void);     /* scr_json.c */
 extern long scr_bytes_live_count(void);   /* scr_bytes.c */
-#ifdef SCR_DYNAMIC
-extern long scr_jsval_live_count(void); /* scr_island.c */
-#endif
 
 static void scr_rc_audit_at_exit(void) {
   /* Fibers suspended forever at loop exhaustion (awaits nobody resolves —
@@ -57,6 +55,15 @@ static void scr_rc_audit_at_exit(void) {
   if (scr_abandoned_fibers > 0) {
     fprintf(stderr, "scriptc RC audit skipped: %ld fiber(s) never resumed\n",
             scr_abandoned_fibers);
+    return;
+  }
+  /* ProgramLifetime instances (@scriptc/types) are never freed, and neither
+   * is anything they hold: a strict audit would only report that deliberate
+   * retention. */
+  long lifetime = scr_obj_lifetime_count();
+  if (lifetime > 0) {
+    fprintf(stderr, "scriptc RC audit skipped: %ld program-lifetime object(s) never freed\n",
+            lifetime);
     return;
   }
   long strings = scr_str_live_count();
@@ -68,21 +75,15 @@ static void scr_rc_audit_at_exit(void) {
   long unions = scr_union_live_count();
   long dyns = scr_dyn_live_count();
   long bytes = scr_bytes_live_count();
-#ifdef SCR_DYNAMIC
-  long jsvals = scr_jsval_live_count();
-#else
-  long jsvals = 0;
-#endif
   if (strings != 0 || arrays != 0 || maps != 0 || boxes != 0 || closures != 0 ||
-      objects != 0 || unions != 0 || dyns != 0 || bytes != 0 || jsvals != 0) {
+      objects != 0 || unions != 0 || dyns != 0 || bytes != 0) {
     fflush(stdout);
     fprintf(stderr,
             "scriptc RC AUDIT FAILED: %ld heap string(s), %ld array(s), "
             "%ld map(s), %ld box(es), %ld closure(s), %ld object(s), "
-            "%ld union(s), %ld dyn value(s), %ld bytes value(s), "
-            "%ld island value(s) live at exit\n",
+            "%ld union(s), %ld dyn value(s), %ld bytes value(s) live at exit\n",
             strings, arrays, maps, boxes, closures, objects, unions, dyns,
-            bytes, jsvals);
+            bytes);
     _Exit(99);
   }
 }
@@ -125,7 +126,7 @@ static void scr_enable_utf8_console_output(void) {
 }
 #endif
 
-void scr_runtime_abi_v13(void) {}
+void scr_runtime_abi_v14(void) {}
 
 void scr_init(void) {
 #ifdef SCR_WORKERS

@@ -64,7 +64,7 @@ function moduleFor(
     loc,
   };
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     functions: [
@@ -270,7 +270,7 @@ const text = (obj: IrExpr): IrExpr => ({
 
 function work(expr: IrExpr, parameter: IrType, boxed = false, tdz = false): string {
   const module: IrModule = {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: receiverLoc.file,
     entry: "main",
     records: [
@@ -461,7 +461,7 @@ function sharedFieldModule(prefixes: IrType[][], fieldType: IrType): IrModule {
     ],
   }));
   return {
-    irVersion: 15,
+    irVersion: 16,
     sourceFile: loc.file,
     entry: "main",
     records,
